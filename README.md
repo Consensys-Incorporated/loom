@@ -11,7 +11,7 @@ Fiat-Shamir challenges, including lookup/permutation challenges, canonical trace
 ## Benchmarks
 
 Benchmarks are run on a MacBook pro apple M4 48GB, with 40x instances plonk-like traces of size 1<<14
-(cd bench && go run main.go -log2-size 14 -instances 40)
+(`cd bench && go run main.go -log2-size 14 -instances 40`)
 
 
 ### Poseidon2 backend (no SIMD)
@@ -43,6 +43,24 @@ merge-trace     33.375µs  0s        0.00x   0.0%  6.3 KiB    4       110.2 MiB 
 prove           1.73s     12.72s    7.34x   0.2%  3.04 GiB   62.55M  1.60 GiB   7
 -----           ----      ---      ---     ---    -----      ----    --------   ---
 TOTAL           1.91s     13.11s    6.85x   0.4%  3.73 GiB   64.11M  1.60 GiB   47
+
+cpu      = on-CPU time (user goroutines + GC); excludes idle
+par      = cpu / wall   (ideal: 14x = 14 cores fully busy; 1x = single-threaded)
+gc%      = GC CPU time / on-CPU time
+peakHeap = max HeapAlloc observed during phase (sampled in background)
+```
+
+### BLAKE3 backend
+
+```text
+phase           wall      cpu      par     gc%    alloc      objs   peakHeap   GCs
+-----           ----      ---      ---     ---    -----      ----   --------   ---
+traces+modules  193.7ms   416.3ms   2.15x   7.6%  676.2 MiB  1.54M  117.3 MiB  40
+compile         8.6ms     0s        0.00x   0.0%  31.4 MiB   22.1k  117.3 MiB  0
+merge-trace     34.208µs  0s        0.00x   0.0%  6.3 KiB    4      107.0 MiB  0
+prove           1.67s     8.97s     5.36x   0.7%  2.07 GiB   2.02M  1.36 GiB   5
+-----           ----      ---      ---     ---    -----      ----   --------   ---
+TOTAL           1.88s     9.39s     5.00x   1.0%  2.76 GiB   3.59M  1.36 GiB   45
 
 cpu      = on-CPU time (user goroutines + GC); excludes idle
 par      = cpu / wall   (ideal: 14x = 14 cores fully busy; 1x = single-threaded)
@@ -161,8 +179,9 @@ trees; `loom.Prove` overlays them with the per-instance witness trace.
 ## Hash backends
 
 Loom supports configurable hash backends. `Poseidon2` is the default and is the
-right backend for algebraic or recursive verification. `SHA-256` is available
-for non-recursive proving workflows where native hash performance is preferred.
+right backend for algebraic or recursive verification. `SHA-256` and `BLAKE3`
+are available for non-recursive proving workflows where native hash performance
+is preferred.
 
 The selected backend is part of the protocol identity: setup keys and proofs
 carry a `HashBackendID`, and the backend ID is bound into the Fiat-Shamir
