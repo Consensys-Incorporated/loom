@@ -11,7 +11,7 @@ Fiat-Shamir challenges, including lookup/permutation challenges, canonical trace
 ## Benchmarks
 
 Benchmarks are run on a MacBook pro apple M4 48GB, with 40x instances plonk-like traces of size 1<<14
-(`cd bench && go run main.go -log2-size 14 -instances 40`)
+(`cd bench && go run main.go -log2-size 14 -instances 40 -hash poseidon2 -queries 200`)
 
 
 ### Poseidon2 backend (no SIMD)
@@ -19,17 +19,20 @@ Benchmarks are run on a MacBook pro apple M4 48GB, with 40x instances plonk-like
 ```text
 phase           wall      cpu      par     gc%    alloc      objs   peakHeap   GCs
 -----           ----      ---      ---     ---    -----      ----   --------   ---
-traces+modules  196.3ms   407.4ms   2.08x   7.6%  674.7 MiB  1.54M  105.8 MiB  40
-compile         10.4ms    48.3ms    4.65x   2.9%  33.1 MiB   28.9k  105.8 MiB  1
-merge-trace     41.459µs  0s        0.00x   0.0%  6.3 KiB    4      103.4 MiB  0
-prove           4.49s     26.63s    5.94x   0.1%  2.03 GiB   53.8k  1.21 GiB   5
+traces+modules  195.5ms   421.5ms   2.16x   7.6%  676.0 MiB  1.54M  83.6 MiB   41
+compile         8.6ms     0s        0.00x   0.0%  31.5 MiB   22.2k  109.4 MiB  0
+merge-trace     31.917µs  0s        0.00x   0.0%  6.3 KiB    4      109.4 MiB  0
+prove           4.39s     25.46s    5.80x   0.1%  2.03 GiB   60.0k  1.20 GiB   5
+verify          181.5ms   0s        0.00x   0.0%  9.9 MiB    17.4k  77.5 MiB   0
 -----           ----      ---      ---     ---    -----      ----   --------   ---
-TOTAL           4.69s     27.08s    5.77x   0.2%  2.72 GiB   1.62M  1.21 GiB   46
+TOTAL           4.78s     25.88s    5.42x   0.2%  2.74 GiB   1.64M  1.20 GiB   46
 
 cpu      = on-CPU time (user goroutines + GC); excludes idle
 par      = cpu / wall   (ideal: 14x = 14 cores fully busy; 1x = single-threaded)
 gc%      = GC CPU time / on-CPU time
 peakHeap = max HeapAlloc observed during phase (sampled in background)
+
+proof: 3 commitments, 1 FRI levels, 200 query samplings
 ```
 
 ### Sha256 backend
@@ -37,12 +40,13 @@ peakHeap = max HeapAlloc observed during phase (sampled in background)
 ```text
 phase           wall      cpu      par     gc%    alloc      objs    peakHeap   GCs
 -----           ----      ---      ---     ---    -----      ----    --------   ---
-traces+modules  171.9ms   381.4ms   2.22x   7.5%  676.0 MiB  1.54M   89.6 MiB   40
-compile         8.4ms     0s        0.00x   0.0%  31.6 MiB   21.8k   110.2 MiB  0
-merge-trace     33.375µs  0s        0.00x   0.0%  6.3 KiB    4       110.2 MiB  0
-prove           1.73s     12.72s    7.34x   0.2%  3.04 GiB   62.55M  1.60 GiB   7
+traces+modules  172.2ms   361.6ms   2.10x   8.3%  674.3 MiB  1.54M   121.7 MiB  41
+compile         9.2ms     39.1ms    4.23x   2.9%  32.0 MiB   24.4k   121.7 MiB  1
+merge-trace     26.834µs  0s        0.00x   0.0%  6.3 KiB    4       104.1 MiB  0
+prove           1.75s     13.47s    7.71x   0.3%  3.04 GiB   62.55M  1.58 GiB   7
+verify          37.7ms    0s        0.00x   0.0%  22.2 MiB   531.4k  90.1 MiB   0
 -----           ----      ---      ---     ---    -----      ----    --------   ---
-TOTAL           1.91s     13.11s    6.85x   0.4%  3.73 GiB   64.11M  1.60 GiB   47
+TOTAL           1.97s     13.87s    7.05x   0.5%  3.76 GiB   64.65M  1.58 GiB   49
 
 cpu      = on-CPU time (user goroutines + GC); excludes idle
 par      = cpu / wall   (ideal: 14x = 14 cores fully busy; 1x = single-threaded)
@@ -53,19 +57,22 @@ peakHeap = max HeapAlloc observed during phase (sampled in background)
 ### BLAKE3 backend
 
 ```text
-phase           wall      cpu      par     gc%    alloc      objs   peakHeap   GCs
------           ----      ---      ---     ---    -----      ----   --------   ---
-traces+modules  193.7ms   416.3ms   2.15x   7.6%  676.2 MiB  1.54M  117.3 MiB  40
-compile         8.6ms     0s        0.00x   0.0%  31.4 MiB   22.1k  117.3 MiB  0
-merge-trace     34.208µs  0s        0.00x   0.0%  6.3 KiB    4      107.0 MiB  0
-prove           1.67s     8.97s     5.36x   0.7%  2.07 GiB   2.02M  1.36 GiB   5
------           ----      ---      ---     ---    -----      ----   --------   ---
-TOTAL           1.88s     9.39s     5.00x   1.0%  2.76 GiB   3.59M  1.36 GiB   45
+phase           wall     cpu      par     gc%    alloc      objs    peakHeap   GCs
+-----           ----     ---      ---     ---    -----      ----    --------   ---
+traces+modules  198.6ms  412.8ms   2.08x   7.7%  674.6 MiB  1.54M   110.0 MiB  40
+compile         10.1ms   50.6ms    5.03x   2.5%  33.0 MiB   28.7k   110.0 MiB  1
+merge-trace     30.75µs  0s        0.00x   0.0%  6.3 KiB    4       103.4 MiB  0
+prove           1.65s    9.68s     5.85x   0.1%  2.07 GiB   2.04M   1.22 GiB   5
+verify          42.9ms   0s        0.00x   0.0%  11.9 MiB   137.2k  79.8 MiB   0
+-----           ----     ---      ---     ---    -----      ----    --------   ---
+TOTAL           1.90s    10.14s    5.32x   0.4%  2.78 GiB   3.75M   1.22 GiB   46
 
 cpu      = on-CPU time (user goroutines + GC); excludes idle
 par      = cpu / wall   (ideal: 14x = 14 cores fully busy; 1x = single-threaded)
 gc%      = GC CPU time / on-CPU time
 peakHeap = max HeapAlloc observed during phase (sampled in background)
+
+proof: 3 commitments, 1 FRI levels, 200 query samplings
 ```
 
 ## Core concepts

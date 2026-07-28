@@ -35,11 +35,20 @@ type Config struct {
 	SkipFRI             bool
 	HashBackend         fri.HashBackend
 	NewTranscriptHasher fiatshamir.NewTranscriptHasher
-	FriGrinding         int
+	NumFriQueries       int
+	FriOptions          []fri.Option
 	Fs                  *fiatshamir.Transcript
 }
 
 type Option func(c *Config) error
+
+// WithNumFriQueries sets FRI NumQueries to numQueries
+func WithNumFriQueries(numQueries int) Option {
+	return func(c *Config) error {
+		c.NumFriQueries = numQueries
+		return nil
+	}
+}
 
 func SkipFRI() Option {
 	return func(c *Config) error {
@@ -70,10 +79,10 @@ func WithNewTranscriptHasher(h fiatshamir.NewTranscriptHasher) Option {
 	}
 }
 
-// WithFriGrinding adds nbBits of POW to FRI, to reduce the number of queries.
-func WithFriGrinding(nbBits int) Option {
+// WithFriOption adds options for FRI
+func WithFriOption(opt fri.Option) Option {
 	return func(c *Config) error {
-		c.FriGrinding = nbBits
+		c.FriOptions = append(c.FriOptions, opt)
 		return nil
 	}
 }
@@ -198,11 +207,7 @@ func newVerifierRuntime(program board.Program, verificationKey setup.Verificatio
 		}
 	}
 
-	if config.FriGrinding > 0 {
-		res.friParams, err = fri.NewParams(int(constants.RATE)*maxN, maxN, constants.NUM_QUERIES, hashBackend.LeafHasher, hashBackend.NodeHasher, fri.WoFullDomainAllocation(), fri.WithGrinding(config.FriGrinding))
-	} else {
-		res.friParams, err = fri.NewParams(int(constants.RATE)*maxN, maxN, constants.NUM_QUERIES, hashBackend.LeafHasher, hashBackend.NodeHasher, fri.WoFullDomainAllocation())
-	}
+	res.friParams, err = fri.NewParams(int(constants.RATE)*maxN, maxN, config.NumFriQueries, hashBackend.LeafHasher, hashBackend.NodeHasher, config.FriOptions...)
 	if err != nil {
 		return res, err
 	}
@@ -490,6 +495,10 @@ func (vr *verifierRunTime) runPCSVerify() error {
 func Verify(publicInputs public.Inputs, verificationKey setup.VerificationKey, program board.Program, proof proof.Proof, opts ...Option) error {
 
 	var config Config
+	config.NumFriQueries = constants.NUM_QUERIES
+	// The verifier never folds polynomials, so it doesn't need the full FFT
+	// twiddle tables — only the domain generator is used for path checks.
+	config.FriOptions = []fri.Option{fri.WoFullDomainAllocation()}
 	for _, opt := range opts {
 		err := opt(&config)
 		if err != nil {

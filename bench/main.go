@@ -35,11 +35,12 @@ import (
 	"github.com/consensys/loom/arguments"
 	"github.com/consensys/loom/board"
 	"github.com/consensys/loom/expr"
-	fiatshamir "github.com/consensys/loom/internal/fiat-shamir"
 	gnarkplonk "github.com/consensys/loom/integration_test/gnark_plonk"
+	fiatshamir "github.com/consensys/loom/internal/fiat-shamir"
 	"github.com/consensys/loom/prover"
 	"github.com/consensys/loom/setup"
 	"github.com/consensys/loom/trace"
+	"github.com/consensys/loom/verifier"
 )
 
 // Defaults are sized so that Prove runs for ~15-30s on a 16-32 core box: large
@@ -52,6 +53,7 @@ var (
 	hashName    = flag.String("hash", "poseidon2", "Merkle tree hash backend: poseidon2 | sha256 | blake3")
 	fsHashName  = flag.String("fs-hash", "poseidon2", "Fiat-Shamir transcript hasher: poseidon2 | sha256 | blake3")
 	profileDir  = flag.String("profile-dir", "bench_profiles", "directory to write pprof profiles")
+	numQueries  = flag.Int("queries", 32, "number of FRI queries")
 	skipFRI     = flag.Bool("skip-fri", false, "skip the FRI / sampling phase of Prove")
 	gomaxprocs  = flag.Int("gomaxprocs", 0, "override GOMAXPROCS (0 = leave default)")
 	sampleMs    = flag.Int("sample-ms", 50, "heap sampling interval (ms) for peak-heap tracking")
@@ -72,8 +74,8 @@ func main() {
 	procs := runtime.GOMAXPROCS(0)
 	n := 1 << *log2Size
 
-	fmt.Printf("loom bench   instances=%d  size=2^%d (=%d)  hash=%s  fs-hash=%s  GOMAXPROCS=%d  NumCPU=%d\n",
-		*nbInstances, *log2Size, n, *hashName, *fsHashName, procs, runtime.NumCPU())
+	fmt.Printf("loom bench   instances=%d  size=2^%d (=%d)  hash=%s  fs-hash=%s  queries=%d GOMAXPROCS=%d  NumCPU=%d\n",
+		*nbInstances, *log2Size, n, *hashName, *fsHashName, *numQueries, procs, runtime.NumCPU())
 	fmt.Printf("profiles ->  %s\n\n", *profileDir)
 
 	var phases []phaseReport
@@ -126,7 +128,7 @@ func main() {
 		fail("StartCPUProfile: %v", err)
 	}
 
-	opts := []prover.Option{prover.WithHashBackend(hashBackend), prover.WithNewTranscriptHasher(fsHasher)}
+	opts := []prover.Option{prover.WithNumFriQueries(*numQueries), prover.WithHashBackend(hashBackend), prover.WithNewTranscriptHasher(fsHasher)}
 	if *skipFRI {
 		opts = append(opts, prover.SkipFRI())
 	}
@@ -142,6 +144,15 @@ func main() {
 	cpuFile.Close()
 	dumpHeap(filepath.Join(*profileDir, "heap_after_prove.pprof"))
 	dumpProfile("allocs", filepath.Join(*profileDir, "allocs_after_prove.pprof"))
+
+	// ---- Phase 5: verify --------------------------------------------------
+	runtime.GC()
+	tr = newTracker("verify", *sampleMs)
+	optsVerifier := []verifier.Option{verifier.WithNumFriQueries(*numQueries), verifier.WithHashBackend(hashBackend), verifier.WithNewTranscriptHasher(fsHasher)}
+	if err = verifier.Verify(nil, setup.VerificationKey{}, program, prf, optsVerifier...); err != nil {
+		fail("Verify: %v", err)
+	}
+	phases = append(phases, tr.stop())
 
 	// ---- Report ----------------------------------------------------------
 	fmt.Println()

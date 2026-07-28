@@ -44,7 +44,8 @@ type Config struct {
 	HashBackend         fri.HashBackend
 	NewTranscriptHasher fiatshamir.NewTranscriptHasher
 	PhaseCallback       func(name string, d time.Duration)
-	FriGrinding         int
+	NumFriQueries       int
+	FriOptions          []fri.Option
 	Fs                  *fiatshamir.Transcript
 }
 
@@ -58,12 +59,18 @@ func WithTranscript(fs *fiatshamir.Transcript) Option {
 	}
 }
 
-// WithFriGrinding adds nbBits of POW to FRI, to reduce the number of queries.
-// TODO the following has to be confirmed:
-// security goes from log_blowup * num_queries to log_blowup * num_queries + query_proof_of_work_bits
-func WithFriGrinding(nbBits int) Option {
+// WithFriOption adds options for FRI
+func WithFriOption(opt fri.Option) Option {
 	return func(c *Config) error {
-		c.FriGrinding = nbBits
+		c.FriOptions = append(c.FriOptions, opt)
+		return nil
+	}
+}
+
+// WithNumFriQueries sets FRI NumQueries to numQueries
+func WithNumFriQueries(numQueries int) Option {
+	return func(c *Config) error {
+		c.NumFriQueries = numQueries
 		return nil
 	}
 }
@@ -185,11 +192,7 @@ func newProverRuntime(t trace.Trace, provingKey setup.ProvingKey, publicInputs p
 		}
 	}
 
-	if config.FriGrinding > 0 {
-		res.friParams, err = fri.NewParams(int(constants.RATE)*maxN, maxN, constants.NUM_QUERIES, hashBackend.LeafHasher, hashBackend.NodeHasher, fri.WithGrinding(config.FriGrinding))
-	} else {
-		res.friParams, err = fri.NewParams(int(constants.RATE)*maxN, maxN, constants.NUM_QUERIES, hashBackend.LeafHasher, hashBackend.NodeHasher)
-	}
+	res.friParams, err = fri.NewParams(int(constants.RATE)*maxN, maxN, config.NumFriQueries, hashBackend.LeafHasher, hashBackend.NodeHasher, config.FriOptions...)
 	if err != nil {
 		return res, err
 	}
@@ -278,10 +281,6 @@ func newProverRuntime(t trace.Trace, provingKey setup.ProvingKey, publicInputs p
 // pr.Proof.Commitments (which excludes the setup section).
 func (pr *proverRuntime) commitIdxOf(treeIdx int) int {
 	return treeIdx - pr.layout.SetupEnd
-}
-
-func liftBaseToExt(v koalabear.Element) ext.E6 {
-	return hash.LiftBaseToExt(v)
 }
 
 func liftPolynomialToExt(p poly.Polynomial) poly.ExtPolynomial {
@@ -688,6 +687,7 @@ func (pr *proverRuntime) runPCSClaimedValuesOnly() error {
 func Prove(t trace.Trace, provingKey setup.ProvingKey, publicInputs public.Inputs, program board.Program, opts ...Option) (proof.Proof, error) {
 
 	var config Config
+	config.NumFriQueries = constants.NUM_QUERIES
 	for _, opt := range opts {
 		err := opt(&config)
 		if err != nil {
