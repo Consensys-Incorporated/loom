@@ -40,18 +40,20 @@ proof: 3 commitments, 1 FRI levels, 200 query samplings
 ```text
 phase           wall      cpu      par     gc%    alloc      objs    peakHeap   GCs
 -----           ----      ---      ---     ---    -----      ----    --------   ---
-traces+modules  172.2ms   361.6ms   2.10x   8.3%  674.3 MiB  1.54M   121.7 MiB  41
-compile         9.2ms     39.1ms    4.23x   2.9%  32.0 MiB   24.4k   121.7 MiB  1
-merge-trace     26.834µs  0s        0.00x   0.0%  6.3 KiB    4       104.1 MiB  0
-prove           1.75s     13.47s    7.71x   0.3%  3.04 GiB   62.55M  1.58 GiB   7
-verify          37.7ms    0s        0.00x   0.0%  22.2 MiB   531.4k  90.1 MiB   0
+traces+modules  172.3ms   376.9ms   2.19x   8.2%  675.1 MiB  1.54M   106.0 MiB  41
+compile         8.6ms     0s        0.00x   0.0%  31.5 MiB   22.5k   128.8 MiB  0
+merge-trace     31.916µs  0s        0.00x   0.0%  6.3 KiB    4       128.9 MiB  0
+prove           1.74s     12.78s    7.36x   0.3%  3.04 GiB   62.55M  1.59 GiB   7
+verify          35.4ms    0s        0.00x   0.0%  22.2 MiB   531.2k  90.1 MiB   0
 -----           ----      ---      ---     ---    -----      ----    --------   ---
-TOTAL           1.97s     13.87s    7.05x   0.5%  3.76 GiB   64.65M  1.58 GiB   49
+TOTAL           1.95s     13.16s    6.73x   0.5%  3.76 GiB   64.65M  1.59 GiB   48
 
 cpu      = on-CPU time (user goroutines + GC); excludes idle
 par      = cpu / wall   (ideal: 14x = 14 cores fully busy; 1x = single-threaded)
 gc%      = GC CPU time / on-CPU time
 peakHeap = max HeapAlloc observed during phase (sampled in background)
+
+proof: 3 commitments, 1 FRI levels, 200 query samplings
 ```
 
 ### BLAKE3 backend
