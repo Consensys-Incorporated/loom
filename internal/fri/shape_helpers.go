@@ -191,16 +191,3 @@ func sizesDescFromSizes(sizes [][]int) []int {
 	sort.Sort(sort.Reverse(sort.IntSlice(sizesDesc)))
 	return sizesDesc
 }
-
-func ensureDistinctSizesPerBatch(sizes [][]int) error {
-	for b, batchSizes := range sizes {
-		seen := make(map[int]struct{}, len(batchSizes))
-		for g, N := range batchSizes {
-			if _, dup := seen[N]; dup {
-				return fmt.Errorf("fri: batch %d has duplicate Group size %d at index %d", b, N, g)
-			}
-			seen[N] = struct{}{}
-		}
-	}
-	return nil
-}

@@ -15,7 +15,6 @@ package fri
 
 import (
 	"fmt"
-	"math/big"
 	"sort"
 
 	"github.com/consensys/gnark-crypto/field/koalabear"
@@ -465,6 +464,57 @@ func checkFRIBridgeByPolynomial(
 	}
 
 	sizesDesc := sizesDescFromSizes(sizes)
+
+	// Precompute per-size generators and omega-shift tables so that
+	// koalabear.Generator (which internally calls Exp) and the per-shift Exp
+	// are not repeated once per query.
+	type sizePrecomp struct {
+		ratGen     koalabear.Element
+		omegaTable map[int]koalabear.Element // normalizedShift → traceGen^shift
+	}
+	sizePrecomps := make(map[int]sizePrecomp, len(sizesDesc))
+	for _, N := range sizesDesc {
+		ratN := int(pcs.rate) * N
+		ratGen, err := koalabear.Generator(uint64(ratN))
+		if err != nil {
+			return fmt.Errorf("fri: PCS.Verify: precompute ratGen for N=%d: %w", N, err)
+		}
+		traceGen, err := koalabear.Generator(uint64(N))
+		if err != nil {
+			return fmt.Errorf("fri: PCS.Verify: precompute traceGen for N=%d: %w", N, err)
+		}
+		omegaTable := make(map[int]koalabear.Element)
+		for b, batchSizes := range sizes {
+			for g, groupSize := range batchSizes {
+				if groupSize != N {
+					continue
+				}
+				gShifts := shifts[b][g]
+				for _, ss := range gShifts.Base {
+					for _, s := range ss {
+						ns := normalizeShift(s, N)
+						if _, ok := omegaTable[ns]; !ok {
+							var om koalabear.Element
+							om.ExpInt64(traceGen, int64(ns))
+							omegaTable[ns] = om
+						}
+					}
+				}
+				for _, ss := range gShifts.Ext {
+					for _, s := range ss {
+						ns := normalizeShift(s, N)
+						if _, ok := omegaTable[ns]; !ok {
+							var om koalabear.Element
+							om.ExpInt64(traceGen, int64(ns))
+							omegaTable[ns] = om
+						}
+					}
+				}
+			}
+		}
+		sizePrecomps[N] = sizePrecomp{ratGen: ratGen, omegaTable: omegaTable}
+	}
+
 	for q, sFull := range queryPositions {
 		for sizeIdx, N := range sizesDesc {
 			ratN := int(pcs.rate) * N
@@ -477,24 +527,16 @@ func checkFRIBridgeByPolynomial(
 
 			// X = omega_{rate*N}^bitrev(lo) (base), lifted; -X is the
 			// companion row hi under bit-reversed row ordering.
-			gen, err := koalabear.Generator(uint64(ratN))
-			if err != nil {
-				return fmt.Errorf("fri: PCS.Verify: koalabear.Generator(%d): %w", ratN, err)
-			}
+			sp := sizePrecomps[N]
 			var XBase, negXBase, hiBase koalabear.Element
-			XBase.ExpInt64(gen, int64(bitReverseIndex(lo, ratN)))
-			hiBase.ExpInt64(gen, int64(bitReverseIndex(hi, ratN)))
+			XBase.ExpInt64(sp.ratGen, int64(bitReverseIndex(lo, ratN)))
+			hiBase.ExpInt64(sp.ratGen, int64(bitReverseIndex(hi, ratN)))
 			negXBase.Neg(&XBase)
 			if !hiBase.Equal(&negXBase) {
 				return fmt.Errorf("fri: PCS.Verify: bridge row companion mismatch for ratN=%d lo=%d hi=%d", ratN, lo, hi)
 			}
 			X := hash.LiftBaseToExt(XBase)
 			negX := hash.LiftBaseToExt(negXBase)
-
-			traceGen, err := koalabear.Generator(uint64(N))
-			if err != nil {
-				return fmt.Errorf("fri: PCS.Verify: koalabear.Generator(%d): %w", N, err)
-			}
 
 			var DQ_P, DQ_Q ext.E6
 			var alphaRunning ext.E6
@@ -519,14 +561,14 @@ func checkFRIBridgeByPolynomial(
 					for i, ss := range gShifts.Base {
 						leafP := hash.LiftBaseToExt(raw.Lo.RawRowBase[i])
 						leafQ := hash.LiftBaseToExt(raw.Hi.RawRowBase[i])
-						addBridgePolynomialBundle(&DQ_P, &DQ_Q, ss, gValues.Base[i], alphaRunning, zeta, traceGen, N, leafP, leafQ, X, negX)
+						addBridgePolynomialBundle(&DQ_P, &DQ_Q, ss, gValues.Base[i], alphaRunning, zeta, sp.omegaTable, N, leafP, leafQ, X, negX)
 						alphaRunning.Mul(&alphaRunning, &alpha)
 					}
 					for i, ss := range gShifts.Ext {
 						var leafP, leafQ ext.E6
 						leafP.Set(&raw.Lo.RawRowExt[i])
 						leafQ.Set(&raw.Hi.RawRowExt[i])
-						addBridgePolynomialBundle(&DQ_P, &DQ_Q, ss, gValues.Ext[i], alphaRunning, zeta, traceGen, N, leafP, leafQ, X, negX)
+						addBridgePolynomialBundle(&DQ_P, &DQ_Q, ss, gValues.Ext[i], alphaRunning, zeta, sp.omegaTable, N, leafP, leafQ, X, negX)
 						alphaRunning.Mul(&alphaRunning, &alpha)
 					}
 				}
@@ -571,7 +613,7 @@ func addBridgePolynomialBundle(
 	values []ext.E6,
 	scale ext.E6,
 	zeta ext.E6,
-	traceGen koalabear.Element,
+	omegaTable map[int]koalabear.Element,
 	N int,
 	leafP ext.E6,
 	leafQ ext.E6,
@@ -580,8 +622,7 @@ func addBridgePolynomialBundle(
 ) {
 	var bundleP, bundleQ ext.E6
 	for k, s := range shifts {
-		var omegaShift koalabear.Element
-		omegaShift.Exp(traceGen, big.NewInt(int64(normalizeShift(s, N))))
+		omegaShift := omegaTable[normalizeShift(s, N)]
 		zs := zeta
 		zs.MulByElement(&zs, &omegaShift)
 
