@@ -16,12 +16,14 @@ package fri
 import (
 	"fmt"
 	"sort"
+	"sync/atomic"
 
 	"github.com/consensys/gnark-crypto/field/koalabear"
 	ext "github.com/consensys/gnark-crypto/field/koalabear/extensions"
 	"github.com/consensys/loom/field"
 	fiatshamir "github.com/consensys/loom/internal/fiat-shamir"
 	"github.com/consensys/loom/internal/hash"
+	"github.com/consensys/loom/internal/parallel"
 )
 
 // PCS.Verify checks an OpeningProof produced by PCS.Open against:
@@ -519,131 +521,162 @@ func checkFRIBridgeByPolynomial(
 		sizePrecomps[N] = sizePrecomp{ratGen: ratGen, omegaTable: omegaTable, totalShifts: totalShifts}
 	}
 
-	for q, sFull := range queryPositions {
-		for sizeIdx, N := range sizesDesc {
-			ratN := int(pcs.rate) * N
-			bitsReduced := log2(pcs.params.N) - log2(ratN)
-			if bitsReduced < 0 {
-				return fmt.Errorf("fri: PCS.Verify: bridge size %d has ratN=%d larger than max rows %d", N, ratN, pcs.params.N)
-			}
-			row := sFull >> bitsReduced
-			lo, hi := siblingRows(row)
-
-			// X = omega_{rate*N}^bitrev(lo) (base), lifted; -X is the
-			// companion row hi under bit-reversed row ordering.
-			sp := sizePrecomps[N]
-			var XBase, negXBase, hiBase koalabear.Element
-			XBase.ExpInt64(sp.ratGen, int64(bitReverseIndex(lo, ratN)))
-			hiBase.ExpInt64(sp.ratGen, int64(bitReverseIndex(hi, ratN)))
-			negXBase.Neg(&XBase)
-			if !hiBase.Equal(&negXBase) {
-				return fmt.Errorf("fri: PCS.Verify: bridge row companion mismatch for ratN=%d lo=%d hi=%d", ratN, lo, hi)
-			}
-			X := hash.LiftBaseToExt(XBase)
-			negX := hash.LiftBaseToExt(negXBase)
-
-			// Pass 1: fill all denominators for this (query, size) in poly-declaration order.
-			// denoms[2k]   = zeta*omega^s - X
-			// denoms[2k+1] = zeta*omega^s - negX
-			denoms := make([]ext.E6, 2*sp.totalShifts)
-			k := 0
-			for b, batchSizes := range sizes {
-				for g, groupSize := range batchSizes {
-					if groupSize != N {
-						continue
-					}
-					gShifts := shifts[b][g]
-					for _, ss := range gShifts.Base {
-						for _, s := range ss {
-							omegaShift := sp.omegaTable[normalizeShift(s, N)]
-							var zs ext.E6
-							zs.MulByElement(&zeta, &omegaShift)
-							denoms[2*k].Sub(&zs, &X)
-							denoms[2*k+1].Sub(&zs, &negX)
-							k++
-						}
-					}
-					for _, ss := range gShifts.Ext {
-						for _, s := range ss {
-							omegaShift := sp.omegaTable[normalizeShift(s, N)]
-							var zs ext.E6
-							zs.MulByElement(&zeta, &omegaShift)
-							denoms[2*k].Sub(&zs, &X)
-							denoms[2*k+1].Sub(&zs, &negX)
-							k++
-						}
-					}
-				}
-			}
-			invDenoms := ext.BatchInvertE6(denoms)
-
-			// Pass 2: accumulate DQ_P and DQ_Q using the batch-inverted denominators.
-			var DQ_P, DQ_Q ext.E6
-			var alphaRunning ext.E6
-			alphaRunning.SetOne()
-			k = 0
-			for b, batchSizes := range sizes {
-				for g, groupSize := range batchSizes {
-					if groupSize != N {
-						continue
-					}
-					injIdx := declToInjIdx(b, g)
-					if injIdx < 0 {
-						return fmt.Errorf("fri: PCS.Verify: cannot map (batch=%d, group=%d) to compact proof group index", b, g)
-					}
-					raw, err := rawRowsForGroup(proof.PointSamplings[q][b], injIdx)
-					if err != nil {
-						return fmt.Errorf("fri: PCS.Verify: compact proof group %d: %w", injIdx, err)
-					}
-					gShifts := shifts[b][g]
-					gValues := proof.ClaimedValues[b][g]
-					for i, ss := range gShifts.Base {
-						leafP := hash.LiftBaseToExt(raw.Lo.RawRowBase[i])
-						leafQ := hash.LiftBaseToExt(raw.Hi.RawRowBase[i])
-						accumulateBridgeBundle(ss, gValues.Base[i], alphaRunning, leafP, leafQ, invDenoms[2*k:], &DQ_P, &DQ_Q)
-						k += len(ss)
-						alphaRunning.Mul(&alphaRunning, &alpha)
-					}
-					for i, ss := range gShifts.Ext {
-						var leafP, leafQ ext.E6
-						leafP.Set(&raw.Lo.RawRowExt[i])
-						leafQ.Set(&raw.Hi.RawRowExt[i])
-						accumulateBridgeBundle(ss, gValues.Ext[i], alphaRunning, leafP, leafQ, invDenoms[2*k:], &DQ_P, &DQ_Q)
-						k += len(ss)
-						alphaRunning.Mul(&alphaRunning, &alpha)
-					}
-				}
-			}
-
-			var actualP, actualQ ext.E6
-			if sizeIdx == 0 {
-				layer := proof.FRIProof.FRIQueries[q].Layers[0]
-				if layer.Field != field.Ext {
-					return fmt.Errorf("fri: PCS.Verify: bridge query %d level 0: expected ext FRI layer, got %s", q, layer.Field)
-				}
-				actualP = layer.LeafPExt
-				actualQ = layer.LeafQExt
-			} else {
-				if sizeIdx-1 >= len(proof.FRIProof.LevelQueries) || q >= len(proof.FRIProof.LevelQueries[sizeIdx-1]) {
-					return fmt.Errorf("fri: PCS.Verify: bridge query %d level %d: missing LevelQueries entry", q, sizeIdx)
-				}
-				lq := proof.FRIProof.LevelQueries[sizeIdx-1][q]
-				if lq.Field != field.Ext {
-					return fmt.Errorf("fri: PCS.Verify: bridge query %d level %d: expected ext FRI level query, got %s", q, sizeIdx, lq.Field)
-				}
-				actualP = lq.LeafPExt
-				actualQ = lq.LeafQExt
-			}
-
-			if !DQ_P.Equal(&actualP) {
-				return fmt.Errorf("fri: PCS.Verify: bridge query %d level %d (N=%d): DQ(X) mismatch: got %s, want %s", q, sizeIdx, N, DQ_P.String(), actualP.String())
-			}
-			if !DQ_Q.Equal(&actualQ) {
-				return fmt.Errorf("fri: PCS.Verify: bridge query %d level %d (N=%d): DQ(-X) mismatch: got %s, want %s", q, sizeIdx, N, DQ_Q.String(), actualQ.String())
-			}
+	// Largest denom buffer needed: 2 entries per shift, for the largest size group.
+	maxTotalShifts := 0
+	for _, sp := range sizePrecomps {
+		if sp.totalShifts > maxTotalShifts {
+			maxTotalShifts = sp.totalShifts
 		}
 	}
 
+	// Each query is independent: it reads a disjoint slice of the proof
+	// (PointSamplings[q], FRIQueries[q], LevelQueries[*][q]) and writes only
+	// to goroutine-local accumulators. We parallelise over queries and collect
+	// the first failure via an atomic.
+	var bridgeErr atomic.Value
+	parallel.Execute(len(queryPositions), func(start, end int) {
+		// One denom scratch buffer per goroutine, reused across (q, N) iterations
+		// to avoid one allocation per inner loop iteration.
+		denomsBuf := make([]ext.E6, 2*maxTotalShifts)
+
+		for q := start; q < end; q++ {
+			sFull := queryPositions[q]
+			for sizeIdx, N := range sizesDesc {
+				ratN := int(pcs.rate) * N
+				bitsReduced := log2(pcs.params.N) - log2(ratN)
+				if bitsReduced < 0 {
+					bridgeErr.CompareAndSwap(nil, fmt.Errorf("fri: PCS.Verify: bridge size %d has ratN=%d larger than max rows %d", N, ratN, pcs.params.N))
+					return
+				}
+				row := sFull >> bitsReduced
+				lo, hi := siblingRows(row)
+
+				// X = omega_{rate*N}^bitrev(lo) (base), lifted; -X is the
+				// companion row hi under bit-reversed row ordering.
+				sp := sizePrecomps[N]
+				var XBase, negXBase, hiBase koalabear.Element
+				XBase.ExpInt64(sp.ratGen, int64(bitReverseIndex(lo, ratN)))
+				hiBase.ExpInt64(sp.ratGen, int64(bitReverseIndex(hi, ratN)))
+				negXBase.Neg(&XBase)
+				if !hiBase.Equal(&negXBase) {
+					bridgeErr.CompareAndSwap(nil, fmt.Errorf("fri: PCS.Verify: bridge row companion mismatch for ratN=%d lo=%d hi=%d", ratN, lo, hi))
+					return
+				}
+				X := hash.LiftBaseToExt(XBase)
+				negX := hash.LiftBaseToExt(negXBase)
+
+				// Pass 1: fill all denominators for this (query, size) in poly-declaration order.
+				// denoms[2k]   = zeta*omega^s - X
+				// denoms[2k+1] = zeta*omega^s - negX
+				denoms := denomsBuf[:2*sp.totalShifts]
+				k := 0
+				for b, batchSizes := range sizes {
+					for g, groupSize := range batchSizes {
+						if groupSize != N {
+							continue
+						}
+						gShifts := shifts[b][g]
+						for _, ss := range gShifts.Base {
+							for _, s := range ss {
+								omegaShift := sp.omegaTable[normalizeShift(s, N)]
+								var zs ext.E6
+								zs.MulByElement(&zeta, &omegaShift)
+								denoms[2*k].Sub(&zs, &X)
+								denoms[2*k+1].Sub(&zs, &negX)
+								k++
+							}
+						}
+						for _, ss := range gShifts.Ext {
+							for _, s := range ss {
+								omegaShift := sp.omegaTable[normalizeShift(s, N)]
+								var zs ext.E6
+								zs.MulByElement(&zeta, &omegaShift)
+								denoms[2*k].Sub(&zs, &X)
+								denoms[2*k+1].Sub(&zs, &negX)
+								k++
+							}
+						}
+					}
+				}
+				invDenoms := ext.BatchInvertE6(denoms)
+
+				// Pass 2: accumulate DQ_P and DQ_Q using the batch-inverted denominators.
+				var DQ_P, DQ_Q ext.E6
+				var alphaRunning ext.E6
+				alphaRunning.SetOne()
+				k = 0
+				for b, batchSizes := range sizes {
+					for g, groupSize := range batchSizes {
+						if groupSize != N {
+							continue
+						}
+						injIdx := declToInjIdx(b, g)
+						if injIdx < 0 {
+							bridgeErr.CompareAndSwap(nil, fmt.Errorf("fri: PCS.Verify: cannot map (batch=%d, group=%d) to compact proof group index", b, g))
+							return
+						}
+						raw, err := rawRowsForGroup(proof.PointSamplings[q][b], injIdx)
+						if err != nil {
+							bridgeErr.CompareAndSwap(nil, fmt.Errorf("fri: PCS.Verify: compact proof group %d: %w", injIdx, err))
+							return
+						}
+						gShifts := shifts[b][g]
+						gValues := proof.ClaimedValues[b][g]
+						for i, ss := range gShifts.Base {
+							leafP := hash.LiftBaseToExt(raw.Lo.RawRowBase[i])
+							leafQ := hash.LiftBaseToExt(raw.Hi.RawRowBase[i])
+							accumulateBridgeBundle(ss, gValues.Base[i], alphaRunning, leafP, leafQ, invDenoms[2*k:], &DQ_P, &DQ_Q)
+							k += len(ss)
+							alphaRunning.Mul(&alphaRunning, &alpha)
+						}
+						for i, ss := range gShifts.Ext {
+							var leafP, leafQ ext.E6
+							leafP.Set(&raw.Lo.RawRowExt[i])
+							leafQ.Set(&raw.Hi.RawRowExt[i])
+							accumulateBridgeBundle(ss, gValues.Ext[i], alphaRunning, leafP, leafQ, invDenoms[2*k:], &DQ_P, &DQ_Q)
+							k += len(ss)
+							alphaRunning.Mul(&alphaRunning, &alpha)
+						}
+					}
+				}
+
+				var actualP, actualQ ext.E6
+				if sizeIdx == 0 {
+					layer := proof.FRIProof.FRIQueries[q].Layers[0]
+					if layer.Field != field.Ext {
+						bridgeErr.CompareAndSwap(nil, fmt.Errorf("fri: PCS.Verify: bridge query %d level 0: expected ext FRI layer, got %s", q, layer.Field))
+						return
+					}
+					actualP = layer.LeafPExt
+					actualQ = layer.LeafQExt
+				} else {
+					if sizeIdx-1 >= len(proof.FRIProof.LevelQueries) || q >= len(proof.FRIProof.LevelQueries[sizeIdx-1]) {
+						bridgeErr.CompareAndSwap(nil, fmt.Errorf("fri: PCS.Verify: bridge query %d level %d: missing LevelQueries entry", q, sizeIdx))
+						return
+					}
+					lq := proof.FRIProof.LevelQueries[sizeIdx-1][q]
+					if lq.Field != field.Ext {
+						bridgeErr.CompareAndSwap(nil, fmt.Errorf("fri: PCS.Verify: bridge query %d level %d: expected ext FRI level query, got %s", q, sizeIdx, lq.Field))
+						return
+					}
+					actualP = lq.LeafPExt
+					actualQ = lq.LeafQExt
+				}
+
+				if !DQ_P.Equal(&actualP) {
+					bridgeErr.CompareAndSwap(nil, fmt.Errorf("fri: PCS.Verify: bridge query %d level %d (N=%d): DQ(X) mismatch: got %s, want %s", q, sizeIdx, N, DQ_P.String(), actualP.String()))
+					return
+				}
+				if !DQ_Q.Equal(&actualQ) {
+					bridgeErr.CompareAndSwap(nil, fmt.Errorf("fri: PCS.Verify: bridge query %d level %d (N=%d): DQ(-X) mismatch: got %s, want %s", q, sizeIdx, N, DQ_Q.String(), actualQ.String()))
+					return
+				}
+			}
+		}
+	})
+	if err, _ := bridgeErr.Load().(error); err != nil {
+		return err
+	}
 	return nil
 }
 
