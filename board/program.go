@@ -15,8 +15,8 @@ import (
 // Program the double slice [][] means that the steps are scheduled
 type Program struct {
 	Modules               map[string]CompiledModule
-	SetupColumns          []ColumnRef // setup columns, precommitted (ex: ql, qr, etc in plonk)
-	FScolumnsDependencies [][]ColumnRef
+	SetupColumns          []ColumnRef   // setup columns, precommitted (ex: ql, qr, etc in plonk)
+	FScolumnsDependencies [][]ColumnRef // one []ColumnRef per FS round
 	ColumnFields          map[string]field.Kind
 	LogupBus              []LogupBus
 	Steps                 [][]ProverStep

@@ -469,8 +469,9 @@ func checkFRIBridgeByPolynomial(
 	// koalabear.Generator (which internally calls Exp) and the per-shift Exp
 	// are not repeated once per query.
 	type sizePrecomp struct {
-		ratGen     koalabear.Element
-		omegaTable map[int]koalabear.Element // normalizedShift → traceGen^shift
+		ratGen      koalabear.Element
+		omegaTable  map[int]koalabear.Element // normalizedShift → traceGen^shift
+		totalShifts int                        // sum of len(shifts) for all polys of this N
 	}
 	sizePrecomps := make(map[int]sizePrecomp, len(sizesDesc))
 	for _, N := range sizesDesc {
@@ -484,6 +485,7 @@ func checkFRIBridgeByPolynomial(
 			return fmt.Errorf("fri: PCS.Verify: precompute traceGen for N=%d: %w", N, err)
 		}
 		omegaTable := make(map[int]koalabear.Element)
+		var totalShifts int
 		for b, batchSizes := range sizes {
 			for g, groupSize := range batchSizes {
 				if groupSize != N {
@@ -491,6 +493,7 @@ func checkFRIBridgeByPolynomial(
 				}
 				gShifts := shifts[b][g]
 				for _, ss := range gShifts.Base {
+					totalShifts += len(ss)
 					for _, s := range ss {
 						ns := normalizeShift(s, N)
 						if _, ok := omegaTable[ns]; !ok {
@@ -501,6 +504,7 @@ func checkFRIBridgeByPolynomial(
 					}
 				}
 				for _, ss := range gShifts.Ext {
+					totalShifts += len(ss)
 					for _, s := range ss {
 						ns := normalizeShift(s, N)
 						if _, ok := omegaTable[ns]; !ok {
@@ -512,7 +516,7 @@ func checkFRIBridgeByPolynomial(
 				}
 			}
 		}
-		sizePrecomps[N] = sizePrecomp{ratGen: ratGen, omegaTable: omegaTable}
+		sizePrecomps[N] = sizePrecomp{ratGen: ratGen, omegaTable: omegaTable, totalShifts: totalShifts}
 	}
 
 	for q, sFull := range queryPositions {
@@ -538,10 +542,46 @@ func checkFRIBridgeByPolynomial(
 			X := hash.LiftBaseToExt(XBase)
 			negX := hash.LiftBaseToExt(negXBase)
 
+			// Pass 1: fill all denominators for this (query, size) in poly-declaration order.
+			// denoms[2k]   = zeta*omega^s - X
+			// denoms[2k+1] = zeta*omega^s - negX
+			denoms := make([]ext.E6, 2*sp.totalShifts)
+			k := 0
+			for b, batchSizes := range sizes {
+				for g, groupSize := range batchSizes {
+					if groupSize != N {
+						continue
+					}
+					gShifts := shifts[b][g]
+					for _, ss := range gShifts.Base {
+						for _, s := range ss {
+							omegaShift := sp.omegaTable[normalizeShift(s, N)]
+							var zs ext.E6
+							zs.MulByElement(&zeta, &omegaShift)
+							denoms[2*k].Sub(&zs, &X)
+							denoms[2*k+1].Sub(&zs, &negX)
+							k++
+						}
+					}
+					for _, ss := range gShifts.Ext {
+						for _, s := range ss {
+							omegaShift := sp.omegaTable[normalizeShift(s, N)]
+							var zs ext.E6
+							zs.MulByElement(&zeta, &omegaShift)
+							denoms[2*k].Sub(&zs, &X)
+							denoms[2*k+1].Sub(&zs, &negX)
+							k++
+						}
+					}
+				}
+			}
+			invDenoms := ext.BatchInvertE6(denoms)
+
+			// Pass 2: accumulate DQ_P and DQ_Q using the batch-inverted denominators.
 			var DQ_P, DQ_Q ext.E6
 			var alphaRunning ext.E6
 			alphaRunning.SetOne()
-
+			k = 0
 			for b, batchSizes := range sizes {
 				for g, groupSize := range batchSizes {
 					if groupSize != N {
@@ -555,20 +595,21 @@ func checkFRIBridgeByPolynomial(
 					if err != nil {
 						return fmt.Errorf("fri: PCS.Verify: compact proof group %d: %w", injIdx, err)
 					}
-
 					gShifts := shifts[b][g]
 					gValues := proof.ClaimedValues[b][g]
 					for i, ss := range gShifts.Base {
 						leafP := hash.LiftBaseToExt(raw.Lo.RawRowBase[i])
 						leafQ := hash.LiftBaseToExt(raw.Hi.RawRowBase[i])
-						addBridgePolynomialBundle(&DQ_P, &DQ_Q, ss, gValues.Base[i], alphaRunning, zeta, sp.omegaTable, N, leafP, leafQ, X, negX)
+						accumulateBridgeBundle(ss, gValues.Base[i], alphaRunning, leafP, leafQ, invDenoms[2*k:], &DQ_P, &DQ_Q)
+						k += len(ss)
 						alphaRunning.Mul(&alphaRunning, &alpha)
 					}
 					for i, ss := range gShifts.Ext {
 						var leafP, leafQ ext.E6
 						leafP.Set(&raw.Lo.RawRowExt[i])
 						leafQ.Set(&raw.Hi.RawRowExt[i])
-						addBridgePolynomialBundle(&DQ_P, &DQ_Q, ss, gValues.Ext[i], alphaRunning, zeta, sp.omegaTable, N, leafP, leafQ, X, negX)
+						accumulateBridgeBundle(ss, gValues.Ext[i], alphaRunning, leafP, leafQ, invDenoms[2*k:], &DQ_P, &DQ_Q)
+						k += len(ss)
 						alphaRunning.Mul(&alphaRunning, &alpha)
 					}
 				}
@@ -606,40 +647,31 @@ func checkFRIBridgeByPolynomial(
 	return nil
 }
 
-func addBridgePolynomialBundle(
-	DQ_P *ext.E6,
-	DQ_Q *ext.E6,
+// accumulateBridgeBundle adds to DQ_P and DQ_Q the contribution of one
+// polynomial's shift bundle, using denominators that were already batch-inverted.
+// invDenoms must have at least 2*len(shifts) elements where:
+//
+//	invDenoms[2k]   = 1 / (zeta·ω^shifts[k] - X)
+//	invDenoms[2k+1] = 1 / (zeta·ω^shifts[k] - negX)
+func accumulateBridgeBundle(
 	shifts []int,
 	values []ext.E6,
 	scale ext.E6,
-	zeta ext.E6,
-	omegaTable map[int]koalabear.Element,
-	N int,
-	leafP ext.E6,
-	leafQ ext.E6,
-	X ext.E6,
-	negX ext.E6,
+	leafP, leafQ ext.E6,
+	invDenoms []ext.E6,
+	DQ_P, DQ_Q *ext.E6,
 ) {
 	var bundleP, bundleQ ext.E6
-	for k, s := range shifts {
-		omegaShift := omegaTable[normalizeShift(s, N)]
-		zs := zeta
-		zs.MulByElement(&zs, &omegaShift)
-
-		var num, denom ext.E6
+	for k := range shifts {
+		var num ext.E6
 		num.Sub(&values[k], &leafP)
-		denom.Sub(&zs, &X)
-		denom.Inverse(&denom)
-		num.Mul(&num, &denom)
+		num.Mul(&num, &invDenoms[2*k])
 		bundleP.Add(&bundleP, &num)
 
 		num.Sub(&values[k], &leafQ)
-		denom.Sub(&zs, &negX)
-		denom.Inverse(&denom)
-		num.Mul(&num, &denom)
+		num.Mul(&num, &invDenoms[2*k+1])
 		bundleQ.Add(&bundleQ, &num)
 	}
-
 	bundleP.Mul(&bundleP, &scale)
 	DQ_P.Add(DQ_P, &bundleP)
 	bundleQ.Mul(&bundleQ, &scale)
