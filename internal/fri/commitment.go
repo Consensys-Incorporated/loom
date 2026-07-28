@@ -457,43 +457,8 @@ func pairRowsForIndex(pairIdx int) (int, int) {
 	return lo, lo + 1
 }
 
-func rawRowPairWidths(pair RawRowPair) (int, int, error) {
-	baseWidth := len(pair.Lo.RawRowBase)
-	if got := len(pair.Hi.RawRowBase); got != baseWidth {
-		return 0, 0, fmt.Errorf("raw row pair base widths differ: lo=%d hi=%d", baseWidth, got)
-	}
-	extWidth := len(pair.Lo.RawRowExt)
-	if got := len(pair.Hi.RawRowExt); got != extWidth {
-		return 0, 0, fmt.Errorf("raw row pair ext widths differ: lo=%d hi=%d", extWidth, got)
-	}
-	return baseWidth, extWidth, nil
-}
-
-func flattenRawRowPair(pair RawRowPair, base []koalabear.Element, extLeaf []ext.E6) ([]koalabear.Element, []ext.E6) {
-	baseWidth, extWidth, err := rawRowPairWidths(pair)
-	if err != nil {
-		panic(err)
-	}
-
-	base = base[:0]
-	if cap(base) < 2*baseWidth {
-		base = make([]koalabear.Element, 0, 2*baseWidth)
-	}
-	base = append(base, pair.Lo.RawRowBase...)
-	base = append(base, pair.Hi.RawRowBase...)
-
-	extLeaf = extLeaf[:0]
-	if cap(extLeaf) < 2*extWidth {
-		extLeaf = make([]ext.E6, 0, 2*extWidth)
-	}
-	extLeaf = append(extLeaf, pair.Lo.RawRowExt...)
-	extLeaf = append(extLeaf, pair.Hi.RawRowExt...)
-	return base, extLeaf
-}
-
 func hashRawRowPair(leafHasher LeafHasher, pair RawRowPair) hash.Digest {
-	base, ext := flattenRawRowPair(pair, nil, nil)
-	return leafHasher.HashLeaf(base, ext)
+	return leafHasher.HashLeafPair(pair.Lo, pair.Hi)
 }
 
 // HashLeafPairsParallel hashes len(dst) adjacent row-pair leaves from src.
@@ -533,18 +498,24 @@ func hashLeafPairsBatchParallel(lh BatchPairLeafHasher, dst []hash.Digest, src L
 }
 
 func hashLeafPairsScalar(lh LeafHasher, dst []hash.Digest, src LeafSource, startPair int) {
-	baseLeaf := make([]koalabear.Element, 2*len(src.Base))
-	extLeaf := make([]ext.E6, 2*len(src.Ext))
+	nBase := len(src.Base)
+	nExt := len(src.Ext)
+	// Pre-allocate once; lo occupies [0:n], hi occupies [n:2n] in each buffer.
+	baseBuf := make([]koalabear.Element, 2*nBase)
+	extBuf := make([]ext.E6, 2*nExt)
 	for k := range dst {
 		lo, hi := pairRowsForIndex(startPair + k)
 		for j := range src.Base {
-			baseLeaf[j].Set(&src.Base[j][lo])
-			baseLeaf[len(src.Base)+j].Set(&src.Base[j][hi])
+			baseBuf[j].Set(&src.Base[j][lo])
+			baseBuf[nBase+j].Set(&src.Base[j][hi])
 		}
 		for j := range src.Ext {
-			extLeaf[j].Set(&src.Ext[j][lo])
-			extLeaf[len(src.Ext)+j].Set(&src.Ext[j][hi])
+			extBuf[j].Set(&src.Ext[j][lo])
+			extBuf[nExt+j].Set(&src.Ext[j][hi])
 		}
-		dst[k] = lh.HashLeaf(baseLeaf, extLeaf)
+		dst[k] = lh.HashLeafPair(
+			RawRow{RawRowBase: baseBuf[:nBase], RawRowExt: extBuf[:nExt]},
+			RawRow{RawRowBase: baseBuf[nBase:], RawRowExt: extBuf[nExt:]},
+		)
 	}
 }

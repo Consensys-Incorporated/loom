@@ -1118,7 +1118,10 @@ func verifyAdjacentBaseOpening(root hash.Digest, layer QueryLayer, context strin
 		return fmt.Errorf("%s: proof pair = %d, want %d", context, layer.Path.LeafIdx, pairIdx)
 	}
 
-	pairLeaf := p.LeafHasher.HashLeaf([]koalabear.Element{layer.LeafPBase, layer.LeafQBase}, nil)
+	pairLeaf := p.LeafHasher.HashLeafPair(
+		RawRow{RawRowBase: []koalabear.Element{layer.LeafPBase}},
+		RawRow{RawRowBase: []koalabear.Element{layer.LeafQBase}},
+	)
 	if !merkle.Verify(root, layer.Path, pairLeaf, p.NodeHasher) {
 		return fmt.Errorf("%s: Merkle proof invalid for row pair (%d,%d)", context, lo, hi)
 	}
@@ -1135,7 +1138,10 @@ func verifyAdjacentExtOpening(root hash.Digest, layer QueryLayer, context string
 		return fmt.Errorf("%s: proof pair = %d, want %d", context, layer.Path.LeafIdx, pairIdx)
 	}
 
-	pairLeaf := p.LeafHasher.HashLeaf(nil, []ext.E6{layer.LeafPExt, layer.LeafQExt})
+	pairLeaf := p.LeafHasher.HashLeafPair(
+		RawRow{RawRowExt: []ext.E6{layer.LeafPExt}},
+		RawRow{RawRowExt: []ext.E6{layer.LeafQExt}},
+	)
 	if !merkle.Verify(root, layer.Path, pairLeaf, p.NodeHasher) {
 		return fmt.Errorf("%s: Merkle proof invalid for row pair (%d,%d)", context, lo, hi)
 	}

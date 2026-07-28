@@ -8,12 +8,8 @@ import (
 
 //--------------- interfaces -----------------
 
-// BatchPairLeafHasher hashes consecutive adjacent row pairs into dst.
-// Pair k absorbs rows 2*k and 2*k+1 as
-//
-//	base(lo) || base(hi) || ext(lo) || ext(hi)
-//
-// through the same LeafHasher.HashLeaf interface used by single-row hashing.
+// BatchPairLeafHasher extends LeafHasher with a SIMD-width batch path.
+// Pair k absorbs rows 2*k and 2*k+1 as lo || hi.
 type BatchPairLeafHasher interface {
 	LeafHasher
 	BatchSize() int
@@ -21,7 +17,10 @@ type BatchPairLeafHasher interface {
 }
 
 type LeafHasher interface {
-	HashLeaf(base []koalabear.Element, ext []ext.E6) hash.Digest
+	// HashLeafPair hashes the (lo, hi) row pair that forms one Merkle leaf.
+	// Implementations must produce lo.base || hi.base || lo.ext || hi.ext
+	// in that element order, with length headers 2*nBase and 2*nExt.
+	HashLeafPair(lo, hi RawRow) hash.Digest
 }
 
 type NodeHasher interface {
@@ -37,13 +36,21 @@ var (
 // --------------- poseidon2 -----------------
 type Poseidon2LeafHasher struct{}
 
-func (Poseidon2LeafHasher) HashLeaf(base []koalabear.Element, ext []ext.E6) hash.Digest {
+func (Poseidon2LeafHasher) HashLeafPair(lo, hi RawRow) hash.Digest {
+	nBase := len(lo.RawRowBase)
+	nExt := len(lo.RawRowExt)
 	h := hash.NewPoseidon2SpongeHasher()
-	h.WriteElements(hash.NewElement(leafDomainTag), hash.NewElement(uint64(len(base))), hash.NewElement(uint64(len(ext))))
-	for _, v := range base {
+	h.WriteElements(hash.NewElement(leafDomainTag), hash.NewElement(uint64(2*nBase)), hash.NewElement(uint64(2*nExt)))
+	for _, v := range lo.RawRowBase {
 		h.WriteElements(v)
 	}
-	for _, v := range ext {
+	for _, v := range hi.RawRowBase {
+		h.WriteElements(v)
+	}
+	for _, v := range lo.RawRowExt {
+		h.WriteExt(v)
+	}
+	for _, v := range hi.RawRowExt {
 		h.WriteExt(v)
 	}
 	return h.Sum()
@@ -139,13 +146,21 @@ func (Poseidon2NodeHasher) HashNodes(dst, left, right []hash.Digest) {
 
 type SHA256LeafHasher struct{}
 
-func (SHA256LeafHasher) HashLeaf(base []koalabear.Element, ext []ext.E6) hash.Digest {
+func (SHA256LeafHasher) HashLeafPair(lo, hi RawRow) hash.Digest {
+	nBase := len(lo.RawRowBase)
+	nExt := len(lo.RawRowExt)
 	h := hash.NewSHA256FieldHasher()
-	h.WriteElements(hash.NewElement(leafDomainTag), hash.NewElement(uint64(len(base))), hash.NewElement(uint64(len(ext))))
-	for _, v := range base {
+	h.WriteElements(hash.NewElement(leafDomainTag), hash.NewElement(uint64(2*nBase)), hash.NewElement(uint64(2*nExt)))
+	for _, v := range lo.RawRowBase {
 		h.WriteElements(v)
 	}
-	for _, v := range ext {
+	for _, v := range hi.RawRowBase {
+		h.WriteElements(v)
+	}
+	for _, v := range lo.RawRowExt {
+		h.WriteExt(v)
+	}
+	for _, v := range hi.RawRowExt {
 		h.WriteExt(v)
 	}
 	return h.Sum()
@@ -169,13 +184,21 @@ func (SHA256NodeHasher) HashNode(left, right hash.Digest) hash.Digest {
 
 type Blake3LeafHasher struct{}
 
-func (Blake3LeafHasher) HashLeaf(base []koalabear.Element, extElems []ext.E6) hash.Digest {
+func (Blake3LeafHasher) HashLeafPair(lo, hi RawRow) hash.Digest {
+	nBase := len(lo.RawRowBase)
+	nExt := len(lo.RawRowExt)
 	h := hash.NewBlake3FieldHasher()
-	h.WriteElements(hash.NewElement(leafDomainTag), hash.NewElement(uint64(len(base))), hash.NewElement(uint64(len(extElems))))
-	for _, v := range base {
+	h.WriteElements(hash.NewElement(leafDomainTag), hash.NewElement(uint64(2*nBase)), hash.NewElement(uint64(2*nExt)))
+	for _, v := range lo.RawRowBase {
 		h.WriteElements(v)
 	}
-	for _, v := range extElems {
+	for _, v := range hi.RawRowBase {
+		h.WriteElements(v)
+	}
+	for _, v := range lo.RawRowExt {
+		h.WriteExt(v)
+	}
+	for _, v := range hi.RawRowExt {
 		h.WriteExt(v)
 	}
 	return h.Sum()
@@ -191,23 +214,3 @@ func (Blake3NodeHasher) HashNode(left, right hash.Digest) hash.Digest {
 	return h.Sum()
 }
 
-//----------------- helpers-----------------
-
-func hashLeavesScalar(lh LeafHasher, dst []hash.Digest, src LeafSource, start int) {
-	baseLeaf := make([]koalabear.Element, len(src.Base))
-	extLeaf := make([]ext.E6, len(src.Ext))
-	for k := range dst {
-		i := start + k
-		if len(src.Base) > 0 {
-			for j := range src.Base {
-				baseLeaf[j].Set(&src.Base[j][i])
-			}
-		}
-		if len(src.Ext) > 0 {
-			for j := range src.Ext {
-				extLeaf[j].Set(&src.Ext[j][i])
-			}
-		}
-		dst[k] = lh.HashLeaf(baseLeaf, extLeaf)
-	}
-}

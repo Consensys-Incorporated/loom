@@ -64,16 +64,16 @@ func main() {
 	var phases []phaseReport
 
 	tr := newTracker("Commit", *sampleMillis)
-	cpuFile := mustCreate("cpu_prove.pprof")
-	if err := pprof.StartCPUProfile(cpuFile); err != nil {
-		fail("StartCPUProfile: %v", err)
-	}
+	// cpuFile := mustCreate("cpu_prove.pprof")
+	// if err := pprof.StartCPUProfile(cpuFile); err != nil {
+	// 	fail("StartCPUProfile: %v", err)
+	// }
 	committed, err := pcs.Commit(batch, fri.WithDomainCache(&domainCache))
 	if err != nil {
 		fail("Commit: %v", err)
 	}
-	pprof.StopCPUProfile()
-	cpuFile.Close()
+	// pprof.StopCPUProfile()
+	// cpuFile.Close()
 	phases = append(phases, tr.stop())
 
 	roots := []hash.Digest{committed.Tree.Root()}
@@ -103,9 +103,15 @@ func main() {
 	// Drop trace-generation junk so the Verify heap snapshot is clean.
 	runtime.GC()
 	dumpHeap("heap_before_verify.pprof")
+	cpuFile := mustCreate("cpu_verify.pprof")
+	if err := pprof.StartCPUProfile(cpuFile); err != nil {
+		fail("StartCPUProfile: %v", err)
+	}
 	if err := pcs.Verify(roots, shapes, []fri.BatchShifts{shifts}, zeta, proof, verifierFS); err != nil {
 		fail("Verify: %v", err)
 	}
+	pprof.StopCPUProfile()
+	cpuFile.Close()
 	dumpHeap("heap_after_verify.pprof")
 	phases = append(phases, tr.stop())
 

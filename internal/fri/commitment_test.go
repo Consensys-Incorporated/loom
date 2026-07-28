@@ -219,7 +219,7 @@ func TestPairLeafHelpers(t *testing.T) {
 	}
 }
 
-func TestRawRowPairFlattening(t *testing.T) {
+func TestHashRawRowPair(t *testing.T) {
 	pair := RawRowPair{
 		Lo: RawRow{
 			RawRowBase: []koalabear.Element{baseElement(1), baseElement(2)},
@@ -231,27 +231,6 @@ func TestRawRowPairFlattening(t *testing.T) {
 		},
 	}
 
-	baseLeaf, extLeaf := flattenRawRowPair(pair, nil, nil)
-	if got, want := len(baseLeaf), 4; got != want {
-		t.Fatalf("flattened base length = %d, want %d", got, want)
-	}
-	if got, want := len(extLeaf), 2; got != want {
-		t.Fatalf("flattened ext length = %d, want %d", got, want)
-	}
-	for i, want := range []koalabear.Element{
-		pair.Lo.RawRowBase[0],
-		pair.Lo.RawRowBase[1],
-		pair.Hi.RawRowBase[0],
-		pair.Hi.RawRowBase[1],
-	} {
-		if baseLeaf[i] != want {
-			t.Fatalf("baseLeaf[%d] = %v, want %v", i, baseLeaf[i], want)
-		}
-	}
-	if extLeaf[0] != pair.Lo.RawRowExt[0] || extLeaf[1] != pair.Hi.RawRowExt[0] {
-		t.Fatalf("flattened ext leaf order mismatch")
-	}
-
 	for _, tc := range []struct {
 		name string
 		lh   LeafHasher
@@ -261,24 +240,11 @@ func TestRawRowPairFlattening(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := hashRawRowPair(tc.lh, pair)
-			want := tc.lh.HashLeaf(baseLeaf, extLeaf)
+			want := tc.lh.HashLeafPair(pair.Lo, pair.Hi)
 			if got != want {
 				t.Fatalf("hashRawRowPair digest mismatch")
 			}
 		})
-	}
-
-	if _, _, err := rawRowPairWidths(RawRowPair{
-		Lo: RawRow{RawRowBase: []koalabear.Element{baseElement(1)}},
-		Hi: RawRow{RawRowBase: []koalabear.Element{baseElement(2), baseElement(3)}},
-	}); err == nil {
-		t.Fatal("rawRowPairWidths should reject mismatched base widths")
-	}
-	if _, _, err := rawRowPairWidths(RawRowPair{
-		Lo: RawRow{RawRowExt: []ext.E6{extElement(1, 2, 3, 4)}},
-		Hi: RawRow{},
-	}); err == nil {
-		t.Fatal("rawRowPairWidths should reject mismatched ext widths")
 	}
 }
 
@@ -812,8 +778,8 @@ type scalarOnlyLeafHasher struct {
 	inner LeafHasher
 }
 
-func (h scalarOnlyLeafHasher) HashLeaf(base []koalabear.Element, ext []ext.E6) hash.Digest {
-	return h.inner.HashLeaf(base, ext)
+func (h scalarOnlyLeafHasher) HashLeafPair(lo, hi RawRow) hash.Digest {
+	return h.inner.HashLeafPair(lo, hi)
 }
 
 func testLeafSource(nLeaves, nbBase, nbExt int) LeafSource {
