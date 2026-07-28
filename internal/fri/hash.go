@@ -69,33 +69,25 @@ func (lh Poseidon2LeafHasher) HashLeafPairs(dst []hash.Digest, src LeafSource, s
 	}
 }
 
-func (lh Poseidon2LeafHasher) hashLeaves(dst []hash.Digest, src LeafSource, start int) {
-	if len(dst) < hash.Poseidon2SpongeBatchSize {
-		hashLeavesScalar(lh, dst, src, start)
-		return
-	}
-
-	fullBatches := len(dst) / hash.Poseidon2SpongeBatchSize
-	for batch := 0; batch < fullBatches; batch++ {
-		offset := batch * hash.Poseidon2SpongeBatchSize
-		lh.hashLeavesBatch16(dst[offset:offset+hash.Poseidon2SpongeBatchSize], src, start+offset)
-	}
-	if tail := fullBatches * hash.Poseidon2SpongeBatchSize; tail < len(dst) {
-		hashLeavesScalar(lh, dst[tail:], src, start+tail)
-	}
-}
-
-func (lh Poseidon2LeafHasher) hashLeavesBatch16(dst []hash.Digest, src LeafSource, start int) {
+func (lh Poseidon2LeafHasher) hashLeafPairsBatch16(dst []hash.Digest, src LeafSource, startPair int) {
 	sponge := hash.NewPoseidon2SpongeBatch16()
 	sponge.WriteSameElement(hash.NewElement(leafDomainTag))
-	sponge.WriteSameElement(hash.NewElement(uint64(len(src.Base))))
-	sponge.WriteSameElement(hash.NewElement(uint64(len(src.Ext))))
+	sponge.WriteSameElement(hash.NewElement(uint64(2 * len(src.Base))))
+	sponge.WriteSameElement(hash.NewElement(uint64(2 * len(src.Ext))))
 
 	for _, pol := range src.Base {
 		var row [hash.Poseidon2SpongeBatchSize]koalabear.Element
 		for lane := 0; lane < hash.Poseidon2SpongeBatchSize; lane++ {
-			i := start + lane
-			row[lane].Set(&pol[i])
+			lo, _ := pairRowsForIndex(startPair + lane)
+			row[lane].Set(&pol[lo])
+		}
+		sponge.WriteElementBatch(row)
+	}
+	for _, pol := range src.Base {
+		var row [hash.Poseidon2SpongeBatchSize]koalabear.Element
+		for lane := 0; lane < hash.Poseidon2SpongeBatchSize; lane++ {
+			_, hi := pairRowsForIndex(startPair + lane)
+			row[lane].Set(&pol[hi])
 		}
 		sponge.WriteElementBatch(row)
 	}
@@ -103,8 +95,16 @@ func (lh Poseidon2LeafHasher) hashLeavesBatch16(dst []hash.Digest, src LeafSourc
 	for _, pol := range src.Ext {
 		var row [hash.Poseidon2SpongeBatchSize]ext.E6
 		for lane := 0; lane < hash.Poseidon2SpongeBatchSize; lane++ {
-			i := start + lane
-			row[lane].Set(&pol[i])
+			lo, _ := pairRowsForIndex(startPair + lane)
+			row[lane].Set(&pol[lo])
+		}
+		sponge.WriteExtBatch(row)
+	}
+	for _, pol := range src.Ext {
+		var row [hash.Poseidon2SpongeBatchSize]ext.E6
+		for lane := 0; lane < hash.Poseidon2SpongeBatchSize; lane++ {
+			_, hi := pairRowsForIndex(startPair + lane)
+			row[lane].Set(&pol[hi])
 		}
 		sponge.WriteExtBatch(row)
 	}

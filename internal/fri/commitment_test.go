@@ -282,44 +282,6 @@ func TestRawRowPairFlattening(t *testing.T) {
 	}
 }
 
-func TestPoseidon2BatchLeafHasherMatchesScalarLeaves(t *testing.T) {
-	tests := []struct {
-		name    string
-		leaves  int
-		nbBase  int
-		nbExt   int
-		offset  int
-		wantEnd int
-	}{
-		{name: "small mixed fallback", leaves: 8, nbBase: 2, nbExt: 1},
-		{name: "exact base only", leaves: hash.Poseidon2SpongeBatchSize, nbBase: 3},
-		{name: "tail ext only", leaves: hash.Poseidon2SpongeBatchSize + 1, nbExt: 2},
-		{name: "multiple batches mixed", leaves: 2*hash.Poseidon2SpongeBatchSize + 1, nbBase: 4, nbExt: 2},
-		{name: "subrange", leaves: 2 * hash.Poseidon2SpongeBatchSize, nbBase: 2, nbExt: 2, offset: 3, wantEnd: hash.Poseidon2SpongeBatchSize + 5},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			src := testLeafSource(tt.leaves, tt.nbBase, tt.nbExt)
-			start := tt.offset
-			end := tt.wantEnd
-			if end == 0 {
-				end = tt.leaves
-			}
-			got := make([]hash.Digest, end-start)
-			DefaultLeafHasher.hashLeaves(got, src, start)
-
-			for k := range got {
-				i := start + k
-				baseLeaf, extLeaf := leafFromSource(src, i)
-				if want := DefaultLeafHasher.HashLeaf(baseLeaf, extLeaf); got[k] != want {
-					t.Fatalf("leaf %d: batched digest differs from scalar digest", i)
-				}
-			}
-		})
-	}
-}
-
 func TestHashLeafPairsParallelScalarFallback(t *testing.T) {
 	const pairs = hash.Poseidon2SpongeBatchSize + 3
 	src := testLeafSource(2*pairs, 2, 1)
