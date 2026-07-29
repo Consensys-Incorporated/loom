@@ -87,12 +87,9 @@ func Setup(t trace.Trace, program board.Program, opts ...Option) (ProvingKey, Ve
 		return pk, pk.VerificationKey(), nil
 	}
 
-	// Group setup columns by their owning module's domain size, then
-	// sort each group by name so the polynomial order inside the per-size
-	// commitment tree matches prover.BuildLayout (which sorts setup columns
-	// by name before assigning rail-local PolyIdx). Without this, the verifier's
-	// layout.ColSlot[name].PolyIdx points at the wrong polynomial in the
-	// setup tree.
+	// Group setup columns by size in decreasing order, matching BuildLayout.
+	// All sizes are committed into a single multi-group tree so the setup
+	// section occupies exactly one slot in the canonical layout.
 	colsByN := map[int][]board.ColumnRef{}
 	for _, c := range program.SetupColumns {
 		m, ok := program.Modules[c.Module]
@@ -107,21 +104,19 @@ func Setup(t trace.Trace, program board.Program, opts ...Option) (ProvingKey, Ve
 	}
 	sort.Sort(sort.Reverse(sort.IntSlice(sizes)))
 
-	committed := make([]fri.Committed, len(sizes))
-	var domainCache poly.DomainCache
-	pcs := fri.NewPCS(uint64(constants.RATE), hashBackend.LeafHasher, hashBackend.NodeHasher)
+	groups := make([]fri.Group, len(sizes))
 	for i, N := range sizes {
 		refs := colsByN[N]
 		sort.Slice(refs, func(i, j int) bool { return refs[i].Name < refs[j].Name })
-		basePublic := make([]poly.Polynomial, 0, len(refs))
-		extPublic := make([]poly.ExtPolynomial, 0, len(refs))
+		var basePolys []poly.Polynomial
+		var extPolys []poly.ExtPolynomial
 		for _, ref := range refs {
 			if ref.Field == field.Base {
 				p, ok := setupTrace.Base[ref.Name]
 				if !ok {
 					return ProvingKey{}, VerificationKey{}, fmt.Errorf("setup: base setup column %q not found", ref.Name)
 				}
-				basePublic = append(basePublic, p)
+				basePolys = append(basePolys, p)
 			}
 		}
 		for _, ref := range refs {
@@ -130,20 +125,19 @@ func Setup(t trace.Trace, program board.Program, opts ...Option) (ProvingKey, Ve
 				if !ok {
 					return ProvingKey{}, VerificationKey{}, fmt.Errorf("setup: extension setup column %q not found", ref.Name)
 				}
-				extPublic = append(extPublic, p)
+				extPolys = append(extPolys, p)
 			}
 		}
-		c, err := pcs.Commit(
-			[]fri.Group{{Base: basePublic, Ext: extPublic}},
-			fri.WithDomainCache(&domainCache),
-		)
-		if err != nil {
-			return ProvingKey{}, VerificationKey{}, err
-		}
-		committed[i] = c
+		groups[i] = fri.Group{Base: basePolys, Ext: extPolys}
 		_ = N
 	}
-	pk := ProvingKey{HashBackendID: hashBackend.ID, Trace: setupTrace, Setup: committed}
+	var domainCache poly.DomainCache
+	pcs := fri.NewPCS(uint64(constants.RATE), hashBackend.LeafHasher, hashBackend.NodeHasher)
+	c, err := pcs.Commit(groups, fri.WithDomainCache(&domainCache))
+	if err != nil {
+		return ProvingKey{}, VerificationKey{}, err
+	}
+	pk := ProvingKey{HashBackendID: hashBackend.ID, Trace: setupTrace, Setup: []fri.Committed{c}}
 	return pk, pk.VerificationKey(), nil
 }
 

@@ -121,6 +121,45 @@ func TestBuildLayoutBaseOnlySlotStability(t *testing.T) {
 	}
 }
 
+func TestBuildLayoutMixedSizeSetupUsesSingleTree(t *testing.T) {
+	program := board.Program{
+		Modules: map[string]board.CompiledModule{
+			"big":   {Name: "big", N: 8},
+			"small": {Name: "small", N: 4},
+		},
+		SetupColumns: []board.ColumnRef{
+			{Name: "pb", Module: "big", Field: field.Base},
+			{Name: "ps", Module: "small", Field: field.Base},
+		},
+	}
+
+	layout := BuildLayout(program, 0)
+
+	if got := layout.SetupEnd - layout.SetupBegin; got != 1 {
+		t.Fatalf("setup section has %d trees, want 1", got)
+	}
+	if got := layout.NumTrees; got != 1 {
+		t.Fatalf("NumTrees = %d, want 1", got)
+	}
+	if want := [][]TreeGroup{{{N: 8}, {N: 4}}}; !reflect.DeepEqual(layout.TreeGroups, want) {
+		t.Errorf("TreeGroups = %v, want %v", layout.TreeGroups, want)
+	}
+
+	wantColSlot := map[string]Slot{
+		"pb": {TreeIdx: 0, GroupIdx: 0, PolyIdx: 0, Field: field.Base},
+		"ps": {TreeIdx: 0, GroupIdx: 1, PolyIdx: 0, Field: field.Base},
+	}
+	for name, want := range wantColSlot {
+		got, ok := layout.ColSlot[name]
+		if !ok {
+			t.Fatalf("ColSlot[%q] missing", name)
+		}
+		if got != want {
+			t.Errorf("ColSlot[%q] = %+v, want %+v", name, got, want)
+		}
+	}
+}
+
 func TestBuildLayoutRailRelativePolyIdx(t *testing.T) {
 	baseRelation := dag.ExprToDAG(expr.Col("base_air"))
 	extRelation := dag.ExprToDAG(expr.ExtCol("ext_air"))

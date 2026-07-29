@@ -51,13 +51,11 @@ type TreeGroup struct {
 //
 // Tree order (flat):
 //
-//	[setup, decreasing N] [trace-round-0] … [trace-round-{r-1}] [AIR, decreasing N]
+//	[setup (0 or 1 tree)] [trace-round-0] … [trace-round-{r-1}] [AIR, decreasing N]
 //
 // Each non-empty trace round occupies one tree whose groups are ordered by
-// decreasing native size. Setup and AIR sections still use one tree per size.
-//
-// The setup section length is given by the proving/verification key (i.e. the
-// number of distinct sizes among program.SetupColumns).
+// decreasing native size. The setup section occupies at most one tree that
+// also uses multiple groups in decreasing-N order. AIR uses one tree per size.
 type Layout struct {
 	NumTrees int // total number of trees in the canonical order
 
@@ -70,8 +68,8 @@ type Layout struct {
 	AIRBegin   int
 	AIREnd     int // = NumTrees
 
-	// Per-tree group metadata. Trace trees can contain several groups in
-	// decreasing N; setup and AIR trees remain single-group.
+	// Per-tree group metadata. Trace and setup trees can contain several
+	// groups in decreasing N; AIR trees are single-group.
 	TreeGroups [][]TreeGroup
 
 	// Column-name → Slot for trace columns and setup public columns.
@@ -82,12 +80,9 @@ type Layout struct {
 }
 
 // BuildLayout builds the canonical commitment layout for a Prove/Verify run.
-// `numSetupSizes` is the number of distinct sizes among the program's public
-// columns (i.e. len(setup) on the prover side).
 //
-// The function is deterministic in `program` and `numSetupSizes`; it does not
-// look at the trace.
-func BuildLayout(program board.Program, numSetupSizes int) Layout {
+// The function is deterministic in `program`; it does not look at the trace.
+func BuildLayout(program board.Program, _ int) Layout {
 	var layout Layout
 	layout.ColSlot = make(map[string]Slot)
 	layout.AIRChunkSlot = make(map[string]Slot)
@@ -95,35 +90,40 @@ func BuildLayout(program board.Program, numSetupSizes int) Layout {
 	treeIdx := 0
 
 	// ---- Setup section ----
+	// All setup columns across all sizes share a single tree, with one group
+	// per distinct native size in decreasing order — mirroring the trace-round
+	// multi-group layout.
 	layout.SetupBegin = treeIdx
 	{
-		// Group setup columns by size, decreasing N.
 		colsByN := map[int][]board.ColumnRef{}
 		for _, c := range program.SetupColumns {
 			m, ok := program.Modules[c.Module]
-			if !ok { // TODO should raise an error here ?
+			if !ok {
 				continue
 			}
 			colsByN[m.N] = append(colsByN[m.N], c)
 		}
 		sizes := sortedSizesDesc(colsByN)
-		for _, N := range sizes {
-			cols := colsByN[N]
-			sort.Slice(cols, func(i, j int) bool { return cols[i].Name < cols[j].Name })
-			railIdx := map[field.Kind]int{}
-			for _, col := range cols {
-				polyIdx := nextRailPolyIdx(railIdx, col.Field)
-				layout.ColSlot[col.Name] = Slot{TreeIdx: treeIdx, GroupIdx: 0, PolyIdx: polyIdx, Field: col.Field}
+		if len(sizes) > 0 {
+			setupTreeIdx := treeIdx
+			groups := make([]TreeGroup, len(sizes))
+			for groupIdx, N := range sizes {
+				groups[groupIdx] = TreeGroup{N: N}
 			}
-			layout.TreeGroups = append(layout.TreeGroups, []TreeGroup{{N: N}})
+			layout.TreeGroups = append(layout.TreeGroups, groups)
+			for groupIdx, N := range sizes {
+				cols := colsByN[N]
+				sort.Slice(cols, func(i, j int) bool { return cols[i].Name < cols[j].Name })
+				railIdx := map[field.Kind]int{}
+				for _, col := range cols {
+					polyIdx := nextRailPolyIdx(railIdx, col.Field)
+					layout.ColSlot[col.Name] = Slot{TreeIdx: setupTreeIdx, GroupIdx: groupIdx, PolyIdx: polyIdx, Field: col.Field}
+				}
+			}
 			treeIdx++
 		}
 	}
 	layout.SetupEnd = treeIdx
-	// Sanity: caller said how many setup sizes there should be. If it
-	// disagrees with what we computed, prefer the caller's count for the
-	// purpose of slicing PointSamplings; but the slot table is what we built.
-	_ = numSetupSizes
 
 	// ---- Trace section, per FS round ----
 	numRounds := len(program.FScolumnsDependencies)
