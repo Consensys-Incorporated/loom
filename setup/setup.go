@@ -40,7 +40,7 @@ type ProvingKey struct {
 // VerificationKey is the verifier-side setup material.
 type VerificationKey struct {
 	HashBackendID string
-	Roots         []hash.Digest
+	Roots         []hash.Digest // size of at most 1, since the setup outputs a single tree. Leaving it a [] to identify the zero value of the setup
 }
 
 // VerificationKey returns the verifier-side roots corresponding to pk.
