@@ -242,11 +242,9 @@ func Compile(b *Builder) (Program, error) {
 
 	// Config: keep committed and shifted committed columns; discard virtual verifier-side leaves.
 	noLagrangeNoChallengeNoExposedCols := expr.NewConfig(
-		expr.WithoutLagrangeColumns(),
 		expr.WithoutChallenges(),
-		expr.WithoutExposedColumns(),
 		expr.WithoutSetupColumns(),
-		expr.WithoutPublicInputsColumns(),
+		expr.WithoutVerifierColumns(),
 	)
 
 	// Step 7a: Identify which levels are FS steps and assign round indices in level order.
@@ -415,7 +413,9 @@ func inferProgramColumnFields(program *Program, modules map[string]*Module) map[
 		setField(ref.Name, ref.Field)
 	}
 
-	columnConfig := expr.NewConfig(expr.WithoutLagrangeColumns(), expr.WithoutChallenges())
+	// VerifierColumns are included: FieldKind pins them to Ext, so every column
+	// the verifier evaluates at zeta is seeded as Ext here.
+	columnConfig := expr.NewConfig(expr.WithoutChallenges())
 	for _, m := range modules {
 		for _, rel := range m.Relations {
 			// Capture any explicitly-declared Ext leaves (e.g. via expr.ExtCol).

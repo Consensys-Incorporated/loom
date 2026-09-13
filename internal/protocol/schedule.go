@@ -91,10 +91,8 @@ type GroupKeys struct {
 // [chunkName]).
 func BuildCanonicalSchedule(program board.Program, layout Layout) CanonicalSchedule {
 	leafConfig := expr.NewConfig(
-		expr.WithoutLagrangeColumns(),
 		expr.WithoutChallenges(),
-		expr.WithoutExposedColumns(),
-		expr.WithoutPublicInputsColumns(),
+		expr.WithoutVerifierColumns(),
 	)
 
 	// 1- For every committed column referenced by some vanishing relation,

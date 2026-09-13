@@ -24,7 +24,6 @@ import (
 	fiatshamir "github.com/consensys/loom/internal/fiat-shamir"
 	"github.com/consensys/loom/internal/fri"
 	"github.com/consensys/loom/internal/hash"
-	"github.com/consensys/loom/internal/poly"
 	"github.com/consensys/loom/internal/protocol"
 	"github.com/consensys/loom/proof"
 	"github.com/consensys/loom/public"
@@ -319,72 +318,34 @@ func (vr *verifierRunTime) loadClaimedValues() error {
 	return nil
 }
 
-// TODO bind the exposed values to FS -> either we add a step to bind the exposed values alone to FS
-// OR we commit to the exposed columns, and use computeExposedColumns only to let the verifier recompute the exposed column at zeta
-// and check thatit matches the prover's exposed columns at zeta
-func (vr *verifierRunTime) computeExposedColumns() error {
+// computeVerifierColumns fills in every leaf the verifier evaluates at zeta
+// itself — Lagrange selectors, public inputs and prover-exposed values —
+// rather than reading it from a prover opening. Each such leaf carries an
+// expr.HookID naming the formula to use; the hook is resolved through HookMap.
+//
+// The hooks are mutually independent (none consumes another's output), so a
+// single pass in leaf order is equivalent to the three ordered passes this
+// replaces.
+func (vr *verifierRunTime) computeVerifierColumns() error {
+	config := expr.NewConfig(expr.OnlyVerifierColumns...)
 	for _, m := range vr.program.Modules {
-		leafs := m.VanishingRelation.Leaves(expr.NewConfig(expr.OnlyExposedColumns...))
-		for _, leaf := range leafs {
-			pi, ok := vr.proof.ExposedValues[leaf]
-			if !ok {
-				return fmt.Errorf("computeExposedColumns: %s not found in proof.ExposedValues", leaf)
-			}
-			var lag ext.E6
-			for _, pe := range pi.Entries {
-				tmp := poly.LagrangeAtZetaExt(vr.zeta, m.N, pe.Idx)
-				value := pe.ExtValue()
-				tmp.Mul(&tmp, &value)
-				lag.Add(&lag, &tmp)
-			}
-			vr.setValueAtZetaExt(leaf, lag)
-		}
-	}
-	return nil
-}
-
-func (vr *verifierRunTime) computeLagrange() error {
-	config := expr.OnlyLagranges
-	for _, m := range vr.program.Modules {
-		lags := m.VanishingRelation.Leaves(expr.NewConfig(config...))
-		for _, lag := range lags {
-			if _, ok := vr.valueAtZetaExt(lag); ok {
+		for _, leaf := range m.VanishingRelation.LeavesFull(config) {
+			// LeavesFull yields one entry per distinct leaf node, so the same
+			// column can come up more than once across shared subtrees; and
+			// loadClaimedValues may already have supplied a value.
+			name := leaf.String()
+			if _, ok := vr.valueAtZetaExt(name); ok {
 				continue
 			}
-			i := constants.ParseLagrangeName(lag)
-			if i < 0 {
-				i = m.N + i
-			}
-			v := poly.LagrangeAtZetaExt(vr.zeta, m.N, i)
-			vr.setValueAtZetaExt(lag, v)
-		}
-	}
-	return nil
-}
-
-func (vr *verifierRunTime) computePublicInputsColumns() error {
-	config := expr.OnlyPublicInputsColumns
-	for _, m := range vr.program.Modules {
-		leafs := m.VanishingRelation.Leaves(expr.NewConfig(config...))
-		for _, leaf := range leafs {
-			pi, ok := vr.publicInputs[leaf]
+			hook, ok := HookMap[leaf.Hook]
 			if !ok {
-				return fmt.Errorf("computePublicInputsColumns: %s not found in public inputs", leaf)
+				return fmt.Errorf("computeVerifierColumns: %s carries unregistered hook %s", name, leaf.Hook)
 			}
-			if pi.Module != m.Name {
-				return fmt.Errorf("computePublicInputsColumns: %s belongs to module %q, used from module %q", leaf, pi.Module, m.Name)
+			v, err := hook(vr, m, leaf)
+			if err != nil {
+				return err
 			}
-			var val ext.E6
-			for _, pe := range pi.Entries {
-				if pe.Idx < 0 || pe.Idx >= m.N {
-					return fmt.Errorf("computePublicInputsColumns: %s entry index %d out of bounds for module %q of size %d", leaf, pe.Idx, m.Name, m.N)
-				}
-				tmp := poly.LagrangeAtZetaExt(vr.zeta, m.N, pe.Idx)
-				value := pe.ExtValue()
-				tmp.Mul(&tmp, &value)
-				val.Add(&val, &tmp)
-			}
-			vr.setValueAtZetaExt(leaf, val)
+			vr.setValueAtZetaExt(name, v)
 		}
 	}
 	return nil
@@ -522,13 +483,7 @@ func Verify(publicInputs public.Inputs, verificationKey setup.VerificationKey, p
 	if err := vr.loadClaimedValues(); err != nil {
 		return err
 	}
-	if err := vr.computeExposedColumns(); err != nil {
-		return err
-	}
-	if err := vr.computeLagrange(); err != nil {
-		return err
-	}
-	if err := vr.computePublicInputsColumns(); err != nil {
+	if err := vr.computeVerifierColumns(); err != nil {
 		return err
 	}
 

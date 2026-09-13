@@ -27,13 +27,45 @@ type LeafType int
 
 const (
 	CommittedColumn LeafType = iota
-	LagrangeColumn
 	ChallengeColumn
 	ConstantColumn
-	SetupColumn       // structural columns like ql, qr, etc in plonk, committed beforehand
-	ExposedColumn     // prover-exposed local values, carried by the proof
-	PublicInputColumn // verifier-supplied statement values
+	SetupColumn // structural columns like ql, qr, etc in plonk, committed beforehand
+
+	// VerifierColumn is a column whose evaluation at zeta is recomputed by the
+	// verifier itself rather than read from a prover opening. Which formula to
+	// use is carried by Leaf.Hook; see HookID.
+	VerifierColumn
 )
+
+// HookID selects the verifier-side routine that evaluates a VerifierColumn at
+// zeta. The mapping HookID -> implementation lives in verifier.HookMap; it is
+// kept out of this package so the AST stays free of verifier internals.
+type HookID int
+
+const (
+	// NoHook is the zero value: an unset hook. A VerifierColumn carrying it is
+	// a construction bug, and the verifier rejects it rather than silently
+	// picking a formula.
+	NoHook HookID = iota
+	LagrangeHook
+	PublicInputHook  // verifier-supplied statement values
+	ExposedValueHook // prover-exposed local values, carried by the proof
+)
+
+func (h HookID) String() string {
+	switch h {
+	case NoHook:
+		return "none"
+	case LagrangeHook:
+		return "lagrange"
+	case PublicInputHook:
+		return "public-input"
+	case ExposedValueHook:
+		return "exposed-value"
+	default:
+		return fmt.Sprintf("unknown(%d)", int(h))
+	}
+}
 
 type Leaf struct {
 	Type  LeafType
@@ -41,6 +73,7 @@ type Leaf struct {
 	Shift int
 	Name  string
 	Field field.Kind
+	Hook  HookID            // only set for VerifierColumn
 	Value koalabear.Element // only set for Const type
 }
 
@@ -64,12 +97,10 @@ func applyLeafOptions(leaf *Leaf, opts ...LeafOption) *Leaf {
 // Config useful for querying the leaves
 type Config struct {
 	WoCommittedColumns bool
-	WoLagrangeComumns  bool
 	WoSetupColumns     bool
 	WoRotatedColumns   bool
 	WoChallenges       bool
-	WoExposedColumns   bool
-	WoPublicColumns    bool
+	WoVerifierColumns  bool
 }
 
 type Option func(*Config)
@@ -88,13 +119,6 @@ func WithoutCommittedColumns() Option {
 	}
 }
 
-// Leaves() doesnt return the LagrangeColumns
-func WithoutLagrangeColumns() Option {
-	return func(c *Config) {
-		c.WoLagrangeComumns = true
-	}
-}
-
 // Leaves() doesnt return the SetupColumn
 func WithoutSetupColumns() Option {
 	return func(c *Config) {
@@ -109,17 +133,11 @@ func WithoutChallenges() Option {
 	}
 }
 
-// Leaves() doesnt return the ExposedColumns
-func WithoutExposedColumns() Option {
+// Leaves() doesnt return the VerifierColumns (Lagrange, public inputs and
+// exposed values), i.e. every column the verifier evaluates at zeta itself.
+func WithoutVerifierColumns() Option {
 	return func(c *Config) {
-		c.WoExposedColumns = true
-	}
-}
-
-// Leaves() doesnt return the PublicInputColumns
-func WithoutPublicInputsColumns() Option {
-	return func(c *Config) {
-		c.WoPublicColumns = true
+		c.WoVerifierColumns = true
 	}
 }
 
@@ -131,11 +149,9 @@ func NewConfig(opts ...Option) Config {
 	return res
 }
 
-var OnlyChallenges = []Option{WithoutSetupColumns(), WithoutLagrangeColumns(), WithoutCommittedColumns(), WithoutRotatedColumns(), WithoutExposedColumns(), WithoutPublicInputsColumns()}
-var OnlyLagranges = []Option{WithoutSetupColumns(), WithoutChallenges(), WithoutCommittedColumns(), WithoutRotatedColumns(), WithoutExposedColumns(), WithoutPublicInputsColumns()}
-var OnlySetupColumns = []Option{WithoutLagrangeColumns(), WithoutChallenges(), WithoutCommittedColumns(), WithoutExposedColumns(), WithoutPublicInputsColumns()}
-var OnlyExposedColumns = []Option{WithoutSetupColumns(), WithoutLagrangeColumns(), WithoutCommittedColumns(), WithoutRotatedColumns(), WithoutChallenges(), WithoutPublicInputsColumns()}
-var OnlyPublicInputsColumns = []Option{WithoutSetupColumns(), WithoutLagrangeColumns(), WithoutCommittedColumns(), WithoutRotatedColumns(), WithoutChallenges(), WithoutExposedColumns()}
+var OnlyChallenges = []Option{WithoutSetupColumns(), WithoutCommittedColumns(), WithoutRotatedColumns(), WithoutVerifierColumns()}
+var OnlySetupColumns = []Option{WithoutChallenges(), WithoutCommittedColumns(), WithoutVerifierColumns()}
+var OnlyVerifierColumns = []Option{WithoutSetupColumns(), WithoutChallenges(), WithoutCommittedColumns(), WithoutRotatedColumns()}
 
 type Expr interface {
 	Degree() int
@@ -194,19 +210,22 @@ func ExtSetup(name string, opts ...LeafOption) *Leaf {
 }
 
 func Exposed(name string, opts ...LeafOption) *Leaf {
-	return applyLeafOptions(&Leaf{Type: ExposedColumn, Name: name}, opts...)
+	return applyLeafOptions(&Leaf{Type: VerifierColumn, Hook: ExposedValueHook, Name: name}, opts...)
 }
 
 func PublicInput(name string, opts ...LeafOption) *Leaf {
-	return applyLeafOptions(&Leaf{Type: PublicInputColumn, Name: name}, opts...)
+	return applyLeafOptions(&Leaf{Type: VerifierColumn, Hook: PublicInputHook, Name: name}, opts...)
 }
 
+// PublicInputExt is kept as a distinct constructor for callers that want to
+// declare the extension field explicitly; VerifierColumn evaluates in E6
+// regardless, so it is now equivalent to PublicInput.
 func PublicInputExt(name string, opts ...LeafOption) *Leaf {
-	return applyLeafOptions(&Leaf{Type: PublicInputColumn, Name: name, Field: field.Ext}, opts...)
+	return applyLeafOptions(&Leaf{Type: VerifierColumn, Hook: PublicInputHook, Name: name, Field: field.Ext}, opts...)
 }
 
 func Lagrange(name string, opts ...LeafOption) *Leaf {
-	return applyLeafOptions(&Leaf{Type: LagrangeColumn, Name: name}, opts...)
+	return applyLeafOptions(&Leaf{Type: VerifierColumn, Hook: LagrangeHook, Name: name}, opts...)
 }
 
 func Challenge(name string, opts ...LeafOption) *Leaf {
@@ -217,8 +236,11 @@ func Const(value koalabear.Element, opts ...LeafOption) *Leaf {
 	return applyLeafOptions(&Leaf{Type: ConstantColumn, Value: value}, opts...)
 }
 
+// FieldKind reports the field a leaf's values live in. Challenges are drawn
+// from E6, and VerifierColumns are evaluated at zeta by the verifier, which
+// works in E6 throughout — so both are Ext regardless of the declared Field.
 func (l *Leaf) FieldKind() field.Kind {
-	if l.Type == ChallengeColumn {
+	if l.Type == ChallengeColumn || l.Type == VerifierColumn {
 		return field.Ext
 	}
 	return l.Field
@@ -233,7 +255,9 @@ func FieldOfWithColumnFields(e Expr, columnFields map[string]field.Kind) field.K
 	case *Leaf:
 		f := v.FieldKind()
 		switch v.Type {
-		case CommittedColumn, SetupColumn, ExposedColumn:
+		// VerifierColumn is deliberately absent: FieldKind already pins it to
+		// Ext, so joining the inferred map entry could not change the result.
+		case CommittedColumn, SetupColumn:
 			if columnFields != nil {
 				f = field.Join(f, columnFields[v.Name])
 			}
@@ -271,7 +295,7 @@ func (l *Leaf) Degree() int {
 		return 0
 	case ChallengeColumn:
 		return 0
-	default: // CommittedColumn, LagrangeColumn, SetupColumn, ExposedColumn, PublicInputColumn
+	default: // CommittedColumn, SetupColumn, VerifierColumn
 		return 1
 	}
 }
@@ -300,11 +324,6 @@ func (l *Leaf) Leaves(config Config) []string {
 			return []string{}
 		}
 		return []string{l.String()}
-	case LagrangeColumn:
-		if config.WoLagrangeComumns {
-			return []string{}
-		}
-		return []string{l.String()}
 	case SetupColumn:
 		if config.WoSetupColumns {
 			return []string{}
@@ -315,13 +334,8 @@ func (l *Leaf) Leaves(config Config) []string {
 			return []string{}
 		}
 		return []string{l.String()}
-	case ExposedColumn:
-		if config.WoExposedColumns {
-			return []string{}
-		}
-		return []string{l.String()}
-	case PublicInputColumn:
-		if config.WoPublicColumns {
+	case VerifierColumn:
+		if config.WoVerifierColumns {
 			return []string{}
 		}
 		return []string{l.String()}
@@ -584,10 +598,6 @@ func (l *Leaf) LeavesFull(config Config) []*Leaf {
 		if config.WoCommittedColumns {
 			return nil
 		}
-	case LagrangeColumn:
-		if config.WoLagrangeComumns {
-			return nil
-		}
 	case SetupColumn:
 		if config.WoSetupColumns {
 			return nil
@@ -596,12 +606,8 @@ func (l *Leaf) LeavesFull(config Config) []*Leaf {
 		if config.WoChallenges {
 			return nil
 		}
-	case ExposedColumn:
-		if config.WoExposedColumns {
-			return nil
-		}
-	case PublicInputColumn:
-		if config.WoPublicColumns {
+	case VerifierColumn:
+		if config.WoVerifierColumns {
 			return nil
 		}
 	}

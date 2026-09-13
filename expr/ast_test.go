@@ -63,8 +63,10 @@ func TestFieldMetadata(t *testing.T) {
 		{"ShiftedExtCol", ExtCol("x", WithShift(1)), field.Ext},
 		{"Setup", Setup("q_l"), field.Base},
 		{"ExtSetup", ExtSetup("q_l"), field.Ext},
-		{"Exposed", Exposed("x"), field.Base},
-		{"Lagrange", Lagrange("L0"), field.Base},
+		// VerifierColumns evaluate at zeta in E6, so FieldKind pins them to Ext
+		// regardless of the Field they were declared with.
+		{"Exposed", Exposed("x"), field.Ext},
+		{"Lagrange", Lagrange("L0"), field.Ext},
 		{"Const", Const(one), field.Base},
 		{"Challenge", Challenge("gamma"), field.Ext},
 		{"RawChallengeLeaf", &Leaf{Type: ChallengeColumn, Name: "gamma"}, field.Ext},
@@ -73,7 +75,7 @@ func TestFieldMetadata(t *testing.T) {
 		{"ExtColumnExpression", ExtCol("x").Sub(Col("y")).Pow(2), field.Ext},
 		{"ColumnRegistryExpression", Col("logup").Add(Col("x")), field.Ext},
 		{"SetupRegistryExpression", Setup("logup").Add(Col("x")), field.Ext},
-		{"PublicInput", PublicInput("x"), field.Base},
+		{"PublicInput", PublicInput("x"), field.Ext},
 		{"PublicInputExt", PublicInputExt("x"), field.Ext},
 	}
 
@@ -115,15 +117,14 @@ func TestLeaves(t *testing.T) {
 	five.SetUint64(5)
 
 	all := NewConfig()
-	woCC := NewConfig(WithoutLagrangeColumns())
+	woCC := NewConfig(WithoutVerifierColumns())
 	woChal := NewConfig(WithoutChallenges())
 	woSetup := NewConfig(WithoutSetupColumns())
-	woPub := NewConfig(WithoutPublicInputsColumns())
-	woAll := NewConfig(WithoutLagrangeColumns(), WithoutChallenges())
+	woAll := NewConfig(WithoutVerifierColumns(), WithoutChallenges())
 
 	// --- Leaf nodes ---
 
-	// LagrangeColumn: present by default, absent when excluded
+	// VerifierColumn (Lagrange hook): present by default, absent when excluded
 	AssertSameSet(t, Lagrange("L0").Leaves(all), []string{"L0"})
 	AssertSameSet(t, Lagrange("L0").Leaves(woCC), []string{})
 
@@ -143,39 +144,41 @@ func TestLeaves(t *testing.T) {
 	AssertSameSet(t, Setup("q_l").Leaves(all), []string{"q_l"})
 	AssertSameSet(t, Setup("q_l").Leaves(woSetup), []string{})
 
-	// PublicInputColumn: present by default, absent when excluded
+	// All three verifier hooks share the one VerifierColumn flag.
 	AssertSameSet(t, PublicInput("pub").Leaves(all), []string{"pub"})
-	AssertSameSet(t, PublicInput("pub").Leaves(woPub), []string{})
+	AssertSameSet(t, PublicInput("pub").Leaves(woCC), []string{})
+	AssertSameSet(t, Exposed("exp").Leaves(all), []string{"exp"})
+	AssertSameSet(t, Exposed("exp").Leaves(woCC), []string{})
 
 	// --- Composite expressions ---
 
-	// LagrangeColumn + CommittedColumn
+	// VerifierColumn + CommittedColumn
 	e := Lagrange("L0").Add(Col("x"))
 	AssertSameSet(t, e.Leaves(all), []string{"L0", "x"})
 	AssertSameSet(t, e.Leaves(woCC), []string{"x"})
 
-	// LagrangeColumn * Challenge
+	// VerifierColumn * Challenge
 	e = Lagrange("L0").Mul(Challenge("gamma"))
 	AssertSameSet(t, e.Leaves(all), []string{"L0", "gamma"})
 	AssertSameSet(t, e.Leaves(woCC), []string{"gamma"})
 	AssertSameSet(t, e.Leaves(woChal), []string{"L0"})
 	AssertSameSet(t, e.Leaves(woAll), []string{})
 
-	// Multiple LagrangeColumns
+	// Multiple VerifierColumns
 	e = Lagrange("L0").Add(Lagrange("L1"))
 	AssertSameSet(t, e.Leaves(all), []string{"L0", "L1"})
 	AssertSameSet(t, e.Leaves(woCC), []string{})
 
-	// Sub: LagrangeColumn on the right
+	// Sub: VerifierColumn on the right
 	e = Col("x").Sub(Lagrange("L0"))
 	AssertSameSet(t, e.Leaves(all), []string{"x", "L0"})
 	AssertSameSet(t, e.Leaves(woCC), []string{"x"})
 
-	// Pow: LagrangeColumn inside
+	// Pow: VerifierColumn inside
 	AssertSameSet(t, Lagrange("L0").Pow(2).Leaves(all), []string{"L0"})
 	AssertSameSet(t, Lagrange("L0").Pow(2).Leaves(woCC), []string{})
 
-	// Pow: CommittedColumn inside — no LagrangeColumn
+	// Pow: CommittedColumn inside — no VerifierColumn
 	AssertSameSet(t, Col("x").Pow(3).Leaves(all), []string{"x"})
 	AssertSameSet(t, Col("x").Pow(3).Leaves(woCC), []string{"x"})
 
@@ -186,11 +189,12 @@ func TestLeaves(t *testing.T) {
 	AssertSameSet(t, e.Leaves(woChal), []string{"x", "L0", "y"})
 	AssertSameSet(t, e.Leaves(woAll), []string{"x", "y"})
 
-	// Public input columns are filtered independently from committed columns.
-	e = PublicInput("pub").Add(Col("x"))
-	AssertSameSet(t, e.Leaves(all), []string{"pub", "x"})
-	AssertSameSet(t, e.Leaves(woPub), []string{"x"})
-	AssertSameSet(t, e.Leaves(NewConfig(OnlyPublicInputsColumns...)), []string{"pub"})
+	// Verifier columns are filtered independently from committed columns, and
+	// OnlyVerifierColumns selects every hook kind at once.
+	e = PublicInput("pub").Add(Col("x")).Add(Lagrange("L0")).Add(Exposed("exp"))
+	AssertSameSet(t, e.Leaves(all), []string{"pub", "x", "L0", "exp"})
+	AssertSameSet(t, e.Leaves(woCC), []string{"x"})
+	AssertSameSet(t, e.Leaves(NewConfig(OnlyVerifierColumns...)), []string{"pub", "L0", "exp"})
 
 	// Setup columns are filtered independently from committed columns.
 	e = Setup("q_l").Add(Col("x"))
@@ -198,7 +202,7 @@ func TestLeaves(t *testing.T) {
 	AssertSameSet(t, e.Leaves(woSetup), []string{"x"})
 	AssertSameSet(t, e.Leaves(NewConfig(OnlySetupColumns...)), []string{"q_l"})
 
-	// Same LagrangeColumn appearing multiple times — deduplicated
+	// Same VerifierColumn appearing multiple times — deduplicated
 	e = Lagrange("L0").Add(Lagrange("L0"))
 	AssertSameSet(t, e.Leaves(all), []string{"L0"})
 }

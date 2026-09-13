@@ -267,10 +267,8 @@ type DEEPquotientLayout struct {
 // current sizes.
 func BuildDeepQuotientLayout(program board.Program) DEEPquotientLayout {
 	leafConfig := expr.NewConfig(
-		expr.WithoutLagrangeColumns(),
 		expr.WithoutChallenges(),
-		expr.WithoutExposedColumns(),
-		expr.WithoutPublicInputsColumns(),
+		expr.WithoutVerifierColumns(),
 	)
 
 	// Group module names by size, deterministic within a size.

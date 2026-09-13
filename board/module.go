@@ -115,7 +115,7 @@ func (m *CompiledModule) NameIthIDSupport(i int) string {
 func (m *Module) LagrangeColRelative(i int) expr.Expr {
 	m.GenCol = append(m.GenCol, LagrangeRelativeGen{i: i})
 	name := constants.LagrangeNameRelative(m.Name, i)
-	return &expr.Leaf{Type: expr.LagrangeColumn, Name: name}
+	return expr.Lagrange(name)
 }
 
 // asserts that A[m.N-1-i]=B[m.N-1-i]
@@ -142,7 +142,7 @@ func (m *Module) AssertEqualLastEntry(A, B expr.Expr) {
 func (m *Module) LagrangeCol(i int) expr.Expr {
 	m.GenCol = append(m.GenCol, LagrangeGen{i: i})
 	name := constants.LagrangeName(m.Name, i)
-	return &expr.Leaf{Type: expr.LagrangeColumn, Name: name}
+	return expr.Lagrange(name)
 }
 
 func (m *Module) AssertZero(relation expr.Expr) {

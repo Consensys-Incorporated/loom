@@ -126,6 +126,7 @@ type leafKey struct {
 	shift int
 	name  string
 	field field.Kind
+	hook  expr.HookID
 	value koalabear.Element
 }
 
@@ -163,6 +164,7 @@ func (b *dagBuilder) assignLeafID(l *expr.Leaf) int {
 		shift: l.Shift,
 		name:  l.Name,
 		field: l.FieldKind(),
+		hook:  l.Hook,
 		value: l.Value,
 	}
 	if id, ok := b.leafIDs[key]; ok {
@@ -1501,9 +1503,8 @@ func evalDAGNodeSlice(n *DAGNode, cache []koalabear.Element, vals map[string]koa
 // Leaves returns the String() representation of every unique leaf in the DAG
 // that is not excluded by config. The filtering rules are identical to those
 // of Expr.Leaves: WithoutCommittedColumns, WithoutChallenges,
-// WithoutLagrangeColumns, WithoutSetupColumns, WithoutExposedColumns and
-// WithoutPublicInputsColumns suppress the corresponding leaf kinds; Const leaves are
-// never included.
+// WithoutSetupColumns and WithoutVerifierColumns suppress the corresponding
+// leaf kinds; Const leaves are never included.
 // Because the DAG deduplicates nodes, each structurally-identical leaf appears
 // at most once.
 func (d *DAG) Leaves(config expr.Config) []string {
@@ -1532,8 +1533,7 @@ func (d *DAG) LeavesFull(config expr.Config) []*expr.Leaf {
 
 // Degree returns the total degree of the DAG expression, following the same
 // conventions as Expr.Degree:
-//   - CommittedColumn, LagrangeColumn, SetupColumn, ExposedColumn and
-//     PublicInputColumn leaves have degree 1.
+//   - CommittedColumn, SetupColumn and VerifierColumn leaves have degree 1.
 //   - Challenge and non-zero Const leaves have degree 0.
 //   - The zero Const leaf has degree NegInf (math.MinInt).
 //   - Add/Sub: max of children's degrees (n-ary after Flatten).

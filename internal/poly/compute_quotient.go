@@ -258,7 +258,15 @@ func ComputeQuotientMixed(PiBase map[string]Polynomial, PiExt map[string]ExtPoly
 			if _, ok := extNameToIdx[l.Name]; !ok {
 				src, ok := PiExt[l.Name]
 				if !ok {
-					return nil, fmt.Errorf("ComputeQuotientMixed: extension column %q not found", l.Name)
+					// A leaf can be typed Ext while its witness lives on the
+					// base rail — Lagrange selectors are materialized into
+					// PiBase by GenCol but evaluate in E6. Lift instead of
+					// failing, mirroring evalPointWiseMixedInto.
+					base, baseOK := PiBase[l.Name]
+					if !baseOK {
+						return nil, fmt.Errorf("ComputeQuotientMixed: extension column %q not found", l.Name)
+					}
+					src = liftPolynomialToExt(base)
 				}
 				if len(src) != N && len(src) != 1 {
 					return nil, fmt.Errorf("ComputeQuotientMixed: extension column %q has length %d, want %d or 1", l.Name, len(src), N)
