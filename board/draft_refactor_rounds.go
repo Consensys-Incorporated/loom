@@ -144,6 +144,7 @@ type builderRound struct {
 // It embeds Builder so that AddModule, AssertZero and the argument helpers keep
 // working unchanged during migration. Only the step- and column-registering
 // calls need to move over.
+// TODO embedd directly 'rounds []builderRound' in Builder, and attach the RoundBuilder's methods on Builder directly once the refactor is done
 type RoundBuilder struct {
 	Builder
 	rounds []builderRound
