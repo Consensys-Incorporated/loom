@@ -59,7 +59,9 @@ package board
 //
 // The trailing folding round is not something a caller stages into. It is
 // appended by CompileRounds, and every committed column not staged by an
-// earlier round is committed there — which is what phase 8 did.
+// earlier round is swept into it — which is what phase 8 did. Staging is
+// therefore opt-in: a caller names only the columns that must be committed
+// early, and everything else lands in the folding round by default.
 
 import (
 	"fmt"
@@ -195,6 +197,37 @@ func (b *RoundBuilder) NumDeclaredRounds() int {
 type RoundProgram struct {
 	Program
 	Rounds []ProverRound
+	// Late lists columns the sweep committed later than the round that produces
+	// them. It is diagnostic, not an error: the protocol is well-formed either
+	// way, and CompileRounds keeps sweeping.
+	//
+	// It is worth looking at, because a late-committed column is one the prover
+	// could in principle choose after seeing the challenges sampled in between.
+	// That is harmless when the column is pinned down by the AIR relations, and
+	// is not something today's Compile can produce at all, so a non-empty Late
+	// means a caller staged something in a way the old inference never would.
+	// Use StrictNoLateStaging to turn it into an error.
+	Late []LateColumn
+}
+
+// LateColumn is one column committed after the round that produces it.
+type LateColumn struct {
+	Name     string
+	Produced int
+	Staged   int
+}
+
+// StrictNoLateStaging reports an error if any column was committed later than
+// the round that produces it. Callers that want the old inference's implicit
+// guarantee back can run it after CompileRounds.
+func (p *RoundProgram) StrictNoLateStaging() error {
+	for _, late := range p.Late {
+		return fmt.Errorf(
+			"StrictNoLateStaging: column %q is produced at round %d but committed at round %d; "+
+				"stage it in round %d, or move the step that produces it",
+			late.Name, late.Produced, late.Staged, late.Produced)
+	}
+	return nil
 }
 
 // committedConfig selects the leaves that correspond to committed trace
@@ -276,23 +309,26 @@ func CompileRounds(b *RoundBuilder) (RoundProgram, error) {
 	// columns nobody staged, and the running sums produced after the last
 	// argument challenge.
 	//
-	// The sweep deliberately refuses to absorb a column produced by an earlier
-	// round's step: that column would sit uncommitted across a Fiat-Shamir
-	// boundary, which is a staging mistake rather than a leftover. Saying so
-	// here is the whole point of moving staging into the caller's hands.
+	// Sweeping is unconditional, matching Compile's phase 8: staging is a
+	// convenience for pinning a column to an early round, not an obligation to
+	// name every column. A caller who stages nothing at all still gets a valid
+	// single-round protocol.
 	foldRound := len(res.Rounds)
 	leftovers := make([]ColumnRef, 0)
 	for _, name := range sortedKeys(owner) {
 		if _, ok := staged[name]; ok {
 			continue
 		}
-		if p, ok := producer[name]; ok && p != foldRound {
-			return res, fmt.Errorf(
-				"CompileRounds: column %q is produced at round %d but never staged; "+
-					"stage it in round %d, or move the step that produces it", name, p, p)
-		}
 		staged[name] = foldRound
 		leftovers = append(leftovers, ColumnRef{Name: name, Module: owner[name]})
+		// A swept column produced by an earlier round's step is committed later
+		// than it had to be. Today's Compile cannot express this — phase 4 bumps
+		// every non-FS step past the FS level it lands on, so a produced column
+		// is always swept into its own round — but explicit staging can, so
+		// record it rather than let it pass unnoticed. See RoundProgram.Late.
+		if p, ok := producer[name]; ok && p != foldRound {
+			res.Late = append(res.Late, LateColumn{Name: name, Produced: p, Staged: foldRound})
+		}
 	}
 	res.Rounds = append(res.Rounds, ProverRound{Staged: leftovers})
 
@@ -327,9 +363,9 @@ func stepProducers(rounds []builderRound) (map[string]int, error) {
 //  1. Every committed column is staged exactly once. The "staged twice" half is
 //     checked in CompileRounds as the map is built; the "never staged" half is
 //     absorbed by the folding round, which stages whatever is left.
-//  2. A column that some step produces is staged in that step's own round. A
-//     column committed a round before the step that fills it would be committed
-//     empty.
+//  2. No column is staged *before* the round that produces it — that column
+//     would be committed while still empty. Staging after production is the
+//     sweep and is allowed; RoundProgram.Late records it.
 //  3. A step's inputs are available: produced earlier in the same round, or
 //     staged in a strictly earlier round.
 //  4. Coin(r) is referenced only from round r+1 onwards. This is what phase 3.5
@@ -339,9 +375,10 @@ func ValidateRounds(b *RoundBuilder, rounds []ProverRound, producer, staged map[
 	config := committedConfig()
 	onlyChallenges := expr.NewConfig(expr.OnlyChallenges...)
 
-	// Property 2.
+	// Property 2. Only staging strictly before production is an error; staging
+	// after it is the folding round's sweep.
 	for name, r := range staged {
-		if p, ok := producer[name]; ok && p != r {
+		if p, ok := producer[name]; ok && r < p {
 			return fmt.Errorf(
 				"ValidateRounds: column %q is staged at round %d but produced at round %d; "+
 					"it would be committed before it is filled", name, r, p)

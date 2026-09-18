@@ -130,11 +130,32 @@ func TestValidateRejectsStagingBeforeProduction(t *testing.T) {
 	}
 }
 
-// The folding round sweeps up unstaged columns, but must not absorb one that an
-// earlier round's step produced: that column would cross a Fiat-Shamir boundary
-// uncommitted. This is the case that distinguishes a genuine leftover from a
-// staging mistake.
-func TestCompileRoundsRefusesToSweepEarlyProducedColumn(t *testing.T) {
+// Staging is opt-in: a caller who names nothing still gets a valid protocol,
+// with every column swept into the folding round. This is the degenerate case
+// of Compile's phase 8.
+func TestCompileRoundsSweepsEverythingWhenNothingStaged(t *testing.T) {
+	b := NewRoundBuilder()
+	m := NewModule("m")
+	m.N = 8
+	m.AssertZero(expr.Col("x").Sub(expr.Col("y")))
+	b.AddModule(m)
+
+	prog, err := CompileRounds(&b)
+	if err != nil {
+		t.Fatalf("CompileRounds: %v", err)
+	}
+	if got := len(prog.Rounds); got != 1 {
+		t.Fatalf("rounds = %d, want 1 (folding only)", got)
+	}
+	assertStaged(t, prog.Rounds[0], "x", "y")
+	if len(prog.Late) != 0 {
+		t.Errorf("Late = %v, want empty: nothing is produced by a step", prog.Late)
+	}
+}
+
+// An unstaged column produced by an earlier round's step is still swept, as
+// Compile does, but recorded in Late so the late commitment is visible.
+func TestCompileRoundsSweepsEarlyProducedColumnAndRecordsIt(t *testing.T) {
 	var one koalabear.Element
 	one.SetOne()
 
@@ -145,17 +166,43 @@ func TestCompileRoundsRefusesToSweepEarlyProducedColumn(t *testing.T) {
 	b.AddModule(m)
 
 	b.StageColumns(RoundFold, "x")
-	// Produced at round 0 but never staged, so the sweep would otherwise commit
-	// it two rounds later.
+	// Produced at round 0, never staged: swept into the folding round (2).
 	b.AddStepAt(RoundFold,
 		NewProverStep([]expr.Expr{expr.Col("x"), expr.Const(one)}, []string{"logup"}, LogUpStep, LogUpCtx{}))
+	b.growTo(RoundLogDerivative) // a second declared round, so the sweep lands at 2
 
-	_, err := CompileRounds(&b)
-	if err == nil {
-		t.Fatal("expected an error when an early-produced column is left unstaged")
+	prog, err := CompileRounds(&b)
+	if err != nil {
+		t.Fatalf("CompileRounds swept column: %v", err)
 	}
-	if !strings.Contains(err.Error(), "never staged") {
-		t.Errorf("error = %v, want it to mention the missing staging", err)
+	assertStaged(t, prog.Rounds[2], "logup")
+
+	if len(prog.Late) != 1 {
+		t.Fatalf("Late = %v, want exactly one entry", prog.Late)
+	}
+	if got := prog.Late[0]; got.Name != "logup" || got.Produced != 0 || got.Staged != 2 {
+		t.Errorf("Late[0] = %+v, want {logup 0 2}", got)
+	}
+
+	// Opt-in strictness turns the same situation into an error.
+	if err := prog.StrictNoLateStaging(); err == nil {
+		t.Error("StrictNoLateStaging accepted a late-committed column")
+	}
+}
+
+// The lookup-shaped protocol, where every produced column is staged in its own
+// round, must report nothing late — this is the shape Compile produces today.
+func TestCompileRoundsNoLateStagingInLookupShape(t *testing.T) {
+	b := lookupShapedBuilder()
+	prog, err := CompileRounds(&b)
+	if err != nil {
+		t.Fatalf("CompileRounds: %v", err)
+	}
+	if len(prog.Late) != 0 {
+		t.Errorf("Late = %v, want empty", prog.Late)
+	}
+	if err := prog.StrictNoLateStaging(); err != nil {
+		t.Errorf("StrictNoLateStaging: %v", err)
 	}
 }
 
