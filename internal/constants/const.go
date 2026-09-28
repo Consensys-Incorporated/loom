@@ -120,6 +120,20 @@ func CanonicalChallengeName(level int) string {
 	return fmt.Sprintf("challenge@loom_%d", level)
 }
 
+// ParseCanonicalChallengeName is the inverse of CanonicalChallengeName. It
+// reports false for any name that CanonicalChallengeName did not produce, so
+// callers can tell a round challenge apart from an argument-local one.
+func ParseCanonicalChallengeName(name string) (level int, ok bool) {
+	if _, err := fmt.Sscanf(name, "challenge@loom_%d", &level); err != nil {
+		return 0, false
+	}
+	// Guard against Sscanf accepting a prefix match, e.g. "challenge@loom_0x".
+	if CanonicalChallengeName(level) != name {
+		return 0, false
+	}
+	return level, true
+}
+
 func InitialChallengeName(numFSRounds int) string {
 	if numFSRounds > 0 {
 		return CanonicalChallengeName(0)
