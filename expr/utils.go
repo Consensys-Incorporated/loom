@@ -22,9 +22,12 @@ func Fold(v Expr, C []Expr) Expr {
 	if len(C) == 0 {
 		return Const(koalabear.Element{})
 	}
-	res := C[0]
-	for i := 1; i < len(C); i++ {
-		res = res.Add(C[i].Mul(v.Pow(uint32(i))))
+	// Horner form, C[0] + v·(C[1] + v·(C[2] + …)): linear in len(C), whereas
+	// expanding each v^i separately is quadratic. v is cloned per level so no
+	// subtree is shared (Prune rewrites nodes in place).
+	res := C[len(C)-1]
+	for i := len(C) - 2; i >= 0; i-- {
+		res = C[i].Add(Clone(v).Mul(res))
 	}
 	return res
 }
