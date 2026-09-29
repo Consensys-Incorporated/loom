@@ -21,6 +21,7 @@ import (
 
 	"github.com/consensys/gnark-crypto/field/koalabear"
 	ext "github.com/consensys/gnark-crypto/field/koalabear/extensions"
+	zkcv "github.com/consensys/loom/integration_test/zkc_verifier"
 	"github.com/consensys/loom/internal/constants"
 	"github.com/consensys/loom/internal/hash"
 )
@@ -46,6 +47,8 @@ type Program struct {
 	Sources map[string]string
 	// Input is the zkc JSON input.
 	Input []byte
+	// Gadgets define the program's #[native] functions.
+	Gadgets zkcv.Gadgets
 	// MainPerms and QueryPerms count the Poseidon2 permutations of main and
 	// of one query.
 	MainPerms, QueryPerms int
@@ -228,6 +231,14 @@ func GeneratePCSVerifier(f *Fixture) (*Program, error) {
 	alphaDeep := prev[:6]
 	V := emitDeepSums(&mainE, pshape, values, alphaDeep)
 
+	// Opening gadgets: one native function per (batch, group), starting its
+	// powers of alpha_DEEP at α^alphaOff.
+	groups := newGroups(f, pshape)
+	pbases := make([][]string, len(groups))
+	for i, gr := range groups {
+		pbases[i] = e6Pow(&mainE, alphaDeep, gr.alphaOff)
+	}
+
 	// FRI fold and level challenges.
 	dqRoots := make([][]string, len(f.Proof.DeepQuotientRoots))
 	dqRootAddr := make([]int, len(dqRoots))
@@ -282,6 +293,10 @@ func GeneratePCSVerifier(f *Fixture) (*Program, error) {
 			queryArgs = append(queryArgs, v...)
 		}
 	}
+	for _, pb := range pbases {
+		queryArgs = append(queryArgs, pb...)
+	}
+	offs := map[*groupRef]int{}
 
 	queryE := Emitter{Sponges: sponges}
 	var queryBody string
@@ -293,7 +308,7 @@ func GeneratePCSVerifier(f *Fixture) (*Program, error) {
 			prev = mainE.Challenge(queryName(k), prev, prev)
 		}
 		qr := newReader(&queryE, queryParamBase)
-		emitQuery(qr, shape, pshape, f, k, friRootAddr, dqRootAddr)
+		emitQuery(qr, shape, pshape, groups, offs, f, k, friRootAddr, dqRootAddr)
 		if k == 0 {
 			queryBody = queryE.String()
 			queryPerms = queryE.Perms
@@ -301,7 +316,7 @@ func GeneratePCSVerifier(f *Fixture) (*Program, error) {
 		qr.align()
 		base := in.align() / rowWidth
 		in.words = append(in.words, qr.words...)
-		mainE.Line("%s(%d, %s, %s)", friQueryFn, base, prev[1], strings.Join(queryArgs, ", "))
+		mainE.Line("%s(%d, %s, %d, %s)", friQueryFn, base, prev[1], k, strings.Join(queryArgs, ", "))
 		queryE = Emitter{Sponges: sponges}
 	}
 
@@ -314,7 +329,7 @@ func GeneratePCSVerifier(f *Fixture) (*Program, error) {
 	src.WriteString("\n")
 	fmt.Fprintf(&src, "fn main() {\n%s}\n\n", mainE.String())
 	var params []string
-	params = append(params, queryParamBase+":u16", "c1:𝔽")
+	params = append(params, queryParamBase+":u16", "c1:𝔽", "qid:𝔽")
 	for j := 0; j < shape.numRounds; j++ {
 		params = append(params, typedList(fmt.Sprintf("a%d_", j), 6)...)
 	}
@@ -322,7 +337,7 @@ func GeneratePCSVerifier(f *Fixture) (*Program, error) {
 		params = append(params, typedList(fmt.Sprintf("g%d_", l), 6)...)
 	}
 	params = append(params, typedList("f", 6)...)
-	if n := len(queryArgs) + 2; n > 255 {
+	if n := len(queryArgs) + 3; n > 255 {
 		return nil, fmt.Errorf("%s takes %d arguments, more than zkc's limit of 255", friQueryFn, n)
 	}
 	params = append(params, typedList("z", 6)...)
@@ -332,8 +347,16 @@ func GeneratePCSVerifier(f *Fixture) (*Program, error) {
 			params = append(params, typedList(fmt.Sprintf("V%d_%d_", si, ki), 6)...)
 		}
 	}
+	for i := range groups {
+		params = append(params, typedList(fmt.Sprintf("pb%d_", i), 6)...)
+	}
 	fmt.Fprintf(&src, "fn %s(%s) {\n%s}\n", friQueryFn, strings.Join(params, ", "), queryBody)
 	src.WriteString(merkleStepSource)
+	gadgets := Gadgets()
+	for _, gr := range groups {
+		src.WriteString(gr.openSource(f, offs[gr], sponges))
+		gadgets[gr.fn] = &OpeningGadget{f: f, gr: gr}
+	}
 	src.WriteString(SpongeSources(sponges))
 	src.WriteString(assertSource)
 
@@ -346,6 +369,7 @@ func GeneratePCSVerifier(f *Fixture) (*Program, error) {
 			"verifier.zkc":  src.String(),
 		},
 		Input:      []byte(input),
+		Gadgets:    gadgets,
 		MainPerms:  mainE.Perms,
 		QueryPerms: queryPerms,
 	}, nil
@@ -370,7 +394,7 @@ func paramList(prefix string, n int) []string {
 // emitQuery emits the body of pcs_query for query k: the Merkle openings of
 // every FRI layer and level, the folding checks and the final check, the batch
 // openings, and the DEEP bridge.
-func emitQuery(r *reader, shape friShape, pshape pcsShape, f *Fixture, k int, friRootAddr, dqRootAddr []int) {
+func emitQuery(r *reader, shape friShape, pshape pcsShape, groups []*groupRef, offs map[*groupRef]int, f *Fixture, k int, friRootAddr, dqRootAddr []int) {
 	e := r.e
 	fq := f.Proof.FRIProof.FRIQueries[k]
 
@@ -440,10 +464,14 @@ func emitQuery(r *reader, shape friShape, pshape pcsShape, f *Fixture, k int, fr
 	// Open every batch at the query, and check the DEEP bridge for each size
 	// against the FRI layer 0 (largest size) or the level opened at the size's
 	// introduction round.
-	rows := make([]openedRows, len(f.Roots))
+	pbase := map[*groupRef][]string{}
+	for i, gr := range groups {
+		pbase[gr] = paramList(fmt.Sprintf("pb%d_", i), 6)
+	}
+	sums := map[*groupRef]groupSums{}
 	for b := range f.Roots {
 		root := e.Call(loadRootFn, rowWidth, fmt.Sprint(b))
-		rows[b] = emitBatchOpening(r, s, L, f, b, k, root)
+		emitBatchOpening(r, s, L, f, b, k, root, groups, pbase, offs, sums)
 	}
 	for si, sr := range pshape.sizes {
 		dq := layers[0]
@@ -454,7 +482,13 @@ func emitQuery(r *reader, shape friShape, pshape pcsShape, f *Fixture, k int, fr
 		for ki := range sr.shifts {
 			V[ki] = paramList(fmt.Sprintf("V%d_%d_", si, ki), 6)
 		}
-		emitDeepBridge(r, s, L, f, k, sr, rows, V, paramList("z", 6), paramList("d", 6), dq.p, dq.q)
+		var sizeGroups []*groupRef
+		for _, gr := range groups {
+			if gr.logN == sr.logN {
+				sizeGroups = append(sizeGroups, gr)
+			}
+		}
+		emitDeepBridge(r, s, L, f, k, sr, sizeGroups, sums, V, paramList("z", 6), dq.p, dq.q)
 	}
 
 	// Fold: expected_j = (P+Q)/2 + α_j·(P−Q)/2·xInv_j must equal the next

@@ -75,7 +75,11 @@ func NewBridge(builder *board.Builder, s *air.Schema[kb.Element], gadgets Gadget
 			continue
 		}
 		builder.AddModule(board.NewModule(m.Name()))
-		if !m.IsNative() {
+	}
+	// Gadgets are defined once every module exists, since they may refer to
+	// other modules (e.g. a gadget looking up permutations in p2_perm).
+	for _, m := range s.RawModules() {
+		if m.Width() == 0 || !m.IsNative() {
 			continue
 		}
 		g, ok := gadgets[m.Name()]

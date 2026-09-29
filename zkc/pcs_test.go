@@ -9,7 +9,7 @@ import (
 func runProgram(t *testing.T, p *Program) (zkcv.Result, error) {
 	t.Helper()
 	files := writeZkc(t, p.Sources)
-	return zkcv.RunWith(p.Input, Gadgets(), files...)
+	return zkcv.RunWith(p.Input, p.Gadgets, files...)
 }
 
 func TestPCSVerifier(t *testing.T) {

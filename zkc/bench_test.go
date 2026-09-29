@@ -68,7 +68,7 @@ func TestBenchPCSVerifier(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		res, err := zkcv.MeasureWith(p.Input, Gadgets(), writeZkc(t, p.Sources)...)
+		res, err := zkcv.MeasureWith(p.Input, p.Gadgets, writeZkc(t, p.Sources)...)
 		if err != nil {
 			t.Fatalf("%s: %v", bc.name, err)
 		}

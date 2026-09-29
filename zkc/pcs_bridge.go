@@ -23,7 +23,6 @@ import (
 	"github.com/consensys/gnark-crypto/field/koalabear"
 	ext "github.com/consensys/gnark-crypto/field/koalabear/extensions"
 	"github.com/consensys/loom/internal/constants"
-	"github.com/consensys/loom/internal/fri"
 )
 
 // polyRef is one committed polynomial, in alpha_DEEP order within its size.
@@ -164,16 +163,19 @@ func zeroE6() []string { return []string{"0", "0", "0", "0", "0", "0"} }
 // liftBase returns a base-field value as an E6 element.
 func liftBase(x string) []string { return []string{x, "0", "0", "0", "0", "0"} }
 
-// openedRows are the raw rows of one query opening of a batch, by group
-// (declaration order): lo and hi rows, each a list of E6 values (base values
-// lifted), base polynomials first.
-type openedRows struct {
-	lo, hi [][][]string // [group][poly] -> E6
+// groupSums are the DEEP sums a group's opening returns, per shift set of
+// the group: lo at X, hi at −X.
+type groupSums struct {
+	lo, hi [][]string
 }
 
-// emitBatchOpening reads the opening of batch b at query k and checks its
-// mixed-size Merkle path (fri.verifyOneWMerkleProof) against the root.
-func emitBatchOpening(r *reader, s []string, L int, f *Fixture, b, k int, root []string) openedRows {
+// emitBatchOpening checks the opening of batch b at query k along its
+// mixed-size Merkle path (fri.verifyOneWMerkleProof) against the root. Each
+// group's leaf digest and DEEP sums come from its opening gadget (open_b_g),
+// whose rows are serialized here, and whose word offset is recorded in offs
+// (the same for every query).
+func emitBatchOpening(r *reader, s []string, L int, f *Fixture, b, k int, root []string,
+	groups []*groupRef, pbase map[*groupRef][]string, offs map[*groupRef]int, sums map[*groupRef]groupSums) {
 	e := r.e
 	shapes := f.Shapes[b]
 	wp := f.Proof.PointSamplings[k][b]
@@ -183,32 +185,28 @@ func emitBatchOpening(r *reader, s []string, L int, f *Fixture, b, k int, root [
 	}
 	sort.SliceStable(order, func(i, j int) bool { return shapes[order[i]].Rows > shapes[order[j]].Rows })
 
-	res := openedRows{lo: make([][][]string, len(shapes)), hi: make([][][]string, len(shapes))}
-	// readRows reads a group's row pair and returns its leaf digest.
-	readRows := func(g int, rows fri.RawRowPair) []string {
-		nb, ne := len(rows.Lo.RawRowBase), len(rows.Lo.RawRowExt)
-		loB, hiB := r.elems(rows.Lo.RawRowBase), r.elems(rows.Hi.RawRowBase)
-		var loE, hiE [][]string
-		for i := range ne {
-			loE = append(loE, r.e6(rows.Lo.RawRowExt[i]))
+	open := func(g int) []string {
+		i := slices.IndexFunc(groups, func(gr *groupRef) bool { return gr.b == b && gr.g == g })
+		gr := groups[i]
+		off := storeGroup(r, gr.rowsAt(f, k))
+		if prev, ok := offs[gr]; ok && prev != off {
+			panic(fmt.Sprintf("group %s: offset %d at query %d, %d before", gr.fn, off, k, prev))
 		}
-		for i := range ne {
-			hiE = append(hiE, r.e6(rows.Hi.RawRowExt[i]))
+		offs[gr] = off
+		n := P2Digest + 12*len(gr.sets)
+		outs := e.Call(gr.fn, n, slices.Concat([]string{r.base, "qid"}, paramList("d", 6), pbase[gr])...)
+		var gs groupSums
+		for set := range gr.sets {
+			gs.lo = append(gs.lo, outs[P2Digest+12*set:P2Digest+12*set+6])
+			gs.hi = append(gs.hi, outs[P2Digest+12*set+6:P2Digest+12*set+12])
 		}
-		for i := range nb {
-			res.lo[g] = append(res.lo[g], liftBase(loB[i]))
-			res.hi[g] = append(res.hi[g], liftBase(hiB[i]))
-		}
-		res.lo[g] = append(res.lo[g], loE...)
-		res.hi[g] = append(res.hi[g], hiE...)
-		leaf := []string{fmt.Sprint(LeafDomainTag), fmt.Sprint(2 * nb), fmt.Sprint(2 * ne)}
-		leaf = slices.Concat(leaf, loB, hiB, slices.Concat(loE...), slices.Concat(hiE...))
-		return e.Sponge(leaf)
+		sums[gr] = gs
+		return outs[:P2Digest]
 	}
 
 	top := order[0]
 	topRows := shapes[top].Rows
-	h := readRows(top, wp.TopRows)
+	h := open(top)
 	depth := log2(topRows) - 1
 	reduction := L - log2(topRows)
 	injAtWidth := map[int]int{} // pair width -> injection index
@@ -219,23 +217,22 @@ func emitBatchOpening(r *reader, s []string, L int, f *Fixture, b, k int, root [
 		h = e.MerkleStep(h, r.digest(sib), s[reduction+1+i])
 		width := 1 << (depth - i - 1)
 		if inj, ok := injAtWidth[width]; ok {
-			g := order[inj+1]
-			h = e.Node(h, readRows(g, wp.Injections[inj].Rows))
+			h = e.Node(h, open(order[inj+1]))
 		}
 	}
 	e.AssertEqAll(h, root)
-	return res
 }
 
 // emitDeepBridge checks, for one query and one size, that the DEEP quotient
-// recomputed from the opened rows equals the opened FRI values at ±X
-// (fri.checkFRIBridgeByPolynomial):
+// equals the opened FRI values at ±X (fri.checkFRIBridgeByPolynomial). With
+// inv_s(±X) = 1/(ζ·ω^s ∓ X), V_s the claimed-value sums and G_set the sums
+// returned by the opening gadgets,
 //
-//	DQ(±X) = Σ_s (V_s − F_s(±X)) / (ζ·ω^s ∓ X),   F_s(±X) = Σ_{i ∋ s} α^i·f_i(±X)
+//	DQ(±X) = Σ_s inv_s·V_s − Σ_set W_set·G_set,   W_set = Σ_{s ∈ set} inv_s.
 //
 // The inverses are prover hints, checked with e6_assert_inv.
-func emitDeepBridge(r *reader, s []string, L int, f *Fixture, k int, sr sizeRef, rows []openedRows,
-	V [][]string, zeta, alpha, dqP, dqQ []string) {
+func emitDeepBridge(r *reader, s []string, L int, f *Fixture, k int, sr sizeRef, groups []*groupRef,
+	sums map[*groupRef]groupSums, V [][]string, zeta, dqP, dqQ []string) {
 	e := r.e
 	ratLog := sr.logN + log2(constants.RATE)
 	reduction := L - ratLog
@@ -266,6 +263,8 @@ func emitDeepBridge(r *reader, s []string, L int, f *Fixture, k int, sr sizeRef,
 	}
 
 	accP, accQ := zeroE6(), zeroE6()
+	invP := make([][]string, len(sr.shifts))
+	invQ := make([][]string, len(sr.shifts))
 	for ki, sh := range sr.shifts {
 		// ζ·ω^s, then the denominators ζ·ω^s ∓ X and their inverses.
 		var om koalabear.Element
@@ -276,38 +275,57 @@ func emitDeepBridge(r *reader, s []string, L int, f *Fixture, k int, sr sizeRef,
 		dQ := slices.Clone(zs)
 		dQ[0] = e.Let(fmt.Sprintf("%s + %s", zs[0], x))
 
-		var zsV, dPV, dQV, invP, invQ ext.E6
+		var zsV, dPV, dQV, iPV, iQV ext.E6
 		zsV.MulByElement(&zetaV, &om)
 		dPV, dQV = zsV, zsV
 		dPV.B0.A0.Sub(&dPV.B0.A0, &X)
 		dQV.B0.A0.Add(&dQV.B0.A0, &X)
-		invP.Inverse(&dPV)
-		invQ.Inverse(&dQV)
-		iP, iQ := r.e6(invP), r.e6(invQ)
-		e.Line("e6_assert_inv(%s)", strings.Join(slices.Concat(dP, iP), ", "))
-		e.Line("e6_assert_inv(%s)", strings.Join(slices.Concat(dQ, iQ), ", "))
+		iPV.Inverse(&dPV)
+		iQV.Inverse(&dQV)
+		invP[ki], invQ[ki] = r.e6(iPV), r.e6(iQV)
+		e.Line("e6_assert_inv(%s)", strings.Join(slices.Concat(dP, invP[ki]), ", "))
+		e.Line("e6_assert_inv(%s)", strings.Join(slices.Concat(dQ, invQ[ki]), ", "))
 
-		// F_s(±X) over the polynomials opened at s.
-		termsP := make([][]string, len(sr.polys))
-		termsQ := make([][]string, len(sr.polys))
-		for pi, p := range sr.polys {
-			if !slices.Contains(p.shifts, sh) {
-				continue
+		accP = e.Call("e6_add", 6, slices.Concat(accP, e.Call("e6_mul", 6, slices.Concat(V[ki], invP[ki])...))...)
+		accQ = e.Call("e6_add", 6, slices.Concat(accQ, e.Call("e6_mul", 6, slices.Concat(V[ki], invQ[ki])...))...)
+	}
+
+	for _, gr := range groups {
+		for set, shifts := range gr.sets {
+			wP, wQ := zeroE6(), zeroE6()
+			for _, sh := range shifts {
+				ki := slices.Index(sr.shifts, sh)
+				wP = e.Call("e6_add", 6, slices.Concat(wP, invP[ki])...)
+				wQ = e.Call("e6_add", 6, slices.Concat(wQ, invQ[ki])...)
 			}
-			i := p.idx
-			if p.ext {
-				i += f.Shapes[p.batch][p.group].BaseWidth
-			}
-			termsP[pi] = rows[p.batch].lo[p.group][i]
-			termsQ[pi] = rows[p.batch].hi[p.group][i]
+			gs := sums[gr]
+			accP = e.Call("e6_sub", 6, slices.Concat(accP, e.Call("e6_mul", 6, slices.Concat(wP, gs.lo[set])...))...)
+			accQ = e.Call("e6_sub", 6, slices.Concat(accQ, e.Call("e6_mul", 6, slices.Concat(wQ, gs.hi[set])...))...)
 		}
-		fP, fQ := horner(e, termsP, alpha), horner(e, termsQ, alpha)
-
-		nP := e.Call("e6_sub", 6, slices.Concat(V[ki], fP)...)
-		nQ := e.Call("e6_sub", 6, slices.Concat(V[ki], fQ)...)
-		accP = e.Call("e6_add", 6, slices.Concat(accP, e.Call("e6_mul", 6, slices.Concat(nP, iP)...))...)
-		accQ = e.Call("e6_add", 6, slices.Concat(accQ, e.Call("e6_mul", 6, slices.Concat(nQ, iQ)...))...)
 	}
 	e.AssertEqAll(accP, dqP)
 	e.AssertEqAll(accQ, dqQ)
+}
+
+// e6Pow emits x^n by square-and-multiply.
+func e6Pow(e *Emitter, x []string, n int) []string {
+	res := []string{"1", "0", "0", "0", "0", "0"}
+	if n == 0 {
+		return res
+	}
+	first := true
+	for bit := bits.Len(uint(n)) - 1; bit >= 0; bit-- {
+		if !first {
+			res = e.Call("e6_mul", 6, slices.Concat(res, res)...)
+		}
+		if n>>bit&1 == 1 {
+			if first {
+				res = slices.Clone(x)
+			} else {
+				res = e.Call("e6_mul", 6, slices.Concat(res, x)...)
+			}
+		}
+		first = false
+	}
+	return res
 }
