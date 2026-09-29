@@ -28,7 +28,7 @@ func runZkc(t *testing.T, input string, files ...string) map[string][]byte {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pg, err := NewProgram(binf)
+	pg, err := NewProgram(binf, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -22,17 +22,21 @@ import (
 
 	"github.com/consensys/loom"
 	"github.com/consensys/loom/board"
+	loomfield "github.com/consensys/loom/field"
+	"github.com/consensys/loom/internal/protocol"
 	"github.com/consensys/loom/proof"
 	"github.com/consensys/loom/public"
 	"github.com/consensys/loom/trace"
 
+	"github.com/LFDT-Lineth/zkc/pkg/ir"
 	"github.com/LFDT-Lineth/zkc/pkg/util/field"
-	"github.com/LFDT-Lineth/zkc/pkg/util/source"
 	kb "github.com/LFDT-Lineth/zkc/pkg/util/field/koalabear"
+	"github.com/LFDT-Lineth/zkc/pkg/util/source"
 	"github.com/LFDT-Lineth/zkc/pkg/zkc/compiler"
 	"github.com/LFDT-Lineth/zkc/pkg/zkc/compiler/ast"
 	"github.com/LFDT-Lineth/zkc/pkg/zkc/compiler/codegen"
 	"github.com/LFDT-Lineth/zkc/pkg/zkc/constraints"
+	zkc_util "github.com/LFDT-Lineth/zkc/pkg/zkc/util"
 	"github.com/LFDT-Lineth/zkc/pkg/zkc/vm"
 )
 
@@ -67,20 +71,23 @@ func CompileFiles(filenames ...string) (*constraints.BinaryFile[kb.Element], err
 type Program struct {
 	Binary *constraints.BinaryFile[kb.Element]
 	Loom   board.Program
+	bridge *Bridge
 }
 
-// NewProgram translates a zkc binary into a loom program.
-func NewProgram(binf *constraints.BinaryFile[kb.Element]) (*Program, error) {
+// NewProgram translates a zkc binary into a loom program. gadgets define the
+// program's #[native] functions.
+func NewProgram(binf *constraints.BinaryFile[kb.Element], gadgets Gadgets) (*Program, error) {
 	schema := binf.AirConstraints()
 	builder := board.NewBuilder()
-	if _, err := NewBridge(&builder, &schema); err != nil {
+	bridge, err := NewBridge(&builder, &schema, gadgets)
+	if err != nil {
 		return nil, err
 	}
 	pg, err := board.Compile(&builder)
 	if err != nil {
 		return nil, fmt.Errorf("board.Compile: %w", err)
 	}
-	return &Program{Binary: binf, Loom: pg}, nil
+	return &Program{Binary: binf, Loom: pg, bridge: bridge}, nil
 }
 
 // Trace executes the program on input (a zkc JSON input map) and returns the
@@ -88,18 +95,29 @@ func NewProgram(binf *constraints.BinaryFile[kb.Element]) (*Program, error) {
 // The program's module sizes are updated to match the trace.
 func (p *Program) Trace(input map[string][]byte) (trace.Trace, map[string][]byte, error) {
 	input, _ = vm.FilterInputs(p.Binary.RawProgram(), input)
-	cfg := vm.DEFAULT_TRACE_CONFIG.WithParallelism(false)
+	cfg := vm.DEFAULT_TRACE_CONFIG.WithParallelism(false).WithPadding(minHeightPadding)
 	outputs, tr, errs := p.Binary.Trace(input, cfg)
 	if len(errs) > 0 {
 		return trace.Trace{}, nil, fmt.Errorf("trace: %w", errors.Join(errs...))
 	}
-	schema := p.Binary.AirConstraints()
-	lt, err := TraceToLoom(tr, &schema)
+	lt, err := p.bridge.TraceToLoom(tr)
 	if err != nil {
 		return trace.Trace{}, nil, err
 	}
 	SetSize(&p.Loom, lt)
 	return lt, outputs, nil
+}
+
+// MinModuleHeight is the smallest module height produced by Trace. Loom's
+// multi-degree FRI cannot introduce a size-1 level (its introduction round
+// would equal the number of folding rounds), so every module is padded to at
+// least this height.
+const MinModuleHeight = 4
+
+// minHeightPadding is zkc's next-power-of-two padding, with a floor of
+// MinModuleHeight rows.
+func minHeightPadding(height, multiplier uint) uint {
+	return max(ir.NextPowerOfTwoPadding(height, 1), MinModuleHeight) * multiplier
 }
 
 // ProveAndVerify runs setup, prove and verify (with full FRI) on the trace.
@@ -173,4 +191,166 @@ func formatSyntaxErrors(errs []source.SyntaxError) string {
 		msgs[i] = err.Error()
 	}
 	return strings.Join(msgs, "; ")
+}
+
+// Result is the outcome of Run.
+type Result struct {
+	// Outputs are the raw big-endian bytes of each output memory.
+	Outputs map[string][]byte
+	// Stats are the per-module sizes of the loom trace.
+	Stats []ModuleStats
+	// Leaf is what verifying a loom proof of this trace costs in leaf
+	// hashing, per query.
+	Leaf LeafCost
+	// LeafModules breaks Leaf.Elements down by module.
+	LeafModules []LeafBreakdown
+}
+
+// LeafCost is the per-query leaf hashing work of verifying a loom proof: every
+// committed polynomial (setup, trace, logup, AIR-quotient chunk) is opened at
+// every query, as one row pair per (tree, group).
+type LeafCost struct {
+	// Elements is the number of field elements opened per query: 2 per base
+	// polynomial and 12 per extension polynomial.
+	Elements int
+	// Perms is the number of Poseidon2 permutations hashing them: one sponge
+	// of 3 + Elements(group) elements per (tree, group).
+	Perms int
+}
+
+// LeafBreakdown is the per-query leaf elements of one module, by column kind.
+type LeafBreakdown struct {
+	Module                       string
+	Trace, Logup, Mult, Quotient int
+}
+
+// Total returns the module's leaf elements per query.
+func (l LeafBreakdown) Total() int { return l.Trace + l.Logup + l.Mult + l.Quotient }
+
+// LeafBreakdownOf returns the leaf elements per query of each module, sorted
+// by decreasing total.
+func LeafBreakdownOf(program board.Program) []LeafBreakdown {
+	per := map[string]*LeafBreakdown{}
+	get := func(m string) *LeafBreakdown {
+		if per[m] == nil {
+			per[m] = &LeafBreakdown{Module: m}
+		}
+		return per[m]
+	}
+	for _, r := range program.Rounds {
+		for _, c := range r.Staged {
+			w := 2
+			if c.Field == loomfield.Ext {
+				w = 12
+			}
+			l := get(c.Module)
+			switch {
+			case strings.Contains(c.Name, "logup"):
+				l.Logup += w
+			case strings.HasPrefix(c.Name, "Mult_"):
+				l.Mult += w
+			default:
+				l.Trace += w
+			}
+		}
+	}
+	layout := protocol.BuildLayout(program, 0)
+	for name := range layout.AIRChunkSlot {
+		get(moduleOf(name)).Quotient += 12
+	}
+	res := make([]LeafBreakdown, 0, len(per))
+	for _, l := range per {
+		res = append(res, *l)
+	}
+	sort.Slice(res, func(i, j int) bool {
+		if res[i].Total() != res[j].Total() {
+			return res[i].Total() > res[j].Total()
+		}
+		return res[i].Module < res[j].Module
+	})
+	return res
+}
+
+// LeafCostOf computes the leaf cost of a program whose module sizes are set.
+func LeafCostOf(program board.Program) LeafCost {
+	layout := protocol.BuildLayout(program, 0)
+	type key struct{ tree, group int }
+	width := map[key]int{}
+	add := func(s protocol.Slot) {
+		w := 2
+		if s.Field == loomfield.Ext {
+			w = 12
+		}
+		width[key{s.TreeIdx, s.GroupIdx}] += w
+	}
+	for _, s := range layout.ColSlot {
+		add(s)
+	}
+	for _, s := range layout.AIRChunkSlot {
+		add(s)
+	}
+	var res LeafCost
+	for _, w := range width {
+		res.Elements += w
+		res.Perms += (3 + w + 15) / 16
+	}
+	return res
+}
+
+// Measure compiles the zkc files and executes them on a JSON input, without
+// proving. It returns the outputs and the trace sizes.
+func Measure(input []byte, files ...string) (Result, error) {
+	return MeasureWith(input, nil, files...)
+}
+
+// MeasureWith is Measure with gadgets for the program's #[native] functions.
+func MeasureWith(input []byte, gadgets Gadgets, files ...string) (Result, error) {
+	binf, err := CompileFiles(files...)
+	if err != nil {
+		return Result{}, err
+	}
+	pg, err := NewProgram(binf, gadgets)
+	if err != nil {
+		return Result{}, err
+	}
+	in, err := zkc_util.ParseJsonInputFile(input)
+	if err != nil {
+		return Result{}, err
+	}
+	tr, outputs, err := pg.Trace(in)
+	if err != nil {
+		return Result{}, err
+	}
+	return Result{Outputs: outputs, Stats: Stats(tr), Leaf: LeafCostOf(pg.Loom), LeafModules: LeafBreakdownOf(pg.Loom)}, nil
+}
+
+// Run compiles the zkc files, executes them on a JSON input (zkc input file
+// format), and proves and verifies the trace with full FRI.
+func Run(input []byte, files ...string) (Result, error) {
+	return RunWith(input, nil, files...)
+}
+
+// RunWith is Run with gadgets for the program's #[native] functions.
+func RunWith(input []byte, gadgets Gadgets, files ...string) (Result, error) {
+	binf, err := CompileFiles(files...)
+	if err != nil {
+		return Result{}, err
+	}
+	pg, err := NewProgram(binf, gadgets)
+	if err != nil {
+		return Result{}, err
+	}
+	in, err := zkc_util.ParseJsonInputFile(input)
+	if err != nil {
+		return Result{}, err
+	}
+	tr, outputs, err := pg.Trace(in)
+	if err != nil {
+		return Result{}, err
+	}
+	res := Result{Outputs: outputs, Stats: Stats(tr), Leaf: LeafCostOf(pg.Loom), LeafModules: LeafBreakdownOf(pg.Loom)}
+	if _, err := pg.ProveAndVerify(tr); err != nil {
+		return res, err
+	}
+	return res, nil
 }

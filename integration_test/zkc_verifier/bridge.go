@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"math/bits"
 	"sort"
+	"strings"
 
 	gnark_kb "github.com/consensys/gnark-crypto/field/koalabear"
 	"github.com/consensys/gnark-crypto/field/koalabear/fft"
@@ -46,21 +47,58 @@ import (
 type Bridge struct {
 	Builder *board.Builder
 	Schema  *air.Schema[kb.Element]
+
+	// lookups groups the lookup constraints by target vectors, see
+	// addLookups.
+	lookups     map[string]*lookupGroup
+	lookupOrder []string
+
+	// natives are the #[native] function modules, by module name.
+	natives map[string]*nativeModule
+}
+
+// lookupGroup is the union of the sources of every lookup constraint sharing
+// the same target vectors.
+type lookupGroup struct {
+	targets []lookup.Vector
+	sources []lookup.Vector
 }
 
 // NewBridge creates one loom module per non-empty schema module and translates
 // every constraint. Constraints are translated in lexicographic Lisp order so
-// the resulting program is deterministic.
-func NewBridge(builder *board.Builder, s *air.Schema[kb.Element]) (*Bridge, error) {
-	b := &Bridge{Builder: builder, Schema: s}
-	for _, m := range s.Modules().Collect() {
+// the resulting program is deterministic. Native function modules are defined
+// by the gadget registered under their name.
+func NewBridge(builder *board.Builder, s *air.Schema[kb.Element], gadgets Gadgets) (*Bridge, error) {
+	b := &Bridge{Builder: builder, Schema: s, lookups: map[string]*lookupGroup{}, natives: map[string]*nativeModule{}}
+	for _, m := range s.RawModules() {
 		if m.Width() == 0 {
 			continue
 		}
-		if m.IsNative() {
-			return nil, fmt.Errorf("module %q: native modules are not supported", m.Name())
-		}
 		builder.AddModule(board.NewModule(m.Name()))
+		if !m.IsNative() {
+			continue
+		}
+		g, ok := gadgets[m.Name()]
+		if !ok {
+			return nil, fmt.Errorf("native module %q has no gadget", m.Name())
+		}
+		nm := &nativeModule{gadget: g, io: map[string]bool{}}
+		for _, r := range m.Registers() {
+			name := qualify(m.Name(), r.Name())
+			switch {
+			case r.IsInput():
+				nm.inputs = append(nm.inputs, name)
+			case r.IsOutput():
+				nm.outputs = append(nm.outputs, name)
+			default:
+				continue
+			}
+			nm.io[name] = true
+		}
+		if err := g.Define(builder, m.Name(), nm.inputs, nm.outputs); err != nil {
+			return nil, fmt.Errorf("native module %q: %w", m.Name(), err)
+		}
+		b.natives[m.Name()] = nm
 	}
 
 	css := s.Constraints().Collect()
@@ -78,6 +116,9 @@ func NewBridge(builder *board.Builder, s *air.Schema[kb.Element]) (*Bridge, erro
 		if err := b.addConstraint(names[i], css[i]); err != nil {
 			return nil, err
 		}
+	}
+	if err := b.addLookups(); err != nil {
+		return nil, err
 	}
 	return b, nil
 }
@@ -202,23 +243,15 @@ func (b *Bridge) addConstraint(name string, cs schema.Constraint[kb.Element]) er
 		if len(lc.Sources) == 0 || len(lc.Targets) == 0 || lc.Sources[0].Len() == 0 {
 			return fmt.Errorf("constraint %q: empty lookup", name)
 		}
-		width := int(lc.Sources[0].Len())
-		filtered := false
-		for _, v := range append(append([]lookup.Vector(nil), lc.Sources...), lc.Targets...) {
-			filtered = filtered || v.HasSelector()
+		key := vectorsKey(lc.Targets)
+		g, ok := b.lookups[key]
+		if !ok {
+			g = &lookupGroup{targets: lc.Targets}
+			b.lookups[key] = g
+			b.lookupOrder = append(b.lookupOrder, key)
 		}
-		S, selS := b.lookupTables(lc.Sources, width)
-		T, selT := b.lookupTables(lc.Targets, width)
-		switch {
-		case width == 1 && !filtered:
-			return arguments.LookupUnion(b.Builder, tablesToColumns(S), tablesToColumns(T))
-		case width == 1:
-			return arguments.CLookupUnion(b.Builder, selS, selT, tablesToColumns(S), tablesToColumns(T))
-		case !filtered:
-			return arguments.LookupUnionTuple(b.Builder, S, T)
-		default:
-			return arguments.CLookupUnionTuple(b.Builder, selS, selT, S, T)
-		}
+		g.sources = append(g.sources, lc.Sources...)
+		return nil
 
 	case air.RangeConstraint[kb.Element]:
 		rc := c.Unwrap()
@@ -237,6 +270,57 @@ func (b *Bridge) addConstraint(name string, cs schema.Constraint[kb.Element]) er
 	default:
 		return fmt.Errorf("constraint %q: unknown constraint type %T", name, cs)
 	}
+}
+
+// addLookups translates the grouped lookup constraints. zkc emits one lookup
+// per source (e.g. one per range-checked limb, or one per call site), many of
+// them into the same target; proving them as one union lookup per target gives
+// the target a single multiplicity and logup column instead of one per source.
+func (b *Bridge) addLookups() error {
+	for _, key := range b.lookupOrder {
+		g := b.lookups[key]
+		width := int(g.sources[0].Len())
+		filtered := false
+		for _, v := range append(append([]lookup.Vector(nil), g.sources...), g.targets...) {
+			filtered = filtered || v.HasSelector()
+			if int(v.Len()) != width {
+				return fmt.Errorf("lookup into %s: inconsistent widths", key)
+			}
+		}
+		S, selS := b.lookupTables(g.sources, width)
+		T, selT := b.lookupTables(g.targets, width)
+		var err error
+		switch {
+		case width == 1 && !filtered:
+			err = arguments.LookupUnion(b.Builder, tablesToColumns(S), tablesToColumns(T))
+		case width == 1:
+			err = arguments.CLookupUnion(b.Builder, selS, selT, tablesToColumns(S), tablesToColumns(T))
+		case !filtered:
+			err = arguments.LookupUnionTuple(b.Builder, S, T)
+		default:
+			err = arguments.CLookupUnionTuple(b.Builder, selS, selT, S, T)
+		}
+		if err != nil {
+			return fmt.Errorf("lookup into %s: %w", key, err)
+		}
+	}
+	return nil
+}
+
+// vectorsKey identifies lookup vectors by module, selector and registers.
+func vectorsKey(vs []lookup.Vector) string {
+	var sb strings.Builder
+	for _, v := range vs {
+		fmt.Fprintf(&sb, "[%d", v.Module)
+		if v.HasSelector() {
+			fmt.Fprintf(&sb, " sel=%d", v.Selector.Unwrap().Unwrap())
+		}
+		for i := range v.Len() {
+			fmt.Fprintf(&sb, " %d", v.Ith(i).Unwrap())
+		}
+		sb.WriteString("]")
+	}
+	return sb.String()
 }
 
 func (b *Bridge) lookupTables(vs []lookup.Vector, width int) ([]board.Table, []expr.Expr) {
@@ -266,8 +350,10 @@ func tablesToColumns(ts []board.Table) []board.Column {
 
 // TraceToLoom converts a single-shard expanded zkc trace into a loom trace.
 // Expanded modules are already padded to a power-of-two height. Static modules
-// are absent from the trace; their contents are taken from the schema.
-func TraceToLoom(tr gc_trace.Trace[kb.Element], s *air.Schema[kb.Element]) (trace.Trace, error) {
+// are absent from the trace; their contents are taken from the schema. Native
+// modules keep only their I/O columns, and their gadgets fill the rest.
+func (b *Bridge) TraceToLoom(tr gc_trace.Trace[kb.Element]) (trace.Trace, error) {
+	s := b.Schema
 	if len(tr) != 1 {
 		return trace.Trace{}, fmt.Errorf("TraceToLoom: expected 1 shard, got %d", len(tr))
 	}
@@ -288,13 +374,23 @@ func TraceToLoom(tr gc_trace.Trace[kb.Element], s *air.Schema[kb.Element]) (trac
 		if h == 0 || bits.OnesCount(h) != 1 {
 			return trace.Trace{}, fmt.Errorf("TraceToLoom: module %q has height %d, not a power of two", mod.Name(), h)
 		}
+		native := b.natives[mod.Name()]
 		for j := range mod.Width() {
+			name := qualify(mod.Name(), mod.Descriptor().Columns[j].Name)
+			if native != nil && !native.io[name] {
+				continue // internal register of the zkc reference body
+			}
 			col := mod.Column(j)
 			poly := make([]gnark_kb.Element, h)
 			for r := range h {
 				poly[r] = toGnark(col.Get(r))
 			}
-			res.SetBase(qualify(mod.Name(), mod.Descriptor().Columns[j].Name), poly)
+			res.SetBase(name, poly)
+		}
+		if native != nil {
+			if err := native.gadget.Fill(res, mod.Name(), native.inputs, native.outputs); err != nil {
+				return trace.Trace{}, fmt.Errorf("native module %q: %w", mod.Name(), err)
+			}
 		}
 	}
 	return res, nil
