@@ -3,9 +3,9 @@ package zkc
 import (
 	"testing"
 
+	zkc_util "github.com/LFDT-Lineth/zkc/pkg/zkc/util"
 	zkcv "github.com/consensys/loom/integration_test/zkc_verifier"
 	"github.com/consensys/loom/trace"
-	zkc_util "github.com/LFDT-Lineth/zkc/pkg/zkc/util"
 )
 
 // TestOpeningGadgetRejects tampers with the opening gadget's columns after

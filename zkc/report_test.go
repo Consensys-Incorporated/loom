@@ -7,10 +7,10 @@ import (
 	"strings"
 	"testing"
 
+	zkc_util "github.com/LFDT-Lineth/zkc/pkg/zkc/util"
 	"github.com/consensys/loom/field"
 	zkcv "github.com/consensys/loom/integration_test/zkc_verifier"
 	"github.com/consensys/loom/internal/protocol"
-	zkc_util "github.com/LFDT-Lineth/zkc/pkg/zkc/util"
 )
 
 type reportModule struct {
@@ -38,7 +38,11 @@ type reportConfig struct {
 }
 
 // TestReport writes the per-module column report of the benchmark shapes as
-// JSON to $ZKC_REPORT.
+// JSON to $ZKC_REPORT (an absolute path, since tests run inside zkc/). Render
+// it with zkc/cmd/census:
+//
+//	ZKC_REPORT=$PWD/zkc-report.json go test -count=1 -run TestReport ./zkc
+//	go run ./zkc/cmd/census -data zkc-report.json -out zkc-census.html
 func TestReport(t *testing.T) {
 	out := os.Getenv("ZKC_REPORT")
 	if out == "" {
