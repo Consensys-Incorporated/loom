@@ -215,27 +215,6 @@ func (b *Builder) AddLookupMultiplicityStep(r int, selS, selT []expr.Expr, S, T 
 	b.AddStepAt(r, NewProverStep(ins, outs, LookupMultiplicityStep, ctx))
 }
 
-func (b *Builder) addLogupConstraint(module string, E, M expr.Expr, output string) {
-
-	m := b.Modules[module]
-
-	// logup * E - logup-1*E - M = 0, except at 0
-	recurrenceRelation := expr.Col(output).Mul(E).Sub(expr.Col(output, expr.WithShift(-1)).Mul(E)).Sub(M)
-	m.AssertZeroExceptAt(recurrenceRelation, 0)
-
-	// logup[0]*E[0] - M[0] = 0
-	boundaryRelation := expr.Col(output).Mul(E).Sub(M)
-	m.AssertZeroAt(boundaryRelation, 0)
-}
-
-// AddLogupStep register the action of computing the column interpolating the running sum
-// \Sigma_j<=i M[i]/E[i]
-func (b *Builder) AddLogupStep(r int, module string, E, M expr.Expr, output string) {
-	logupStep := NewProverStep([]expr.Expr{E, M}, []string{output}, LogUpStep, LogUpCtx{})
-	b.AddStepAt(r, logupStep)
-	b.addLogupConstraint(module, E, M, output)
-}
-
 func (b *Builder) addGrandProductConstraint(module string, N, D expr.Expr, output string) {
 	m := b.Modules[module]
 	gp := expr.Col(output)

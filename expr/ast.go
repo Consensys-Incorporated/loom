@@ -50,6 +50,11 @@ const (
 	LagrangeHook
 	PublicInputHook  // verifier-supplied statement values
 	ExposedValueHook // prover-exposed local values, carried by the proof
+	// ExposedAverageHook is the constant column T/N, where T is a value
+	// exposed by the prover and N the size of the module using the column.
+	// Cyclic logup columns use it to close their running sum (see
+	// board.AddCyclicLogupStep).
+	ExposedAverageHook
 )
 
 func (h HookID) String() string {
@@ -62,6 +67,8 @@ func (h HookID) String() string {
 		return "public-input"
 	case ExposedValueHook:
 		return "exposed-value"
+	case ExposedAverageHook:
+		return "exposed-average"
 	default:
 		return fmt.Sprintf("unknown(%d)", int(h))
 	}
@@ -211,6 +218,13 @@ func ExtSetup(name string, opts ...LeafOption) *Leaf {
 
 func Exposed(name string, opts ...LeafOption) *Leaf {
 	return applyLeafOptions(&Leaf{Type: VerifierColumn, Hook: ExposedValueHook, Name: name}, opts...)
+}
+
+// ExposedAverage is the constant extension column T/N, where T is the value
+// the prover exposes under name and N is the size of the module the column is
+// used in.
+func ExposedAverage(name string, opts ...LeafOption) *Leaf {
+	return applyLeafOptions(&Leaf{Type: VerifierColumn, Hook: ExposedAverageHook, Name: name, Field: field.Ext}, opts...)
 }
 
 func PublicInput(name string, opts ...LeafOption) *Leaf {

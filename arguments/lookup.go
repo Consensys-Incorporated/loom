@@ -155,34 +155,64 @@ func stageLookup(builder *board.Builder, selS, selT []expr.Expr, S, T []board.Ta
 	return mult, nil
 }
 
-// addLogups adds, at RoundRunningSums, the running sums Σ M/(x − γ) of the
-// folded sources (with numerators numS) and targets (with numerators numT),
-// and checks that they balance.
+// MaxLogupBatch is the largest number of fractions summed by one logup
+// column: three linear denominators give a degree-4 constraint (see
+// board.LogupConstraintDegree).
+const MaxLogupBatch = 3
+
+// addLogups adds, at RoundRunningSums, the cyclic logup columns of the folded
+// sources (fractions numS/(s − γ)) and targets (numT/(t − γ)), and balances
+// their totals on a bus. Sources of the same module are batched by up to
+// MaxLogupBatch per column, within board.MaxLogupDegree; each target gets its
+// own column.
 func addLogups(builder *board.Builder, S, T []board.Column, numS, numT []expr.Expr) error {
 	gamma := board.Coin(board.RoundLogDerivative)
-	add := func(cols []board.Column, num []expr.Expr) ([]board.Column, error) {
-		base, err := constants.RandomString(10)
-		if err != nil {
-			return nil, err
-		}
-		res := make([]board.Column, len(cols))
-		for i, c := range cols {
-			name := constants.LogupChunkName(fmt.Sprintf("%s.%s_%s", c.Module, constants.LOGUP, base), i)
-			builder.AddLogupStep(board.RoundRunningSums, c.Module, c.In.Sub(gamma), num[i], name)
-			res[i] = board.Column{Module: c.Module, In: expr.Col(name)}
-		}
-		return res, nil
-	}
-	logupT, err := add(T, numT)
+	positives, err := addLogupColumns(builder, S, numS, gamma, MaxLogupBatch)
 	if err != nil {
 		return err
 	}
-	logupS, err := add(S, numS)
+	negatives, err := addLogupColumns(builder, T, numT, gamma, 1)
 	if err != nil {
 		return err
 	}
-	AddLogupEqualityCheck(builder, logupS, logupT)
+	builder.AddLogupBus(board.NewLogupBus(positives, negatives))
 	return nil
+}
+
+// addLogupColumns groups the fractions num[i]/(cols[i] − γ) by module, in
+// order, into logup columns of at most maxBatch fractions each, and returns
+// the names of their exposed totals.
+func addLogupColumns(builder *board.Builder, cols []board.Column, num []expr.Expr, gamma expr.Expr, maxBatch int) ([]string, error) {
+	var order []string
+	byModule := map[string][]board.LogupTerm{}
+	for i, c := range cols {
+		if _, ok := byModule[c.Module]; !ok {
+			order = append(order, c.Module)
+		}
+		byModule[c.Module] = append(byModule[c.Module], board.LogupTerm{E: c.In.Sub(gamma), M: num[i]})
+	}
+	var totals []string
+	for _, module := range order {
+		terms := byModule[module]
+		for len(terms) > 0 {
+			n := 1
+			for n < min(maxBatch, len(terms)) && board.LogupConstraintDegree(terms[:n+1]) <= board.MaxLogupDegree {
+				n++
+			}
+			base, err := constants.RandomString(10)
+			if err != nil {
+				return nil, err
+			}
+			name := constants.LogupChunkName(fmt.Sprintf("%s.%s_%s", module, constants.LOGUP, base), 0)
+			total, err := builder.AddCyclicLogupStep(board.RoundRunningSums, module, terms[:n], name)
+			if err != nil {
+				return nil, err
+			}
+			totals = append(totals, total)
+			terms = terms[n:]
+		}
+	}
+	return totals, nil
 }
 
 // foldTables folds each table into a single column with α = Coin(RoundFold).

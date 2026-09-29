@@ -180,7 +180,7 @@ func inferStepOutputFields(step ProverStep, columnFields map[string]field.Kind) 
 	}
 
 	switch step.Ctx.(type) {
-	case LogUpCtx, GPCtx:
+	case CyclicLogUpCtx, GPCtx:
 		f := fieldOfInputs(step.Ins)
 		for i := range res {
 			res[i] = f

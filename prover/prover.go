@@ -388,7 +388,19 @@ func (pr *proverRuntime) ExecuteSteps() error {
 		if err := pr.commitTraceRound(roundIdx, challengeName); err != nil {
 			return err
 		}
-		if round.FSHook != board.NoFSHook {
+		switch round.FSHook {
+		case board.NoFSHook:
+		case board.BindExposedValues:
+			for _, name := range round.ExposedValueNames() {
+				v, ok := pr.Proof.ExposedValues[name]
+				if !ok {
+					return fmt.Errorf("ExecuteSteps: round %d: exposed value %s missing", roundIdx, name)
+				}
+				if err := pr.fs.Bind(challengeName, board.ExposedValueElements(v)); err != nil {
+					return err
+				}
+			}
+		default:
 			return fmt.Errorf("ExecuteSteps: round %d: FS hook %d is not supported", roundIdx, round.FSHook)
 		}
 

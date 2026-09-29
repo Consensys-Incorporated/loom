@@ -2,11 +2,14 @@ package board
 
 import (
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/consensys/gnark-crypto/field/koalabear"
 	"github.com/consensys/loom/expr"
 	"github.com/consensys/loom/internal/constants"
+	"github.com/consensys/loom/proof"
+	"github.com/consensys/loom/trace"
 )
 
 // lookupShapedBuilder reproduces by hand the round structure of
@@ -37,7 +40,7 @@ func lookupShapedBuilder() Builder {
 	b.StageColumns(RoundFold, "mult_0")
 
 	b.AddStepAt(RoundRunningSums,
-		NewProverStep([]expr.Expr{foldedT.Sub(gamma), expr.Col("mult_0")}, []string{"logup"}, LogUpStep, LogUpCtx{}))
+		NewProverStep([]expr.Expr{foldedT.Sub(gamma), expr.Col("mult_0")}, []string{"logup"}, testStep, testCtx{}))
 	return b
 }
 
@@ -124,7 +127,7 @@ func TestValidateRejectsStagingBeforeProduction(t *testing.T) {
 
 	b.StageColumns(RoundFold, "x", "y")
 	b.AddStepAt(RoundLogDerivative,
-		NewProverStep([]expr.Expr{expr.Col("x")}, []string{"y"}, LogUpStep, LogUpCtx{}))
+		NewProverStep([]expr.Expr{expr.Col("x")}, []string{"y"}, testStep, testCtx{}))
 	compileErr(t, &b, "before it is filled")
 }
 
@@ -161,7 +164,7 @@ func TestCompileRoundsSweepsEarlyProducedColumnAndRecordsIt(t *testing.T) {
 
 	b.StageColumns(RoundFold, "x")
 	b.AddStepAt(RoundFold,
-		NewProverStep([]expr.Expr{expr.Col("x"), expr.Const(one)}, []string{"logup"}, LogUpStep, LogUpCtx{}))
+		NewProverStep([]expr.Expr{expr.Col("x"), expr.Const(one)}, []string{"logup"}, testStep, testCtx{}))
 	b.growTo(RoundLogDerivative) // last declared round: the sweep lands at 1
 
 	prog, err := Compile(&b)
@@ -190,9 +193,9 @@ func TestValidateRejectsForwardColumnRead(t *testing.T) {
 	b.AddModule(m)
 
 	b.AddStepAt(RoundFold,
-		NewProverStep([]expr.Expr{expr.Col("late")}, []string{"early"}, LogUpStep, LogUpCtx{}))
+		NewProverStep([]expr.Expr{expr.Col("late")}, []string{"early"}, testStep, testCtx{}))
 	b.AddStepAt(RoundFold,
-		NewProverStep([]expr.Expr{expr.Col("early")}, []string{"late"}, LogUpStep, LogUpCtx{}))
+		NewProverStep([]expr.Expr{expr.Col("early")}, []string{"late"}, testStep, testCtx{}))
 	compileErr(t, &b, "before it is produced")
 }
 
@@ -227,7 +230,7 @@ func TestValidateRejectsSameRoundChallengeUse(t *testing.T) {
 	b.StageColumns(RoundFold, "x")
 	b.AddStepAt(RoundLogDerivative,
 		NewProverStep([]expr.Expr{expr.Col("x").Sub(Coin(RoundLogDerivative)), expr.Const(one)},
-			[]string{"logup"}, LogUpStep, LogUpCtx{}))
+			[]string{"logup"}, testStep, testCtx{}))
 	compileErr(t, &b, "only sampled at the end of round")
 }
 
@@ -260,4 +263,11 @@ func TestParseCanonicalChallengeName(t *testing.T) {
 			t.Errorf("ParseCanonicalChallengeName(%q) succeeded, want false", bad)
 		}
 	}
+}
+
+// testStep is a no-op step: these tests only compile rounds.
+type testCtx struct{}
+
+func testStep(_ []expr.Expr, _ []string, _ trace.Trace, _ *Program, _ *proof.Proof, _ *sync.Mutex, _ StepContext) error {
+	return nil
 }

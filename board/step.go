@@ -292,38 +292,6 @@ func LookupMultiplicityStep(ins []expr.Expr, outs []string, t trace.Trace, _ *Pr
 	return nil
 }
 
-type LogUpCtx struct{}
-
-// _LogUpStep computes the running sum M/E where
-// ins[0] = E, ins[1] = M
-func LogUpStep(ins []expr.Expr, outs []string, t trace.Trace, prog *Program, proof *proof.Proof, mu *sync.Mutex, _ StepContext) error {
-
-	out := outs[0]
-	E := ins[0]
-	M := ins[1]
-
-	if shouldRunExtStep(prog, out) {
-		res, err := poly.BuildLogupMixed(t.Base, t.Ext, prog.ColumnFields, E, M, mu)
-		if err != nil {
-			return err
-		}
-		if err := t.PutExt(out, res); err != nil {
-			panic(fmt.Sprintf("[_LogUpStep] register logup column %s: %v", out, err))
-		}
-		return nil
-	}
-
-	res, err := poly.BuildLogup(t.Base, E, M, mu)
-	if err != nil {
-		return err
-	}
-	if err := t.PutBase(out, res); err != nil {
-		panic(fmt.Sprintf("[_LogUpStep] register logup column %s: %v", out, err))
-	}
-
-	return nil
-}
-
 type GPCtx struct{}
 
 // _GrandProductStep computes the running product N/D where

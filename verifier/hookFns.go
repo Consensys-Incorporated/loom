@@ -2,6 +2,7 @@ package verifier
 
 import (
 	"fmt"
+	"github.com/consensys/gnark-crypto/field/koalabear"
 
 	ext "github.com/consensys/gnark-crypto/field/koalabear/extensions"
 	"github.com/consensys/loom/board"
@@ -23,9 +24,10 @@ var HookMap map[expr.HookID]HookFn
 
 func init() {
 	HookMap = map[expr.HookID]HookFn{
-		expr.LagrangeHook:     lagrange,
-		expr.PublicInputHook:  publicInputs,
-		expr.ExposedValueHook: exposedColumns,
+		expr.LagrangeHook:       lagrange,
+		expr.PublicInputHook:    publicInputs,
+		expr.ExposedValueHook:   exposedColumns,
+		expr.ExposedAverageHook: exposedAverage,
 	}
 }
 
@@ -74,4 +76,22 @@ func exposedColumns(vr *verifierRunTime, module board.CompiledModule, leaf *expr
 		lag.Add(&lag, &tmp)
 	}
 	return lag, nil
+}
+
+// exposedAverage evaluates the constant column T/N: T is the single entry the
+// prover exposed under the leaf's name, and N the size of the module.
+func exposedAverage(vr *verifierRunTime, module board.CompiledModule, leaf *expr.Leaf) (ext.E6, error) {
+	pi, ok := vr.proof.ExposedValues[leaf.Name]
+	if !ok || len(pi.Entries) != 1 {
+		return ext.E6{}, fmt.Errorf("exposedAverage hook: %s must be exposed with exactly one entry", leaf.Name)
+	}
+	if module.N <= 0 {
+		return ext.E6{}, fmt.Errorf("exposedAverage hook: module %q has size %d", module.Name, module.N)
+	}
+	var invN koalabear.Element
+	invN.SetUint64(uint64(module.N))
+	invN.Inverse(&invN)
+	v := pi.Entries[0].ExtValue()
+	v.MulByElement(&v, &invN)
+	return v, nil
 }

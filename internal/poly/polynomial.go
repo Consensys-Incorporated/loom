@@ -110,23 +110,6 @@ func invertPointwiseInPlace(P Polynomial) {
 	}
 }
 
-// accumulateSums returns R such that R[0] = P[0], R[i] = R[i-1] + P[i]
-// N = size of P
-func accumulateSums(P Polynomial, N int) (Polynomial, error) {
-
-	// build the result R in lagrange basis of size targetSize such that:
-	// R[0] = P[0], R[i] = R[i-1] + P[i] for i>0
-	result := make(Polynomial, N)
-	c := P[0]
-	result[0].Set(&c)
-	for i := 1; i < N; i++ {
-		c = P[i]
-		result[i].Add(&result[i-1], &c)
-	}
-
-	return result, nil
-}
-
 // accumulateProducts returns R such that R[i+1] = R[i]*P[i], R[0]=1
 // N = size of P
 func accumulateProducts(P Polynomial, N int) (Polynomial, error) {

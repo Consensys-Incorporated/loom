@@ -25,37 +25,12 @@ import (
 // PermutationCrossModules we use the lookup in this case, so that each module has its own logup
 func PermutationCrossModules(builder *board.Builder, A, B board.Column) error {
 
-	// 1. commit A and B, and use the log-derivative challenge
+	// 1. commit A and B; the logups use the log-derivative challenge
 	builder.StageLeaves(board.RoundFold, A.In, B.In)
-	gamma := board.Coin(board.RoundLogDerivative)
 
-	// 2. register lookup for both parties
-	prefixLogup := "logup"
-	_logupA, err := constants.RandomString(10)
-	if err != nil {
-		return err
-	}
-	_logupB, err := constants.RandomString(10)
-	if err != nil {
-		return err
-	}
-	_logupA = fmt.Sprintf("%s.%s_%s", A.Module, prefixLogup, _logupA)
-	_logupB = fmt.Sprintf("%s.%s_%s", B.Module, prefixLogup, _logupB)
-	{
-		aMinusGamma := A.In.Sub(gamma)
-		builder.AddLogupStep(board.RoundRunningSums, A.Module, aMinusGamma, expr.Const(koalabear.One()), _logupA)
-	}
-	{
-		bMinusGamma := B.In.Sub(gamma)
-		builder.AddLogupStep(board.RoundRunningSums, B.Module, bMinusGamma, expr.Const(koalabear.One()), _logupB)
-	}
-
-	// 3. Check logup relation
-	logupA := board.Column{Module: A.Module, In: expr.Col(_logupA)}
-	logupB := board.Column{Module: B.Module, In: expr.Col(_logupB)}
-	AddLogupEqualityCheck(builder, []board.Column{logupA}, []board.Column{logupB})
-
-	return nil
+	// 2. one cyclic logup column per party, balanced on a bus
+	one := expr.Const(koalabear.One())
+	return addLogups(builder, []board.Column{A}, []board.Column{B}, []expr.Expr{one}, []expr.Expr{one})
 }
 
 // PermutationWithinModule we use the grand product argument in that case, it saves a column (1 grand product instead of 2 logups+bus)

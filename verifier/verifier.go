@@ -235,15 +235,27 @@ func (vr *verifierRunTime) deriveChallenges() error {
 	// Setup roots were already bound to challenge_0 in newVerifierRuntime.
 	for r, round := range vr.program.Rounds {
 		challengeName := constants.CanonicalChallengeName(r)
-		if round.FSHook != board.NoFSHook {
-			return fmt.Errorf("deriveChallenges: round %d: FS hook %d is not supported", r, round.FSHook)
-		}
 		for i := vr.layout.TraceBegin[r]; i < vr.layout.TraceEnd[r]; i++ {
 			root := vr.roots[i]
 			err := vr.fs.Bind(challengeName, root[:])
 			if err != nil {
 				return err
 			}
+		}
+		switch round.FSHook {
+		case board.NoFSHook:
+		case board.BindExposedValues:
+			for _, name := range round.ExposedValueNames() {
+				v, ok := vr.proof.ExposedValues[name]
+				if !ok {
+					return fmt.Errorf("deriveChallenges: round %d: exposed value %s missing", r, name)
+				}
+				if err := vr.fs.Bind(challengeName, board.ExposedValueElements(v)); err != nil {
+					return err
+				}
+			}
+		default:
+			return fmt.Errorf("deriveChallenges: round %d: FS hook %d is not supported", r, round.FSHook)
 		}
 		challenge, err := vr.fs.ComputeChallenge(challengeName)
 		if err != nil {
@@ -357,19 +369,17 @@ func (vr *verifierRunTime) checkLogupBus() error {
 	for _, bus := range vr.program.LogupBus {
 		var cumNegative, cumPositive ext.E6
 		for _, pos := range bus.Positive {
-			if len(vr.proof.ExposedValues[pos].Entries) > 1 {
-				return fmt.Errorf("an extracted value from a logup column should have exactly one entry")
+			if len(vr.proof.ExposedValues[pos].Entries) != 1 {
+				return fmt.Errorf("the total of logup column %s should have exactly one entry", pos)
 			}
-			// TODO add a check that the exposed value's index is N-1
 			pe := vr.proof.ExposedValues[pos].Entries[0]
 			value := pe.ExtValue()
 			cumPositive.Add(&cumPositive, &value)
 		}
 		for _, neg := range bus.Negative {
-			if len(vr.proof.ExposedValues[neg].Entries) > 1 {
-				return fmt.Errorf("an extracted value from a logup column should have exactly one entry")
+			if len(vr.proof.ExposedValues[neg].Entries) != 1 {
+				return fmt.Errorf("the total of logup column %s should have exactly one entry", neg)
 			}
-			// TODO add a check that the exposed value's index is N-1
 			pe := vr.proof.ExposedValues[neg].Entries[0]
 			value := pe.ExtValue()
 			cumNegative.Add(&cumNegative, &value)

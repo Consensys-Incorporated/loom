@@ -632,42 +632,6 @@ func TestAccumulateProducts(t *testing.T) {
 	})
 }
 
-func TestBuildLogup(t *testing.T) {
-
-	t.Run("TriangularNumbers", func(t *testing.T) {
-		// P = [1/1, 1/2, 1/3, ..., 1/8]
-		// BuildLogup gives R[k] = 1+2+...+(k+1) = (k+1)(k+2)/2
-		size := 8
-		P := makeLagrangePoly(1, 2, 3, 4, 5, 6, 7, 8)
-		for i := range P {
-			P[i].Inverse(&P[i])
-		}
-
-		E := expr.Col("P")
-		M := expr.Const(koalabear.One())
-		T := map[string]Polynomial{"P": P}
-		R, err := BuildLogup(T, E, M, nil)
-		if err != nil {
-			t.Fatal(err)
-		}
-
-		var two, twoInv koalabear.Element
-		two.SetUint64(2)
-		twoInv.Inverse(&two)
-		expected := make([]koalabear.Element, size)
-		for k := 0; k < size; k++ {
-			var a, b koalabear.Element
-			a.SetUint64(uint64(k + 1))
-			b.SetUint64(uint64(k + 2))
-			expected[k].Mul(&a, &b).Mul(&expected[k], &twoInv)
-		}
-		checkPointwise(t, R, expected)
-	})
-}
-
-// verifyQuotientIdentity checks E(Pi(x)) == Q(x)*(x^N-1) at a random point x.
-// Q is in coset-Lagrange form (as returned by ComputeQuotient).
-// Pi polynomials are in Lagrange Normal form.
 func verifyQuotientIdentity(t *testing.T, Pi map[string]Polynomial, E expr.Expr, Q Polynomial, N int) {
 	t.Helper()
 

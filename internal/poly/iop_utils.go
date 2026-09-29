@@ -105,44 +105,6 @@ func inferNMixed(PiBase map[string]Polynomial, PiExt map[string]ExtPolynomial, e
 	return 0, fmt.Errorf("inferNMixed: could not determine N — all leaves are constant or missing from trace")
 }
 
-// BuildGrandSum returns R such that
-// R[i] = Σ_{j⩽i}M[j]/E[j]
-// The notation E[i] means the i-th entry of E evaluated on P (same for M).
-func BuildLogup(P map[string]Polynomial, E, M expr.Expr, mu *sync.Mutex) (Polynomial, error) {
-
-	// pick first non length(1) entry of one of the leafs of type Col of E or M, let N be that value
-	N, err := inferN(P, E, M)
-	if err != nil {
-		return Polynomial{}, err
-	}
-
-	// D stores the denominators 1/E(P); pooled because it is only needed until accumulateSums copies it.
-	D := getBuf(N)
-	if err := evalPointWiseInto(P, E, N, mu, D); err != nil {
-		putBuf(D)
-		return Polynomial{}, err
-	}
-	invertPointwiseInPlace(D)
-
-	// Mp is pooled: it is multiplied into D and then discarded.
-	Mp := getBuf(N)
-	if err := evalPointWiseInto(P, M, N, mu, Mp); err != nil {
-		putBuf(D)
-		putBuf(Mp)
-		return Polynomial{}, err
-	}
-	for i := 0; i < N; i++ {
-		di := D[i]
-		mi := Mp[i]
-		D[i].Mul(&di, &mi)
-	}
-	putBuf(Mp)
-
-	result, err := accumulateSums(D, N)
-	putBuf(D)
-	return result, err
-}
-
 // BuildLogupMixed returns the running sum M/E for mixed base and extension
 // inputs. The output is always an extension polynomial.
 func BuildLogupMixed(PiBase map[string]Polynomial, PiExt map[string]ExtPolynomial, columnFields map[string]field.Kind, E, M expr.Expr, mu *sync.Mutex) (ExtPolynomial, error) {

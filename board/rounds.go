@@ -87,6 +87,14 @@ type FSHookID int
 // acquire a real hook.
 const NoFSHook FSHookID = 0
 
+// BindExposedValues binds, after the round's commitment, every value exposed
+// by the round's steps (see ProverRound.ExposedValueNames), in step order and
+// encoded by ExposedValueElements. Exposed values enter the relations as
+// verifier columns, which are not committed: without this binding, a prover
+// could choose them after seeing the challenges that follow. Compile sets it
+// on every round whose steps expose values.
+const BindExposedValues FSHookID = 1
+
 // ProverRound is one round of the compiled protocol.
 type ProverRound struct {
 	// Steps run before this round's commitment, in slice order. A step may
@@ -225,6 +233,12 @@ func compileRounds(b *Builder) ([]ProverRound, []LateColumn, error) {
 	staged := make(map[string]int) // column name -> round that stages it
 	for r, br := range declared {
 		round := ProverRound{Steps: br.Steps, FSHook: br.FSHook}
+		if len(round.ExposedValueNames()) > 0 {
+			if round.FSHook != NoFSHook && round.FSHook != BindExposedValues {
+				return nil, nil, fmt.Errorf("board.Compile: round %d exposes values but has FS hook %d", r, round.FSHook)
+			}
+			round.FSHook = BindExposedValues
+		}
 		for _, name := range br.Staged {
 			if prev, ok := staged[name]; ok {
 				return nil, nil, fmt.Errorf(

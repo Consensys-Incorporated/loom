@@ -56,7 +56,9 @@ func TestCompileColumnFieldsForChallengeDerivedOutputs(t *testing.T) {
 
 	builder.StageColumns(RoundFold, "x", "y")
 	denominator := expr.Col("x").Sub(Coin(RoundLogDerivative))
-	builder.AddLogupStep(RoundRunningSums, "m", denominator, expr.Const(one), "logup")
+	if _, err := builder.AddCyclicLogupStep(RoundRunningSums, "m", []LogupTerm{{E: denominator, M: expr.Const(one)}}, "logup"); err != nil {
+		t.Fatal(err)
+	}
 	builder.AddGrandProductStep(RoundRunningSums, "m", expr.Col("x").Add(Coin(RoundFold)), expr.Col("y"), "gp")
 	builder.AddExposeLastEntryStep(RoundRunningSums, "m", expr.Col("logup"), "public_logup")
 
