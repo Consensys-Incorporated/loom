@@ -56,6 +56,6 @@ type ExposedValues map[string]ExposedValue
 // participating in a log derivative based interaction, for instance a lookup
 // The logup must satisfy Σ_i Logup_Sender_val_i - Σ_i Logup_Receiver_val_i=0
 type LogupBus struct {
-	Positive []string // Positive[i] = name of the public column whose n-1-th entry is the logup of the i-th positive logup column (the corresponding public column is in PublicInputs[name])
-	Negative []string // Negative[i] = name of the public column whose n-1-th entry is the logup of the i-th negative logup column (the corresponding public column is in PublicInputs[name])
+	Positive []string // Positive[i] = name of the exposed total of the i-th positive logup column (proof.ExposedValues[name], one entry)
+	Negative []string // Negative[i] = name of the exposed total of the i-th negative logup column (proof.ExposedValues[name], one entry)
 }
