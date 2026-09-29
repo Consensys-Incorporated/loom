@@ -25,16 +25,11 @@ import (
 // PermutationCrossModules we use the lookup in this case, so that each module has its own logup
 func PermutationCrossModules(builder *board.Builder, A, B board.Column) error {
 
-	// 1. sample challenge
-	_gamma, err := constants.RandomString(10)
-	if err != nil {
-		return err
-	}
-	fsInputs := []expr.Expr{A.In, B.In}
-	builder.AddFiatShamirStep(fsInputs, _gamma)
+	// 1. commit A and B, and use the log-derivative challenge
+	builder.StageLeaves(board.RoundFold, A.In, B.In)
+	gamma := board.Coin(board.RoundLogDerivative)
 
 	// 2. register lookup for both parties
-	gamma := expr.Challenge(_gamma)
 	prefixLogup := "logup"
 	_logupA, err := constants.RandomString(10)
 	if err != nil {
@@ -48,11 +43,11 @@ func PermutationCrossModules(builder *board.Builder, A, B board.Column) error {
 	_logupB = fmt.Sprintf("%s.%s_%s", B.Module, prefixLogup, _logupB)
 	{
 		aMinusGamma := A.In.Sub(gamma)
-		builder.AddLogupStep(A.Module, aMinusGamma, expr.Const(koalabear.One()), _logupA)
+		builder.AddLogupStep(board.RoundRunningSums, A.Module, aMinusGamma, expr.Const(koalabear.One()), _logupA)
 	}
 	{
 		bMinusGamma := B.In.Sub(gamma)
-		builder.AddLogupStep(B.Module, bMinusGamma, expr.Const(koalabear.One()), _logupB)
+		builder.AddLogupStep(board.RoundRunningSums, B.Module, bMinusGamma, expr.Const(koalabear.One()), _logupB)
 	}
 
 	// 3. Check logup relation
@@ -67,25 +62,12 @@ func PermutationCrossModules(builder *board.Builder, A, B board.Column) error {
 // Generates an argument to prove that (A[0] || A[1] || ..) and (B[0] || B[1] || ..) are equal up to permutation
 func PermutationWithinModule(builder *board.Builder, module string, A, B []expr.Expr) error {
 
-	// 1. sample challenge
-	_gamma, err := constants.RandomString(10)
-	if err != nil {
-		return err
-	}
-	inputA := make([]board.Column, len(A))
-	inputB := make([]board.Column, len(B))
-	for i, a := range A {
-		inputA[i] = board.Column{Module: module, In: a}
-	}
-	for i, b := range B {
-		inputB[i] = board.Column{Module: module, In: b}
-	}
-	// fsInputs := append(inputA, inputB...)
-	fsInputs := append(A, B...)
-	builder.AddFiatShamirStep(fsInputs, _gamma)
+	// 1. commit A and B, and use the log-derivative challenge
+	builder.StageLeaves(board.RoundFold, A...)
+	builder.StageLeaves(board.RoundFold, B...)
+	gamma := board.Coin(board.RoundLogDerivative)
 
 	// 2. register permutation
-	gamma := expr.Col(_gamma)
 	AminusGamma := make([]expr.Expr, len(A))
 	BminusGamma := make([]expr.Expr, len(B))
 	for i, a := range A {
@@ -106,7 +88,7 @@ func PermutationWithinModule(builder *board.Builder, module string, A, B []expr.
 	for i := 1; i < len(BminusGamma); i++ {
 		Bmul = Bmul.Mul(BminusGamma[i])
 	}
-	builder.AddGrandProductStep(module, Amul, Bmul, _gp)
+	builder.AddGrandProductStep(board.RoundRunningSums, module, Amul, Bmul, _gp)
 	m := builder.Modules[module]
 	m.AssertEqualAt(expr.Const(koalabear.One()), expr.Col(_gp), 0)
 	builder.Modules[module] = m
@@ -128,33 +110,17 @@ func PermutationWithinModule(builder *board.Builder, module string, A, B []expr.
 // The rows of each matrix are folded, and we call PermutationWithinModule afterwards
 func PermutationTupleWithinModule(builder *board.Builder, module string, A, B [][]expr.Expr) error {
 
-	// 1. sample folding challenge
-	_gamma, err := constants.RandomString(10)
-	if err != nil {
-		return err
-	}
-	tableWidth := len(A[0])
-	inputA := make([]expr.Expr, len(A)*tableWidth)
-	inputB := make([]expr.Expr, len(B)*tableWidth)
-	for i, a := range A {
-		copy(inputA[i*tableWidth:], a)
-	}
-	for i, b := range B {
-		copy(inputB[i*tableWidth:], b)
-	}
-	fsInputs := append(inputA, inputB...)
-	builder.AddFiatShamirStep(fsInputs, _gamma)
-
-	// 2. fold relations
-	gamma := expr.Challenge(_gamma)
+	// 1. fold the rows with α = Coin(RoundFold); PermutationWithinModule
+	// commits the raw columns at RoundFold.
+	alpha := board.Coin(board.RoundFold)
 	foldedA := make([]expr.Expr, len(A))
 	foldedB := make([]expr.Expr, len(B))
 	for i := 0; i < len(A); i++ { // A and B must be of the same size
-		foldedA[i] = expr.Fold(gamma, A[i])
-		foldedB[i] = expr.Fold(gamma, B[i])
+		foldedA[i] = expr.Fold(alpha, A[i])
+		foldedB[i] = expr.Fold(alpha, B[i])
 	}
 
-	// 3. call 1 dimensional permutation
+	// 2. call 1 dimensional permutation
 	return PermutationWithinModule(builder, module, foldedA, foldedB)
 }
 

@@ -211,7 +211,7 @@ func newProverRuntime(t trace.Trace, provingKey setup.ProvingKey, publicInputs p
 		}
 		res.fs = fiatshamir.NewTranscript(newTranscriptHasher())
 	}
-	numRounds := len(program.FScolumnsDependencies)
+	numRounds := len(program.Rounds)
 	for i := 0; i < numRounds; i++ {
 		res.fs.NewChallenge(constants.CanonicalChallengeName(i))
 	}
@@ -375,39 +375,32 @@ func (pr *proverRuntime) ExecuteSteps() error {
 		}
 	}
 
-	roundIdx := 0
-
-	// 2 - execute the program's Steps level by level
-	for _, steps := range pr.program.Steps {
-		for _, s := range steps {
-			_, ok := s.Ctx.(board.FSCtx)
-			if ok {
-				challengeName := constants.CanonicalChallengeName(roundIdx)
-
-				if err := pr.commitTraceRound(roundIdx, challengeName); err != nil {
-					return err
-				}
-
-				var challengeVal ext.E6
-				challenge, err := pr.fs.ComputeChallenge(challengeName)
-				if err != nil {
-					return err
-				}
-				challengeVal = hash.OutputToExt(challenge)
-
-				pr.mu.Lock()
-				pr.t.SetExt(challengeName, []ext.E6{challengeVal})
-				pr.mu.Unlock()
-
-				roundIdx++
-
-				continue
-			}
-			err := s.Execute(pr.t, &pr.program, &pr.Proof, pr.mu)
-			if err != nil {
+	// 2 - execute the program round by round: run the round's steps, commit its
+	// staged columns, then derive its challenge.
+	for roundIdx, round := range pr.program.Rounds {
+		for _, s := range round.Steps {
+			if err := s.Execute(pr.t, &pr.program, &pr.Proof, pr.mu); err != nil {
 				return err
 			}
 		}
+
+		challengeName := constants.CanonicalChallengeName(roundIdx)
+		if err := pr.commitTraceRound(roundIdx, challengeName); err != nil {
+			return err
+		}
+		if round.FSHook != board.NoFSHook {
+			return fmt.Errorf("ExecuteSteps: round %d: FS hook %d is not supported", roundIdx, round.FSHook)
+		}
+
+		challenge, err := pr.fs.ComputeChallenge(challengeName)
+		if err != nil {
+			return err
+		}
+		challengeVal := hash.OutputToExt(challenge)
+
+		pr.mu.Lock()
+		pr.t.SetExt(challengeName, []ext.E6{challengeVal})
+		pr.mu.Unlock()
 	}
 
 	return nil

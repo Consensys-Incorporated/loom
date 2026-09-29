@@ -5,6 +5,7 @@ go 1.25.7
 require github.com/consensys/gnark-crypto v0.20.2-0.20260521181528-f8db9b5b907d
 
 require (
+	github.com/LFDT-Lineth/zkc v1.2.32 // indirect
 	github.com/bits-and-blooms/bitset v1.24.4 // indirect
 	github.com/blang/semver/v4 v4.0.0 // indirect
 	github.com/consensys/gnark v0.14.1-0.20260224185952-e002a37bb76c // indirect

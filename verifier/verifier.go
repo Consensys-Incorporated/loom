@@ -174,7 +174,7 @@ func newVerifierRuntime(program board.Program, verificationKey setup.Verificatio
 		}
 		res.fs = fiatshamir.NewTranscript(newTranscriptHasher())
 	}
-	numRounds := len(program.FScolumnsDependencies)
+	numRounds := len(program.Rounds)
 	for i := 0; i < numRounds; i++ {
 		res.fs.NewChallenge(constants.CanonicalChallengeName(i))
 	}
@@ -233,9 +233,11 @@ func (vr *verifierRunTime) deriveChallenges() error {
 	// For each FS round, bind every trace root for that round before computing
 	// the round challenge. A non-empty round normally has one mixed-size root.
 	// Setup roots were already bound to challenge_0 in newVerifierRuntime.
-	numRounds := len(vr.program.FScolumnsDependencies)
-	for r := 0; r < numRounds; r++ {
+	for r, round := range vr.program.Rounds {
 		challengeName := constants.CanonicalChallengeName(r)
+		if round.FSHook != board.NoFSHook {
+			return fmt.Errorf("deriveChallenges: round %d: FS hook %d is not supported", r, round.FSHook)
+		}
 		for i := vr.layout.TraceBegin[r]; i < vr.layout.TraceEnd[r]; i++ {
 			root := vr.roots[i]
 			err := vr.fs.Bind(challengeName, root[:])

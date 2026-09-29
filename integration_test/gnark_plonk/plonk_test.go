@@ -157,7 +157,6 @@ func TestVerifierPlonk(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		viz.ViewDag(program, "dag_plonk.html")
 
 		err = loom.Verify(stmt, proof)
 		if err != nil {
@@ -200,7 +199,6 @@ func TestVerifierPlonk(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		viz.ViewDag(program, "dag_plonk.html")
 
 		err = loom.Verify(stmt, proof)
 		if err != nil {
@@ -261,7 +259,6 @@ func TestFiboPlonk(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	viz.ViewDag(program, "mixed_dag.html")
 
 	// load traces for range and TestFibo
 	var a, b koalabear.Element
@@ -306,12 +303,10 @@ func TestBigGraph(t *testing.T) {
 	}
 
 	// fullTrace := prover.MergeTrace(traces[0], traces[1:]...)
-	program, err := board.Compile(&builder)
+	_, err := board.Compile(&builder)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	viz.ViewDag(program, "5_plonk.html")
 }
 
 //======================== Benchmarks ========================

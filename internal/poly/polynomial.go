@@ -103,33 +103,6 @@ func divPointwise(P1, P2 Polynomial, N int) (Polynomial, error) {
 	return res, nil
 }
 
-func countMultiplicity(S, T Polynomial) Polynomial {
-	freq := make(map[[1]uint32]uint64, len(T))
-	for j := 0; j < len(S); j++ {
-		freq[S[j].Bits()]++
-	}
-	res := make(Polynomial, len(T))
-	for i := 0; i < len(T); i++ {
-		res[i].SetUint64(freq[T[i].Bits()])
-	}
-	return res
-}
-
-func countWeightedMultiplicityWithSelector(S, T, Sel Polynomial) Polynomial {
-	freq := make(map[[1]uint32]uint64, len(T))
-	for j := 0; j < len(S); j++ {
-		if Sel[j].IsZero() {
-			continue
-		}
-		freq[S[j].Bits()]++
-	}
-	res := make(Polynomial, len(T))
-	for i := 0; i < len(T); i++ {
-		res[i].SetUint64(freq[T[i].Bits()])
-	}
-	return res
-}
-
 // invertPointwiseInPlace inverts in place P
 func invertPointwiseInPlace(P Polynomial) {
 	for i := 0; i < len(P); i++ {

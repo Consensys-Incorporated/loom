@@ -122,13 +122,6 @@ func ExposeEntriesStep(ins []expr.Expr, outs []string, t trace.Trace, prog *Prog
 	return nil
 }
 
-type FSCtx struct{}
-
-func FSStep(ins []expr.Expr, outs []string, t trace.Trace, _ *Program, proof *proof.Proof, mu *sync.Mutex, ctx StepContext) error {
-
-	return nil
-}
-
 type ExposeRelativeIthValueCtx struct {
 	Module string
 	Pos    int // relative position of the value to pick in a column -> the position module.N - 1 - Pos. It allows to refer to N, so N can be modified
@@ -254,68 +247,45 @@ func ExposeIthValue(ins []expr.Expr, outs []string, t trace.Trace, pg *Program, 
 	return nil
 }
 
-type CMCtx struct {
-	NbSources, NbTargets int
+type LMCtx struct {
+	NbSources, NbTargets, Width int
+	HasSelS, HasSelT            bool
 }
 
-// CountUnionMultiplicityStep computes the running sum M/E where
-// ins[0] = S (values), ins[1] = T (table), ins[2] = Sel (selector)
-func CountMultiplicityStep(ins []expr.Expr, outs []string, t trace.Trace, _ *Program, proof *proof.Proof, mu *sync.Mutex, ctx StepContext) error {
+// LookupMultiplicityStep computes the multiplicity columns of a (possibly
+// conditional) tuple lookup on the raw tuples, see poly.BuildLookupMultiplicities.
+// ins: [ selS (if HasSelS) || selT (if HasSelT) || S (row-major tuples) || T (row-major tuples) ]
+func LookupMultiplicityStep(ins []expr.Expr, outs []string, t trace.Trace, _ *Program, proof *proof.Proof, mu *sync.Mutex, ctx StepContext) error {
 
-	_ctx, ok := ctx.(CMCtx)
+	_ctx, ok := ctx.(LMCtx)
 	if !ok {
-		return fmt.Errorf("[CountUnionMultiplicityStep] wrong context type")
+		return fmt.Errorf("[LookupMultiplicityStep] wrong context type")
 	}
 
-	nbS := _ctx.NbSources
-	nbT := _ctx.NbTargets
-	S := make([]expr.Expr, nbS)
-	T := make([]expr.Expr, nbT)
-	copy(S, ins[:nbS])
-	copy(T, ins[nbS:nbT+nbS])
-	res, err := poly.BuildMultiplicityPolynomials(t.Base, S, T, mu)
-	if err != nil {
-		return err
+	var selS, selT []expr.Expr
+	if _ctx.HasSelS {
+		selS, ins = ins[:_ctx.NbSources], ins[_ctx.NbSources:]
 	}
-
-	for i := 0; i < nbT; i++ {
-		if err := t.PutBase(outs[i], res[i]); err != nil {
-			panic(fmt.Sprintf("[CountUnionMultiplicityStep] register multiplicity column %s: %v", outs[i], err))
+	if _ctx.HasSelT {
+		selT, ins = ins[:_ctx.NbTargets], ins[_ctx.NbTargets:]
+	}
+	tuples := func(n int) [][]expr.Expr {
+		res := make([][]expr.Expr, n)
+		for i := range res {
+			res[i], ins = ins[:_ctx.Width], ins[_ctx.Width:]
 		}
+		return res
 	}
+	S := tuples(_ctx.NbSources)
+	T := tuples(_ctx.NbTargets)
 
-	return nil
-}
-
-type CMWCtx struct {
-	NbSources, NbTargets int
-}
-
-// CountWeightedMultiplicityStep computes the running sum M/E where
-// ins: [ selS || S || T]
-func CountWeightedMultiplicityStep(ins []expr.Expr, outs []string, t trace.Trace, _ *Program, proof *proof.Proof, mu *sync.Mutex, ctx StepContext) error {
-
-	_ctx, ok := ctx.(CMWCtx)
-	if !ok {
-		return fmt.Errorf("[CountUnionMultiplicityStep] wrong context type")
-	}
-
-	nbS := _ctx.NbSources
-	nbT := _ctx.NbTargets
-	S := make([]expr.Expr, nbS)
-	selS := make([]expr.Expr, nbS)
-	T := make([]expr.Expr, nbT)
-	copy(selS, ins[:nbS])
-	copy(S, ins[nbS:nbS+nbS])
-	copy(T, ins[nbS+nbS:nbS+nbS+nbT])
-	res, err := poly.BuildWeightedMultiplicityPolynomial(t.Base, selS, S, T, mu)
+	res, err := poly.BuildLookupMultiplicities(t.Base, selS, S, selT, T, mu)
 	if err != nil {
 		return err
 	}
-
-	for i := 0; i < nbT; i++ {
+	for i := range T {
 		if err := t.PutBase(outs[i], res[i]); err != nil {
-			panic(fmt.Sprintf("[CountUnionWeightedMultiplicityStep] register multiplicity column %s: %v", outs[i], err))
+			panic(fmt.Sprintf("[LookupMultiplicityStep] register multiplicity column %s: %v", outs[i], err))
 		}
 	}
 

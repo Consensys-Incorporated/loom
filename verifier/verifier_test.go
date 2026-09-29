@@ -123,9 +123,9 @@ func mixedTraceTreeIndex(t *testing.T, layout protocol.Layout) int {
 }
 
 func legacyTraceTreeCount(program board.Program) (oldTraceTrees, nonEmptyRounds int) {
-	for _, deps := range program.FScolumnsDependencies {
+	for _, round := range program.Rounds {
 		sizes := make(map[int]bool)
-		for _, dep := range deps {
+		for _, dep := range round.Staged {
 			module, ok := program.Modules[dep.Module]
 			if ok {
 				sizes[module.N] = true

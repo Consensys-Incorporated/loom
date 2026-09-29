@@ -126,10 +126,11 @@ func BuildLayout(program board.Program, _ int) Layout {
 	layout.SetupEnd = treeIdx
 
 	// ---- Trace section, per FS round ----
-	numRounds := len(program.FScolumnsDependencies)
+	numRounds := len(program.Rounds)
 	layout.TraceBegin = make([]int, numRounds)
 	layout.TraceEnd = make([]int, numRounds)
-	for r, deps := range program.FScolumnsDependencies {
+	for r, round := range program.Rounds {
+		deps := round.Staged
 		layout.TraceBegin[r] = treeIdx
 
 		// Group dependencies by size, decreasing N. Every non-empty round is
@@ -153,7 +154,7 @@ func BuildLayout(program board.Program, _ int) Layout {
 			layout.TreeGroups = append(layout.TreeGroups, groups)
 			for groupIdx, N := range sizes {
 				group := depsByN[N]
-				// Preserve iteration order of FScolumnsDependencies[r] within
+				// Preserve iteration order of Rounds[r].Staged within
 				// a size by NOT re-sorting here.
 				railIdx := map[field.Kind]int{}
 				for _, dep := range group {

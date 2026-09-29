@@ -54,10 +54,11 @@ func TestCompileColumnFieldsForChallengeDerivedOutputs(t *testing.T) {
 	module.N = 4
 	builder.AddModule(module)
 
-	denominator := expr.Col("x").Sub(expr.Challenge("gamma"))
-	builder.AddLogupStep("m", denominator, expr.Const(one), "logup")
-	builder.AddGrandProductStep("m", expr.Col("x").Add(expr.Challenge("beta")), expr.Col("y"), "gp")
-	builder.AddExposeLastEntryStep("m", expr.Col("logup"), "public_logup")
+	builder.StageColumns(RoundFold, "x", "y")
+	denominator := expr.Col("x").Sub(Coin(RoundLogDerivative))
+	builder.AddLogupStep(RoundRunningSums, "m", denominator, expr.Const(one), "logup")
+	builder.AddGrandProductStep(RoundRunningSums, "m", expr.Col("x").Add(Coin(RoundFold)), expr.Col("y"), "gp")
+	builder.AddExposeLastEntryStep(RoundRunningSums, "m", expr.Col("logup"), "public_logup")
 
 	program, err := Compile(&builder)
 	if err != nil {
@@ -70,8 +71,8 @@ func TestCompileColumnFieldsForChallengeDerivedOutputs(t *testing.T) {
 		}
 	}
 
-	for _, deps := range program.FScolumnsDependencies {
-		for _, dep := range deps {
+	for _, round := range program.Rounds {
+		for _, dep := range round.Staged {
 			if dep.Name == "logup" && dep.Field != field.Ext {
 				t.Fatalf("FS dependency logup field = %s, want %s", dep.Field, field.Ext)
 			}

@@ -44,11 +44,11 @@ func TestBuildLayoutBaseOnlySlotStability(t *testing.T) {
 	m.AssertZero(rel)
 	builder.AddModule(m)
 
-	// AddCountMultiplicityStep is intentionally used here because it stays in
-	// the base field; it does not depend on a Fiat-Shamir challenge.
-	builder.AddCountMultiplicityStep(
-		[]expr.Expr{expr.Col("s")},
-		[]expr.Expr{expr.Col("t")},
+	// The multiplicity step stays in the base field; it does not depend on a
+	// Fiat-Shamir challenge.
+	builder.AddLookupMultiplicityStep(board.RoundFold, nil, nil,
+		[][]expr.Expr{{expr.Col("s")}},
+		[][]expr.Expr{{expr.Col("t")}},
 		"mul",
 	)
 
@@ -64,11 +64,11 @@ func TestBuildLayoutBaseOnlySlotStability(t *testing.T) {
 		"pa": {TreeIdx: 0, GroupIdx: 0, PolyIdx: 0, Field: field.Base},
 		"pm": {TreeIdx: 0, GroupIdx: 0, PolyIdx: 1, Field: field.Base},
 		"pz": {TreeIdx: 0, GroupIdx: 0, PolyIdx: 2, Field: field.Base},
-		// Trace round 0 (TreeIdx=1): relation leaves in LeavesFull order.
-		"z":      {TreeIdx: 1, GroupIdx: 0, PolyIdx: 0, Field: field.Base},
-		mulChunk: {TreeIdx: 1, GroupIdx: 0, PolyIdx: 1, Field: field.Base},
-		"s":      {TreeIdx: 1, GroupIdx: 0, PolyIdx: 2, Field: field.Base},
-		"t":      {TreeIdx: 1, GroupIdx: 0, PolyIdx: 3, Field: field.Base},
+		// Trace round 0 (TreeIdx=1): unstaged columns are swept in name order.
+		mulChunk: {TreeIdx: 1, GroupIdx: 0, PolyIdx: 0, Field: field.Base},
+		"s":      {TreeIdx: 1, GroupIdx: 0, PolyIdx: 1, Field: field.Base},
+		"t":      {TreeIdx: 1, GroupIdx: 0, PolyIdx: 2, Field: field.Base},
+		"z":      {TreeIdx: 1, GroupIdx: 0, PolyIdx: 3, Field: field.Base},
 	}
 	for name, want := range wantColSlot {
 		got, ok := layout.ColSlot[name]
@@ -168,14 +168,14 @@ func TestBuildLayoutRailRelativePolyIdx(t *testing.T) {
 			"base": {Name: "base", N: 8, VanishingRelation: baseRelation},
 			"ext":  {Name: "ext", N: 8, VanishingRelation: extRelation},
 		},
-		FScolumnsDependencies: [][]board.ColumnRef{
+		Rounds: roundsOf([][]board.ColumnRef{
 			{
 				{Name: "base_0", Module: "base", Field: field.Base},
 				{Name: "ext_0", Module: "ext", Field: field.Ext},
 				{Name: "base_1", Module: "base", Field: field.Base},
 				{Name: "ext_1", Module: "ext", Field: field.Ext},
 			},
-		},
+		}),
 	}
 
 	layout := BuildLayout(program, 0)
@@ -213,14 +213,14 @@ func TestBuildLayoutMixedSizeTraceRoundUsesSingleTree(t *testing.T) {
 			"big":   {Name: "big", N: 8},
 			"small": {Name: "small", N: 4},
 		},
-		FScolumnsDependencies: [][]board.ColumnRef{
+		Rounds: roundsOf([][]board.ColumnRef{
 			{
 				{Name: "small_0", Module: "small", Field: field.Base},
 				{Name: "big_0", Module: "big", Field: field.Base},
 				{Name: "small_ext", Module: "small", Field: field.Ext},
 				{Name: "big_1", Module: "big", Field: field.Base},
 			},
-		},
+		}),
 	}
 
 	layout := BuildLayout(program, 0)
@@ -266,14 +266,14 @@ func TestBuildCanonicalScheduleMixedTraceGroupsMatchLayout(t *testing.T) {
 				),
 			},
 		},
-		FScolumnsDependencies: [][]board.ColumnRef{
+		Rounds: roundsOf([][]board.ColumnRef{
 			{
 				{Name: "small_0", Module: "small", Field: field.Base},
 				{Name: "big_0", Module: "big", Field: field.Base},
 				{Name: "small_ext", Module: "small", Field: field.Ext},
 				{Name: "big_1", Module: "big", Field: field.Base},
 			},
-		},
+		}),
 	}
 
 	layout := BuildLayout(program, 0)
@@ -368,4 +368,13 @@ func extraSlotKeys(got, want map[string]Slot) []string {
 		}
 	}
 	return out
+}
+
+// roundsOf builds rounds staging the given columns, one round per entry.
+func roundsOf(staged [][]board.ColumnRef) []board.ProverRound {
+	res := make([]board.ProverRound, len(staged))
+	for r, cols := range staged {
+		res[r].Staged = cols
+	}
+	return res
 }

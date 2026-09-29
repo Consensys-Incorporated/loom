@@ -46,16 +46,17 @@ type ColumnRef struct {
 	Field  field.Kind
 }
 
+// Builder accumulates the modules, their relations, and the rounds of the
+// protocol (see rounds.go).
 type Builder struct {
 	Modules  map[string]*Module
 	LogupBus []LogupBus
-	Steps    []ProverStep
+	rounds   []builderRound
 }
 
 func NewBuilder() Builder {
 	var res Builder
 	res.Modules = make(map[string]*Module)
-	res.Steps = make([]ProverStep, 0)
 	res.LogupBus = make([]LogupBus, 0)
 	return res
 }
@@ -115,17 +116,6 @@ type Output struct {
 	ColName string
 }
 
-func (b *Builder) AddFiatShamirStep(E []expr.Expr, out string) {
-	ctx := FSCtx{}
-	pvStep := ProverStep{
-		Ctx:  ctx,
-		Ins:  E,
-		Outs: []string{out},
-		Step: FSStep,
-	}
-	b.Steps = append(b.Steps, pvStep)
-}
-
 func (b *Builder) addExposeValuesConstraint(module string, E expr.Expr, sel, out string) {
 	selExpr := expr.Col(sel)
 	outExpr := expr.Exposed(out)
@@ -135,7 +125,7 @@ func (b *Builder) addExposeValuesConstraint(module string, E expr.Expr, sel, out
 	b.Modules[module] = m
 }
 
-func (b *Builder) AddExposeValuesStep(module string, E expr.Expr, selector, out string, idx []int) {
+func (b *Builder) AddExposeValuesStep(r int, module string, E expr.Expr, selector, out string, idx []int) {
 	m := b.Modules[module]
 	ctx := ExposeEntriesCtx{Idx: idx, N: m.N}
 	pvStep := ProverStep{
@@ -144,7 +134,7 @@ func (b *Builder) AddExposeValuesStep(module string, E expr.Expr, selector, out 
 		Outs: []string{out},
 		Step: ExposeEntriesStep,
 	}
-	b.Steps = append(b.Steps, pvStep)
+	b.AddStepAt(r, pvStep)
 
 	genSel := SelectorGen{Idx: idx, Name: selector}
 	m.GenCol = append(m.GenCol, genSel)
@@ -159,7 +149,7 @@ func (b *Builder) addExposeIthValueConstraint(module string, E expr.Expr, output
 }
 
 // AddExposeLastEntryStep syntactic sugar for AddExposeRelativeIthValueStep(module, E, out, 0)
-func (b *Builder) AddExposeLastEntryStep(module string, E expr.Expr, out string) {
+func (b *Builder) AddExposeLastEntryStep(r int, module string, E expr.Expr, out string) {
 	ctx := ExposeRelativeIthValueCtx{Pos: 0, Module: module}
 	pvStep := ProverStep{
 		Ctx:  ctx,
@@ -167,13 +157,13 @@ func (b *Builder) AddExposeLastEntryStep(module string, E expr.Expr, out string)
 		Outs: []string{out},
 		Step: ExposeRelativeIthValueStep,
 	}
-	b.Steps = append(b.Steps, pvStep)
+	b.AddStepAt(r, pvStep)
 	b.addExposeRelativeIthValuePublicConstraint(module, E, out, 0)
 }
 
 // AddExposeIthValue adds a constraint Lagrange_pos * (expr - expr[pos]), and stores expr[pos] in the proof so the verifier has access to it
 // the 1 entry column expr[pos] is registered in the trace
-func (b *Builder) AddExposeRelativeIthValueStep(module string, E expr.Expr, out string, pos int) {
+func (b *Builder) AddExposeRelativeIthValueStep(r int, module string, E expr.Expr, out string, pos int) {
 	ctx := ExposeRelativeIthValueCtx{Pos: pos, Module: module}
 	pvStep := ProverStep{
 		Ctx:  ctx,
@@ -181,7 +171,7 @@ func (b *Builder) AddExposeRelativeIthValueStep(module string, E expr.Expr, out 
 		Outs: []string{out},
 		Step: ExposeRelativeIthValueStep,
 	}
-	b.Steps = append(b.Steps, pvStep)
+	b.AddStepAt(r, pvStep)
 	b.addExposeRelativeIthValuePublicConstraint(module, E, out, pos)
 }
 
@@ -193,7 +183,7 @@ func (b *Builder) addExposeRelativeIthValuePublicConstraint(module string, E exp
 
 // AddExposeIthValueStep adds a constraint Lagrange_pos * (expr - expr[pos]), and stores expr[pos] in the proof so the verifier has access to it
 // the 1 entry column expr[pos] is registered in the trace
-func (b *Builder) AddExposeIthValueStep(module string, E expr.Expr, out string, pos int) {
+func (b *Builder) AddExposeIthValueStep(r int, module string, E expr.Expr, out string, pos int) {
 	ctx := ExposeIthValueCtx{Pos: pos}
 	pvStep := ProverStep{
 		Ctx:  ctx,
@@ -201,30 +191,28 @@ func (b *Builder) AddExposeIthValueStep(module string, E expr.Expr, out string, 
 		Outs: []string{out},
 		Step: ExposeIthValue,
 	}
-	b.Steps = append(b.Steps, pvStep)
+	b.AddStepAt(r, pvStep)
 	b.addExposeIthValueConstraint(module, E, out, pos)
 }
 
-// S ⊂ T, the ouptut is in T's module
-func (b *Builder) AddCountWeightedMultiplicityStep(selS, S, T []expr.Expr, output string) {
-	ctx := CMWCtx{NbSources: len(S), NbTargets: len(T)}
+// AddLookupMultiplicityStep registers the computation of the multiplicity
+// columns of the lookup {S[j] | selS[j] != 0} ⊂ {T[k] | selT[k] != 0}, where
+// S[j], T[k] are tuples of the same width. selS and selT may be nil (all ones).
+// One output column per target, named MultiplicityChunkName(output, k).
+func (b *Builder) AddLookupMultiplicityStep(r int, selS, selT []expr.Expr, S, T [][]expr.Expr, output string) {
+	ctx := LMCtx{NbSources: len(S), NbTargets: len(T), Width: len(S[0]), HasSelS: selS != nil, HasSelT: selT != nil}
+	ins := append(append([]expr.Expr(nil), selS...), selT...)
+	for _, s := range S {
+		ins = append(ins, s...)
+	}
+	for _, t := range T {
+		ins = append(ins, t...)
+	}
 	outs := make([]string, len(T))
 	for i := range T {
 		outs[i] = constants.MultiplicityChunkName(output, i)
 	}
-	cmStep := NewProverStep(append(selS, append(S, T...)...), outs, CountWeightedMultiplicityStep, ctx)
-	b.Steps = append(b.Steps, cmStep)
-}
-
-// S ⊂ T, the ouptut is in T's module
-func (b *Builder) AddCountMultiplicityStep(S, T []expr.Expr, output string) {
-	ctx := CMCtx{NbSources: len(S), NbTargets: len(T)}
-	outs := make([]string, len(T))
-	for i := range T {
-		outs[i] = constants.MultiplicityChunkName(output, i)
-	}
-	cmStep := NewProverStep(append(S, T...), outs, CountMultiplicityStep, ctx)
-	b.Steps = append(b.Steps, cmStep)
+	b.AddStepAt(r, NewProverStep(ins, outs, LookupMultiplicityStep, ctx))
 }
 
 func (b *Builder) addLogupConstraint(module string, E, M expr.Expr, output string) {
@@ -242,9 +230,9 @@ func (b *Builder) addLogupConstraint(module string, E, M expr.Expr, output strin
 
 // AddLogupStep register the action of computing the column interpolating the running sum
 // \Sigma_j<=i M[i]/E[i]
-func (b *Builder) AddLogupStep(module string, E, M expr.Expr, output string) {
+func (b *Builder) AddLogupStep(r int, module string, E, M expr.Expr, output string) {
 	logupStep := NewProverStep([]expr.Expr{E, M}, []string{output}, LogUpStep, LogUpCtx{})
-	b.Steps = append(b.Steps, logupStep)
+	b.AddStepAt(r, logupStep)
 	b.addLogupConstraint(module, E, M, output)
 }
 
@@ -260,8 +248,8 @@ func (b *Builder) addGrandProductConstraint(module string, N, D expr.Expr, outpu
 	m.AssertZeroAt(boundary, 0)
 }
 
-func (b *Builder) AddGrandProductStep(module string, N, D expr.Expr, output string) {
+func (b *Builder) AddGrandProductStep(r int, module string, N, D expr.Expr, output string) {
 	gpStep := NewProverStep([]expr.Expr{N, D}, []string{output}, GrandProductStep, GPCtx{})
-	b.Steps = append(b.Steps, gpStep)
+	b.AddStepAt(r, gpStep)
 	b.addGrandProductConstraint(module, N, D, output)
 }

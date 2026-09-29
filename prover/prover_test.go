@@ -21,7 +21,6 @@ import (
 	"github.com/consensys/loom/board"
 	"github.com/consensys/loom/expr"
 	"github.com/consensys/loom/setup"
-	"github.com/consensys/loom/viz"
 )
 
 func TestVanishingRelationsAndLogupBus(t *testing.T) {
@@ -66,8 +65,6 @@ func TestVanishingRelationsAndLogupBus(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	viz.ViewDag(program, "dag.html")
-
 	// load the traces
 	var a, b koalabear.Element
 	b.SetOne()
@@ -108,7 +105,5 @@ func TestVanishingRelationsAndLogupBus(t *testing.T) {
 			t.Fatal("the cumulative sums of the bus are not equal")
 		}
 	}
-
-	viz.WriteRawTraceToCSV("trace.csv", tr)
 
 }
