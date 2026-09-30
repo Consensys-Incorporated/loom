@@ -52,10 +52,11 @@ type ExposedValue struct {
 // ExposedValues values made public by the prover
 type ExposedValues map[string]ExposedValue
 
-// Bus stores the running sums of the sender and receiver
-// participating in a log derivative based interaction, for instance a lookup
-// The logup must satisfy Σ_i Logup_Sender_val_i - Σ_i Logup_Receiver_val_i=0
+// LogupBus balances the logup columns of a log-derivative interaction (a
+// lookup, a permutation, a memory bus). Each column sums fractions M/(E − γ)
+// with signed numerators (a lookup target, for instance, has numerator
+// −multiplicity), so the bus holds if the totals sum to zero:
+// Σ_i Totals_i = 0.
 type LogupBus struct {
-	Positive []string // Positive[i] = name of the exposed total of the i-th positive logup column (proof.ExposedValues[name], one entry)
-	Negative []string // Negative[i] = name of the exposed total of the i-th negative logup column (proof.ExposedValues[name], one entry)
+	Totals []string // Totals[i] = name of the exposed total of the i-th logup column (proof.ExposedValues[name], one entry)
 }

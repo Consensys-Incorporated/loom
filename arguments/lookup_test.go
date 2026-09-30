@@ -139,3 +139,49 @@ func TestBatchedCyclicLookupRejectsMissingValue(t *testing.T) {
 		t.Fatal("lookup of a value outside the table accepted")
 	}
 }
+
+// A source and a target in the same module share one logup column: the target
+// fraction has a negated numerator, and the bus has a single total.
+func TestSourceAndTargetShareColumn(t *testing.T) {
+	b := board.NewBuilder()
+	m := board.NewModule("m")
+	m.N = n
+	b.AddModule(m)
+	if err := arguments.Lookup(&b, board.Column{Module: "m", In: expr.Col("m.s")}, board.Column{Module: "m", In: expr.Col("m.t")}); err != nil {
+		t.Fatal(err)
+	}
+	pg, err := board.Compile(&b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pg.LogupBus) != 1 || len(pg.LogupBus[0].Totals) != 1 {
+		t.Fatalf("got buses %v, want one bus with one total", pg.LogupBus)
+	}
+
+	for _, bad := range []bool{false, true} {
+		tr := trace.New()
+		tab, src := make([]koalabear.Element, n), make([]koalabear.Element, n)
+		for i := range n {
+			tab[i].SetUint64(uint64(i))
+			src[i].SetUint64(uint64((3 * i) % n))
+		}
+		if bad {
+			src[2].SetUint64(100)
+		}
+		tr.SetBase("m.t", tab)
+		tr.SetBase("m.s", src)
+		st, prf, err := prove(t, pg, tr)
+		if bad {
+			if err == nil && loom.Verify(st, prf) == nil {
+				t.Fatal("source outside the table accepted")
+			}
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := loom.Verify(st, prf); err != nil {
+			t.Fatalf("valid proof rejected: %v", err)
+		}
+	}
+}

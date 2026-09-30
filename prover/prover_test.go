@@ -85,24 +85,16 @@ func TestVanishingRelationsAndLogupBus(t *testing.T) {
 
 	// check the values of the bus
 	for _, bus := range program.LogupBus {
-		var cumNegative, cumPositive koalabear.Element
-		for _, pos := range bus.Positive {
-			if len(proof.ExposedValues[pos].Entries) > 1 {
+		var sum koalabear.Element
+		for _, name := range bus.Totals {
+			if len(proof.ExposedValues[name].Entries) > 1 {
 				t.Fatal("an extracted value from a logup column should have exactly one entry")
 			}
-			pe := proof.ExposedValues[pos].Entries[0]
-			cumPositive.Add(&cumPositive, &pe.Value)
+			pe := proof.ExposedValues[name].Entries[0]
+			sum.Add(&sum, &pe.Value)
 		}
-		for _, neg := range bus.Negative {
-			if len(proof.ExposedValues[neg].Entries) > 1 {
-				t.Fatal("an extracted value from a logup column should have exactly one entry")
-			}
-			pe := proof.ExposedValues[neg].Entries[0]
-			cumNegative.Add(&cumNegative, &pe.Value)
-		}
-		cumPositive.Sub(&cumPositive, &cumNegative)
-		if !cumPositive.IsZero() {
-			t.Fatal("the cumulative sums of the bus are not equal")
+		if !sum.IsZero() {
+			t.Fatal("the logup totals of the bus do not sum to zero")
 		}
 	}
 

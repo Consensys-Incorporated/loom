@@ -29,11 +29,9 @@ type Proof = proof.Proof
 type ExposedEntry = proof.ExposedEntry
 type ExposedValue = proof.ExposedValue
 
-func NewLogupBus(positive, negative []string) LogupBus {
-	return LogupBus{
-		Positive: positive,
-		Negative: negative,
-	}
+// NewLogupBus returns the bus asserting that the logup totals sum to zero.
+func NewLogupBus(totals []string) LogupBus {
+	return LogupBus{Totals: totals}
 }
 
 // ColumnRef identifies a column by its bare name and the module it belongs to.

@@ -367,26 +367,17 @@ func (vr *verifierRunTime) computeVerifierColumns() error {
 
 func (vr *verifierRunTime) checkLogupBus() error {
 	for _, bus := range vr.program.LogupBus {
-		var cumNegative, cumPositive ext.E6
-		for _, pos := range bus.Positive {
-			if len(vr.proof.ExposedValues[pos].Entries) != 1 {
-				return fmt.Errorf("the total of logup column %s should have exactly one entry", pos)
+		var sum ext.E6
+		for _, name := range bus.Totals {
+			if len(vr.proof.ExposedValues[name].Entries) != 1 {
+				return fmt.Errorf("the total of logup column %s should have exactly one entry", name)
 			}
-			pe := vr.proof.ExposedValues[pos].Entries[0]
+			pe := vr.proof.ExposedValues[name].Entries[0]
 			value := pe.ExtValue()
-			cumPositive.Add(&cumPositive, &value)
+			sum.Add(&sum, &value)
 		}
-		for _, neg := range bus.Negative {
-			if len(vr.proof.ExposedValues[neg].Entries) != 1 {
-				return fmt.Errorf("the total of logup column %s should have exactly one entry", neg)
-			}
-			pe := vr.proof.ExposedValues[neg].Entries[0]
-			value := pe.ExtValue()
-			cumNegative.Add(&cumNegative, &value)
-		}
-		cumPositive.Sub(&cumPositive, &cumNegative)
-		if !cumPositive.IsZero() {
-			return fmt.Errorf("the cumulative sums of the bus are not equal")
+		if !sum.IsZero() {
+			return fmt.Errorf("the logup totals of the bus do not sum to zero")
 		}
 	}
 	return nil
