@@ -31,6 +31,10 @@ import (
 	"os"
 )
 
+// generating -> from loom's root
+//  ZKC_REPORT=$PWD/zkc-report.json go test -count=1 -run TestReport ./zkc
+// && go run zkc/cmd/census/main.go -data zkc-report.json -out zkc-report.html
+
 //go:embed census.html.tmpl
 var page []byte
 
