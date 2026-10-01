@@ -453,7 +453,8 @@ func (vr *verifierRunTime) runPCSVerify() error {
 	}
 
 	pcs := fri.NewPCSWithParams(vr.friParams)
-	return pcs.Verify(vr.roots, shapes, vr.schedule.Shifts, vr.zeta, vr.proof.Opening, vr.fs)
+	return pcs.Verify(vr.roots, shapes, vr.schedule.Shifts, vr.zeta, vr.proof.Opening, vr.fs,
+		fri.WithDeepClasses(vr.layout.DeepClasses()))
 }
 
 func Verify(publicInputs public.Inputs, verificationKey setup.VerificationKey, program board.Program, proof proof.Proof, opts ...Option) error {

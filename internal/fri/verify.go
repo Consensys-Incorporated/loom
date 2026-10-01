@@ -48,10 +48,12 @@ import (
 //  2. Re-derives alpha_DEEP by replaying the same per-polynomial binding
 //     sequence Open used.
 //  3. Multi-degree FRI verification on the DEEP-quotient roots.
-//  4. The bridge: for every FRI query position and every distinct
-//     native size, recompute DQ_N(omega^x) and DQ_N(-omega^x) from the
-//     opened raw rows and the claimed values, then compare to the
-//     FRI proof's level leaves at that query.
+//  4. The bridge: for every FRI query position and every DEEP class,
+//     recompute DQ_c(omega^x) and DQ_c(-omega^x) from the opened raw rows
+//     and the claimed values, then compare to the FRI proof's level leaves
+//     at that query.
+//
+// opts may carry WithDeepClasses, which must match the prover's.
 //
 // Any of the checks failing yields a non-nil error explaining the
 // failure mode.
@@ -62,9 +64,16 @@ func (pcs *PCS) Verify(
 	zeta ext.E6,
 	proof OpeningProof,
 	fs *fiatshamir.Transcript,
+	opts ...OpenOption,
 ) error {
 	if pcs.params == nil {
 		return fmt.Errorf("fri: PCS.Verify requires Params; construct PCS via NewPCSWithParams")
+	}
+	var config OpenConfig
+	for _, opt := range opts {
+		if err := opt(&config); err != nil {
+			return err
+		}
 	}
 	if fs == nil {
 		return fmt.Errorf("fri: PCS.Verify: fs transcript is required")
@@ -87,9 +96,13 @@ func (pcs *PCS) Verify(
 	if err != nil {
 		return err
 	}
+	plan, err := newDeepPlan(sizes, config.DeepClasses)
+	if err != nil {
+		return err
+	}
 
-	// 2- Validate the OpeningProof's nested shapes against shapes/shifts/sizes.
-	if err := validateOpeningProofShape(&proof, shapes, shifts, sizes, pcs.params.NumQueries); err != nil {
+	// 2- Validate the OpeningProof's nested shapes against shapes/shifts/classes.
+	if err := validateOpeningProofShape(&proof, shapes, shifts, plan.numClasses(), pcs.params.NumQueries); err != nil {
 		return err
 	}
 
@@ -98,7 +111,7 @@ func (pcs *PCS) Verify(
 	if err := fs.NewChallenge(deepAlphaName); err != nil {
 		return fmt.Errorf("fri: PCS.Verify: register alpha_DEEP: %w", err)
 	}
-	if err := bindClaimedValuesByPolynomialOrder(fs, proof.ClaimedValues, shifts, sizes); err != nil {
+	if err := bindClaimedValuesByPolynomialOrder(fs, proof.ClaimedValues, shifts, plan); err != nil {
 		return err
 	}
 	alphaOut, err := fs.ComputeChallenge(deepAlphaName)
@@ -107,9 +120,9 @@ func (pcs *PCS) Verify(
 	}
 	alpha := hash.OutputToExt(alphaOut)
 
-	// 4- Verify the multi-degree FRI proof on the declared DEEP roots.
-	sizesDesc := sizesDescFromSizes(sizes)
-	if err := Verify(*pcs.params, proof.DeepQuotientRoots, sizesDesc, proof.FRIProof, fs); err != nil {
+	// 4- Verify the multi-degree FRI proof on the declared DEEP roots, one
+	//    level per class in level order.
+	if err := Verify(*pcs.params, proof.DeepQuotientRoots, plan.levelSizes(), proof.FRIProof, fs); err != nil {
 		return fmt.Errorf("fri: PCS.Verify: FRI proof: %w", err)
 	}
 
@@ -129,9 +142,9 @@ func (pcs *PCS) Verify(
 		return err
 	}
 
-	// 7- Bridge: recompute DQ_N(X), DQ_N(-X) from raw rows + claimed
-	//    values in per-polynomial order, compare to FRI level leaves.
-	if err := checkFRIBridgeByPolynomial(pcs, &proof, sizes, shapes, shifts, alpha, zeta, queryPositions); err != nil {
+	// 7- Bridge: recompute DQ_c(X), DQ_c(-X) for every class from raw rows +
+	//    claimed values in per-polynomial order, compare to FRI level leaves.
+	if err := checkFRIBridgeByPolynomial(pcs, &proof, plan, shapes, shifts, alpha, zeta, queryPositions); err != nil {
 		return err
 	}
 
@@ -140,12 +153,12 @@ func (pcs *PCS) Verify(
 
 // validateOpeningProofShape checks that the nested ClaimedValues /
 // PointSamplings / DeepQuotientRoots shapes line up with shapes/shifts
-// and with the distinct-size count derived from verifier-side shapes.
+// and with the number of DEEP classes.
 func validateOpeningProofShape(
 	proof *OpeningProof,
 	shapes []BatchShapes,
 	shifts []BatchShifts,
-	sizes [][]int,
+	numClasses int,
 	numQueries int,
 ) error {
 	for b, batchSh := range shifts {
@@ -173,9 +186,8 @@ func validateOpeningProofShape(
 		}
 	}
 
-	sizesDesc := sizesDescFromSizes(sizes)
-	if len(proof.DeepQuotientRoots) != len(sizesDesc) {
-		return fmt.Errorf("fri: PCS.Verify: DeepQuotientRoots has %d entries, expected %d (distinct sizes)", len(proof.DeepQuotientRoots), len(sizesDesc))
+	if len(proof.DeepQuotientRoots) != numClasses {
+		return fmt.Errorf("fri: PCS.Verify: DeepQuotientRoots has %d entries, expected %d (DEEP classes)", len(proof.DeepQuotientRoots), numClasses)
 	}
 
 	if len(proof.PointSamplings) != numQueries {
@@ -450,14 +462,14 @@ func rawRowsForGroup(wp WMerkleProof, groupIdx int) (RawRowPair, error) {
 }
 
 // checkFRIBridgeByPolynomial is the verifier-side counterpart of
-// computeDeepQuotientCodewordsByPolynomial. For each native size N, alpha
+// computeDeepQuotientCodewordsByPolynomial. For each DEEP class, alpha
 // powers are consumed once per polynomial in batch/group declaration order.
 // Multiple shifts of the same polynomial are summed before applying the
 // polynomial's alpha power.
 func checkFRIBridgeByPolynomial(
 	pcs *PCS,
 	proof *OpeningProof,
-	sizes [][]int,
+	plan deepPlan,
 	shapes [][]GroupShape,
 	shifts []BatchShifts,
 	alpha ext.E6,
@@ -478,9 +490,7 @@ func checkFRIBridgeByPolynomial(
 		return -1
 	}
 
-	sizesDesc := sizesDescFromSizes(sizes)
-
-	// Precompute per-size generators and omega-shift tables so that
+	// Precompute per-class generators and omega-shift tables so that
 	// koalabear.Generator (which internally calls Exp) and the per-shift Exp
 	// are not repeated once per query.
 	type sizePrecomp struct {
@@ -488,8 +498,8 @@ func checkFRIBridgeByPolynomial(
 		omegaTable  map[int]koalabear.Element // normalizedShift → traceGen^shift
 		totalShifts int                       // sum of len(shifts) for all polys of this N
 	}
-	sizePrecomps := make(map[int]sizePrecomp, len(sizesDesc))
-	for _, N := range sizesDesc {
+	sizePrecomps := make([]sizePrecomp, plan.numClasses())
+	for class, N := range plan.sizes {
 		ratN := int(pcs.rate) * N
 		ratGen, err := koalabear.Generator(uint64(ratN))
 		if err != nil {
@@ -501,9 +511,9 @@ func checkFRIBridgeByPolynomial(
 		}
 		omegaTable := make(map[int]koalabear.Element)
 		var totalShifts int
-		for b, batchSizes := range sizes {
-			for g, groupSize := range batchSizes {
-				if groupSize != N {
+		for b, batchClasses := range plan.classOf {
+			for g, groupClass := range batchClasses {
+				if groupClass != class {
 					continue
 				}
 				gShifts := shifts[b][g]
@@ -531,7 +541,7 @@ func checkFRIBridgeByPolynomial(
 				}
 			}
 		}
-		sizePrecomps[N] = sizePrecomp{ratGen: ratGen, omegaTable: omegaTable, totalShifts: totalShifts}
+		sizePrecomps[class] = sizePrecomp{ratGen: ratGen, omegaTable: omegaTable, totalShifts: totalShifts}
 	}
 
 	// Largest denom buffer needed: 2 entries per shift, for the largest size group.
@@ -554,7 +564,8 @@ func checkFRIBridgeByPolynomial(
 
 		for q := start; q < end; q++ {
 			sFull := queryPositions[q]
-			for sizeIdx, N := range sizesDesc {
+			for class, N := range plan.sizes {
+				level := plan.levelOf[class]
 				ratN := int(pcs.rate) * N
 				bitsReduced := log2(pcs.params.N) - log2(ratN)
 				if bitsReduced < 0 {
@@ -566,7 +577,7 @@ func checkFRIBridgeByPolynomial(
 
 				// X = omega_{rate*N}^bitrev(lo) (base), lifted; -X is the
 				// companion row hi under bit-reversed row ordering.
-				sp := sizePrecomps[N]
+				sp := sizePrecomps[class]
 				var XBase, negXBase, hiBase koalabear.Element
 				XBase.ExpInt64(sp.ratGen, int64(bitReverseIndex(lo, ratN)))
 				hiBase.ExpInt64(sp.ratGen, int64(bitReverseIndex(hi, ratN)))
@@ -583,9 +594,9 @@ func checkFRIBridgeByPolynomial(
 				// denoms[2k+1] = zeta*omega^s - negX
 				denoms := denomsBuf[:2*sp.totalShifts]
 				k := 0
-				for b, batchSizes := range sizes {
-					for g, groupSize := range batchSizes {
-						if groupSize != N {
+				for b, batchClasses := range plan.classOf {
+					for g, groupClass := range batchClasses {
+						if groupClass != class {
 							continue
 						}
 						gShifts := shifts[b][g]
@@ -618,9 +629,9 @@ func checkFRIBridgeByPolynomial(
 				var alphaRunning ext.E6
 				alphaRunning.SetOne()
 				k = 0
-				for b, batchSizes := range sizes {
-					for g, groupSize := range batchSizes {
-						if groupSize != N {
+				for b, batchClasses := range plan.classOf {
+					for g, groupClass := range batchClasses {
+						if groupClass != class {
 							continue
 						}
 						injIdx := declToInjIdx(b, g)
@@ -654,7 +665,7 @@ func checkFRIBridgeByPolynomial(
 				}
 
 				var actualP, actualQ ext.E6
-				if sizeIdx == 0 {
+				if level == 0 {
 					layer := proof.FRIProof.FRIQueries[q].Layers[0]
 					if layer.Field != field.Ext {
 						bridgeErr.CompareAndSwap(nil, fmt.Errorf("fri: PCS.Verify: bridge query %d level 0: expected ext FRI layer, got %s", q, layer.Field))
@@ -663,13 +674,13 @@ func checkFRIBridgeByPolynomial(
 					actualP = layer.LeafPExt
 					actualQ = layer.LeafQExt
 				} else {
-					if sizeIdx-1 >= len(proof.FRIProof.LevelQueries) || q >= len(proof.FRIProof.LevelQueries[sizeIdx-1]) {
-						bridgeErr.CompareAndSwap(nil, fmt.Errorf("fri: PCS.Verify: bridge query %d level %d: missing LevelQueries entry", q, sizeIdx))
+					if level-1 >= len(proof.FRIProof.LevelQueries) || q >= len(proof.FRIProof.LevelQueries[level-1]) {
+						bridgeErr.CompareAndSwap(nil, fmt.Errorf("fri: PCS.Verify: bridge query %d level %d: missing LevelQueries entry", q, level))
 						return
 					}
-					lq := proof.FRIProof.LevelQueries[sizeIdx-1][q]
+					lq := proof.FRIProof.LevelQueries[level-1][q]
 					if lq.Field != field.Ext {
-						bridgeErr.CompareAndSwap(nil, fmt.Errorf("fri: PCS.Verify: bridge query %d level %d: expected ext FRI level query, got %s", q, sizeIdx, lq.Field))
+						bridgeErr.CompareAndSwap(nil, fmt.Errorf("fri: PCS.Verify: bridge query %d level %d: expected ext FRI level query, got %s", q, level, lq.Field))
 						return
 					}
 					actualP = lq.LeafPExt
@@ -677,11 +688,11 @@ func checkFRIBridgeByPolynomial(
 				}
 
 				if !DQ_P.Equal(&actualP) {
-					bridgeErr.CompareAndSwap(nil, fmt.Errorf("fri: PCS.Verify: bridge query %d level %d (N=%d): DQ(X) mismatch: got %s, want %s", q, sizeIdx, N, DQ_P.String(), actualP.String()))
+					bridgeErr.CompareAndSwap(nil, fmt.Errorf("fri: PCS.Verify: bridge query %d level %d (N=%d): DQ(X) mismatch: got %s, want %s", q, level, N, DQ_P.String(), actualP.String()))
 					return
 				}
 				if !DQ_Q.Equal(&actualQ) {
-					bridgeErr.CompareAndSwap(nil, fmt.Errorf("fri: PCS.Verify: bridge query %d level %d (N=%d): DQ(-X) mismatch: got %s, want %s", q, sizeIdx, N, DQ_Q.String(), actualQ.String()))
+					bridgeErr.CompareAndSwap(nil, fmt.Errorf("fri: PCS.Verify: bridge query %d level %d (N=%d): DQ(-X) mismatch: got %s, want %s", q, level, N, DQ_Q.String(), actualQ.String()))
 					return
 				}
 			}

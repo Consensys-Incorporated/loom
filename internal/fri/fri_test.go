@@ -400,3 +400,79 @@ func log2ForTest(n int) int {
 	}
 	return k
 }
+
+// sharedLevels builds levels of the given sizes D (decreasing), encoded at the
+// rate of p, on the extension or the base rail.
+func sharedLevels(t *testing.T, p fri.Params, ds []int, extRail bool) ([]fri.Level, []hash.Digest) {
+	t.Helper()
+	rate := p.N / p.D
+	var levels []fri.Level
+	var roots []hash.Digest
+	for _, d := range ds {
+		pl := testParams(t, rate*d, d, p.NumQueries)
+		var lvl fri.Level
+		lvl.D = d
+		if extRail {
+			evals, err := pl.EncodeExt(randomExtPoly(d))
+			if err != nil {
+				t.Fatal(err)
+			}
+			lvl.Evals, lvl.Tree = fri.LevelEvals{Ext: evals}, buildLevelTreeExt(t, p, evals)
+		} else {
+			evals, err := pl.Encode(randomPoly(d))
+			if err != nil {
+				t.Fatal(err)
+			}
+			lvl.Evals, lvl.Tree = fri.LevelEvals{Base: evals}, buildLevelTree(t, p, evals)
+		}
+		levels = append(levels, lvl)
+		roots = append(roots, lvl.Tree.Root())
+	}
+	return levels, roots
+}
+
+// TestProveVerifySharedIntroRounds has three levels entering at round 0 and
+// two entering at round 2.
+func TestProveVerifySharedIntroRounds(t *testing.T) {
+	ds := []int{16, 16, 16, 4, 4}
+	for _, extRail := range []bool{true, false} {
+		t.Run(fmt.Sprintf("ext=%v", extRail), func(t *testing.T) {
+			p := testParams(t, 64, 16, 4)
+			levels, roots := sharedLevels(t, p, ds, extRail)
+			prf, _, err := fri.Prove(p, levels, freshTS())
+			if err != nil {
+				t.Fatalf("Prove: %v", err)
+			}
+			if err := fri.Verify(p, roots, ds, prf, freshTS()); err != nil {
+				t.Fatalf("Verify: %v", err)
+			}
+
+			tamperLevel := func(l int) fri.Proof {
+				bad := prf
+				bad.LevelQueries = make([][]fri.QueryLayer, len(prf.LevelQueries))
+				for i := range prf.LevelQueries {
+					bad.LevelQueries[i] = append([]fri.QueryLayer(nil), prf.LevelQueries[i]...)
+				}
+				q := &bad.LevelQueries[l-1][0]
+				q.LeafPExt.B0.A0.SetUint64(7)
+				q.LeafPBase.SetUint64(7)
+				return bad
+			}
+			// level 2 enters at round 0, level 4 is the second level of round 2
+			for _, l := range []int{2, 4} {
+				if err := fri.Verify(p, roots, ds, tamperLevel(l), freshTS()); err == nil {
+					t.Fatalf("tampered level %d opening accepted", l)
+				}
+			}
+			// the round-0 levels in another order: their γs differ
+			swapped := append([]hash.Digest(nil), roots...)
+			swapped[0], swapped[1] = swapped[1], swapped[0]
+			if err := fri.Verify(p, swapped, ds, prf, freshTS()); err == nil {
+				t.Fatal("swapped round-0 roots accepted")
+			}
+			if err := fri.Verify(p, roots, []int{16, 4, 16, 4, 16}, prf, freshTS()); err == nil {
+				t.Fatal("increasing level sizes accepted")
+			}
+		})
+	}
+}

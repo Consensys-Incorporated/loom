@@ -616,6 +616,7 @@ func (pr *proverRuntime) runPCSOpen() error {
 		pr.zeta,
 		pr.fs,
 		fri.WithOpenDomainCache(&pr.domainCache),
+		fri.WithDeepClasses(pr.layout.DeepClasses()),
 	)
 	if err != nil {
 		return fmt.Errorf("runPCSOpen: %w", err)

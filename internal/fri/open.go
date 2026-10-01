@@ -34,6 +34,7 @@ const deepAlphaName = "alpha_DEEP"
 // OpenConfig configures an Open call.
 type OpenConfig struct {
 	DomainCache *poly.DomainCache
+	DeepClasses [][]int // see WithDeepClasses; nil = one class per size
 }
 
 // OpenOption configures Open.
@@ -132,7 +133,10 @@ func (pcs *PCS) Open(
 	if err != nil {
 		return OpeningProof{}, err
 	}
-	sizesDesc := sizesDescFromSizes(sizes)
+	plan, err := newDeepPlan(sizes, config.DeepClasses)
+	if err != nil {
+		return OpeningProof{}, err
+	}
 
 	// 2- Claimed values at zeta * omega_N^s for every (b, g, i, s) in
 	//    the schedule.
@@ -147,10 +151,10 @@ func (pcs *PCS) Open(
 		return OpeningProof{}, fmt.Errorf("fri: PCS.Open: register alpha_DEEP: %w", err)
 	}
 
-	// 4- Bind every claimed value to alpha_DEEP in per-polynomial order: size desc,
-	//    batch declaration order, group declaration order, base polys then
-	//    ext polys, and shifts in the user's declared order.
-	if err := bindClaimedValuesByPolynomialOrder(fs, claimedValues, shifts, sizes); err != nil {
+	// 4- Bind every claimed value to alpha_DEEP in per-polynomial order: DEEP
+	//    class order, batch declaration order, group declaration order, base
+	//    polys then ext polys, and shifts in the user's declared order.
+	if err := bindClaimedValuesByPolynomialOrder(fs, claimedValues, shifts, plan); err != nil {
 		return OpeningProof{}, err
 	}
 
@@ -161,39 +165,31 @@ func (pcs *PCS) Open(
 	}
 	alpha := hash.OutputToExt(alphaOut)
 
-	// 6- Build one DEEP-quotient codeword per distinct native size, on
-	//    the RS-encoded subgroup of size rate*N.
-	deepEvalsBySize, deepSizesDesc, err := computeDeepQuotientCodewordsByPolynomial(
-		batches, shifts, claimedValues, alpha, zeta, pcs.rate, domainCache,
+	// 6- Build one DEEP-quotient codeword per DEEP class, on the RS-encoded
+	//    subgroup of size rate*N of the class's size N.
+	deepByClass, err := computeDeepQuotientCodewordsByPolynomial(
+		batches, shifts, claimedValues, alpha, zeta, pcs.rate, plan, domainCache,
 	)
 	if err != nil {
 		return OpeningProof{}, err
 	}
-	if len(deepSizesDesc) != len(sizesDesc) {
-		return OpeningProof{}, fmt.Errorf("fri: PCS.Open: deep quotient sizes %v do not match batch sizes %v", deepSizesDesc, sizesDesc)
-	}
-	for i := range sizesDesc {
-		if deepSizesDesc[i] != sizesDesc[i] {
-			return OpeningProof{}, fmt.Errorf("fri: PCS.Open: deep quotient sizes %v do not match batch sizes %v", deepSizesDesc, sizesDesc)
-		}
-	}
 
-	// 7- Commit each DQ_N as a fresh FRI level. Largest size becomes
-	//    level 0; smaller sizes enter at the round whose running
-	//    polynomial bound matches their D.
-	levels := make([]Level, len(sizesDesc))
-	deepRoots := make([]hash.Digest, len(sizesDesc))
-	for i, N := range sizesDesc {
-		tree, err := pcs.params.BuildLevelTreeExt(deepEvalsBySize[N])
+	// 7- Commit each class's DQ as a fresh FRI level, in level order
+	//    (decreasing size, equal sizes in class order). Each level enters at
+	//    the round whose running polynomial bound matches its D.
+	levels := make([]Level, plan.numClasses())
+	deepRoots := make([]hash.Digest, plan.numClasses())
+	for l, c := range plan.classAt {
+		tree, err := pcs.params.BuildLevelTreeExt(deepByClass[c])
 		if err != nil {
-			return OpeningProof{}, fmt.Errorf("fri: PCS.Open: BuildLevelTreeExt N=%d: %w", N, err)
+			return OpeningProof{}, fmt.Errorf("fri: PCS.Open: BuildLevelTreeExt class %d: %w", c, err)
 		}
-		levels[i] = Level{
-			D:     N,
-			Evals: LevelEvals{Ext: deepEvalsBySize[N]},
+		levels[l] = Level{
+			D:     plan.sizes[c],
+			Evals: LevelEvals{Ext: deepByClass[c]},
 			Tree:  tree,
 		}
-		deepRoots[i] = tree.Root()
+		deepRoots[l] = tree.Root()
 	}
 
 	// 8- Run multi-degree FRI on the level set.
@@ -226,7 +222,7 @@ func (pcs *PCS) Open(
 
 // bindClaimedValuesByPolynomialOrder binds every claimed value using the
 // per-polynomial order. The order matches computeDeepQuotientCodewordsByPolynomial:
-// size descending, batch declaration order, group declaration order, base rail
+// DEEP class order, batch declaration order, group declaration order, base rail
 // then extension rail. Inside one polynomial, all requested shifts are bound in
 // the user's declared order, while the DEEP quotient consumes only one alpha
 // power for that polynomial.
@@ -234,25 +230,25 @@ func bindClaimedValuesByPolynomialOrder(
 	fs *fiatshamir.Transcript,
 	claimedValues []BatchClaimedValues,
 	shifts []BatchShifts,
-	sizes [][]int,
+	plan deepPlan,
 ) error {
-	if len(claimedValues) != len(sizes) {
-		return fmt.Errorf("fri: bind claimed values: claimedValues has %d entries, sizes has %d", len(claimedValues), len(sizes))
+	if len(claimedValues) != len(plan.classOf) {
+		return fmt.Errorf("fri: bind claimed values: claimedValues has %d entries, batches has %d", len(claimedValues), len(plan.classOf))
 	}
-	if len(shifts) != len(sizes) {
-		return fmt.Errorf("fri: bind claimed values: shifts has %d entries, sizes has %d", len(shifts), len(sizes))
+	if len(shifts) != len(plan.classOf) {
+		return fmt.Errorf("fri: bind claimed values: shifts has %d entries, batches has %d", len(shifts), len(plan.classOf))
 	}
 
-	for _, N := range sizesDescFromSizes(sizes) {
-		for b, batchSizes := range sizes {
-			if len(claimedValues[b]) != len(batchSizes) {
-				return fmt.Errorf("fri: bind claimed values: claimedValues[%d] has %d groups, sizes[%d] has %d", b, len(claimedValues[b]), b, len(batchSizes))
+	for class, N := range plan.sizes {
+		for b, batchClasses := range plan.classOf {
+			if len(claimedValues[b]) != len(batchClasses) {
+				return fmt.Errorf("fri: bind claimed values: claimedValues[%d] has %d groups, batch %d has %d", b, len(claimedValues[b]), b, len(batchClasses))
 			}
-			if len(shifts[b]) != len(batchSizes) {
-				return fmt.Errorf("fri: bind claimed values: shifts[%d] has %d groups, sizes[%d] has %d", b, len(shifts[b]), b, len(batchSizes))
+			if len(shifts[b]) != len(batchClasses) {
+				return fmt.Errorf("fri: bind claimed values: shifts[%d] has %d groups, batch %d has %d", b, len(shifts[b]), b, len(batchClasses))
 			}
-			for g, groupSize := range batchSizes {
-				if groupSize != N {
+			for g, groupClass := range batchClasses {
+				if groupClass != class {
 					continue
 				}
 				gValues := claimedValues[b][g]

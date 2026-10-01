@@ -282,10 +282,16 @@ func (p Params) BuildLevelTreeExt(layer []ext.E6) (*merkle.Tree, error) {
 // Prove runs multi-degree FRI (commit + query phase) and returns a Proof together
 // with the query positions. levels[0].D must equal p.D and every Level must
 // contain one evaluation vector on exactly one rail. levels is sorted in-place
-// in decreasing order of D.
+// in decreasing order of D, stably: levels of equal D keep their order.
+//
+// Level l enters at round j_l = log2(p.D / D_l). Several levels may share a
+// round, round 0 included: the running polynomial at round j adds γ_l·level_l
+// for every level entering at j, in level order. At round 0 the committed
+// layer is levels[0].Tree itself; the levels entering at round 0 are only
+// mixed into the polynomial that is folded.
 // ts must already have been initialised with any prior-round context.
 func Prove(p Params, levels []Level, ts *fiatshamir.Transcript) (Proof, []int, error) {
-	sort.Slice(levels, func(i, j int) bool { return levels[i].D > levels[j].D })
+	sort.SliceStable(levels, func(i, j int) bool { return levels[i].D > levels[j].D })
 
 	plan, err := buildProvePlan(p, levels)
 	if err != nil {
@@ -302,7 +308,7 @@ func Prove(p Params, levels []Level, ts *fiatshamir.Transcript) (Proof, []int, e
 type provePlan struct {
 	rail         field.Kind
 	numLevels    int
-	levelAtRound map[int]int
+	levelAtRound map[int][]int // round j → levels entering at j (l ≥ 1), in order
 }
 
 func buildProvePlan(p Params, levels []Level) (provePlan, error) {
@@ -327,8 +333,8 @@ func buildProvePlan(p Params, levels []Level) (provePlan, error) {
 
 	plan.numLevels = len(levels)
 
-	// Build levelAtRound: folding round j → level index l (1-based).
-	plan.levelAtRound = make(map[int]int, plan.numLevels-1)
+	// Build levelAtRound: folding round j → level indices l ≥ 1.
+	plan.levelAtRound = make(map[int][]int, plan.numLevels-1)
 	for l := 1; l < plan.numLevels; l++ {
 		if levels[l].D <= 0 || levels[l].D&(levels[l].D-1) != 0 {
 			return plan, fmt.Errorf("fri: Prove: levels[%d].D=%d is not a positive power of two", l, levels[l].D)
@@ -341,13 +347,10 @@ func buildProvePlan(p Params, levels []Level) (provePlan, error) {
 			return plan, fmt.Errorf("fri: Prove: levels[%d] is %s, running rail is %s", l, levelRail, rail)
 		}
 		jl := log2(p.D / levels[l].D)
-		if jl < 1 || jl >= p.numRounds {
-			return plan, fmt.Errorf("fri: Prove: levels[%d].D=%d gives intro round %d, must be in 1..%d", l, levels[l].D, jl, p.numRounds-1)
+		if levels[l].D > p.D || jl >= p.numRounds {
+			return plan, fmt.Errorf("fri: Prove: levels[%d].D=%d gives intro round %d, must be in 0..%d", l, levels[l].D, jl, p.numRounds-1)
 		}
-		if _, dup := plan.levelAtRound[jl]; dup {
-			return plan, fmt.Errorf("fri: Prove: two levels share intro round %d", jl)
-		}
-		plan.levelAtRound[jl] = l
+		plan.levelAtRound[jl] = append(plan.levelAtRound[jl], l)
 		Nl := p.N >> jl
 		if levels[l].Evals.Len() != Nl {
 			return plan, fmt.Errorf("fri: Prove: levels[%d].Evals length %d != N_l=%d", l, levels[l].Evals.Len(), Nl)
@@ -360,10 +363,11 @@ func buildProvePlan(p Params, levels []Level) (provePlan, error) {
 	return plan, nil
 }
 
-func registerChallenges(p Params, levelAtRound map[int]int, ts *fiatshamir.Transcript) {
-	ts.NewChallenge(foldName(0))
-	for j := 1; j < p.numRounds; j++ {
-		if l, ok := levelAtRound[j]; ok {
+// registerChallenges registers, for each round j, the γ of every level
+// entering at j, then the fold challenge of round j, then the queries.
+func registerChallenges(p Params, levelAtRound map[int][]int, ts *fiatshamir.Transcript) {
+	for j := 0; j < p.numRounds; j++ {
+		for _, l := range levelAtRound[j] {
 			ts.NewChallenge(levelGammaName(l))
 		}
 		ts.NewChallenge(foldName(j))
@@ -371,6 +375,27 @@ func registerChallenges(p Params, levelAtRound map[int]int, ts *fiatshamir.Trans
 	for k := 0; k < p.NumQueries; k++ {
 		ts.NewChallenge(queryName(k))
 	}
+}
+
+// deriveLevelGamma binds the root of level l to its γ and computes it. The
+// first γ of round 0 also binds levelRoot0 first: a level entering at round 0
+// is combined with level 0, whose root is otherwise bound only at fri_fold_0,
+// after the γ.
+func deriveLevelGamma(ts *fiatshamir.Transcript, l int, root hash.Digest, bindRoot0 bool, levelRoot0 hash.Digest) ([8]koalabear.Element, error) {
+	gammaName := levelGammaName(l)
+	if bindRoot0 {
+		if err := ts.Bind(gammaName, levelRoot0[:]); err != nil {
+			return [8]koalabear.Element{}, fmt.Errorf("bind level 0 root for γ_%d: %w", l, err)
+		}
+	}
+	if err := ts.Bind(gammaName, root[:]); err != nil {
+		return [8]koalabear.Element{}, fmt.Errorf("bind level l=%d: %w", l, err)
+	}
+	challenge, err := ts.ComputeChallenge(gammaName)
+	if err != nil {
+		return [8]koalabear.Element{}, fmt.Errorf("compute level gamma l=%d: %w", l, err)
+	}
+	return challenge, nil
 }
 
 func proveBase(p Params, levels []Level, plan provePlan, ts *fiatshamir.Transcript) (Proof, []int, error) {
@@ -390,32 +415,29 @@ func proveBase(p Params, levels []Level, plan provePlan, ts *fiatshamir.Transcri
 	}
 
 	for j := 0; j < p.numRounds; j++ {
-		// Level batching step (j > 0 only; j=0 reuses the caller-supplied levels[0].Tree).
-		if j > 0 {
-			if l, ok := plan.levelAtRound[j]; ok {
-				gammaName := levelGammaName(l)
-				root := levels[l].Tree.Root()
-				if err := ts.Bind(gammaName, root[:]); err != nil {
-					return Proof{}, nil, fmt.Errorf("fri: Prove: bind level l=%d: %w", l, err)
-				}
-				challenge, err := ts.ComputeChallenge(gammaName)
-				if err != nil {
-					return Proof{}, nil, fmt.Errorf("fri: Prove: compute level gamma l=%d: %w", l, err)
-				}
-				var gamma koalabear.Element
-				gamma.Set(&challenge[0])
-
-				// Mix γ * levels[l].Evals into running (pointwise).
-				for k, v := range levels[l].Evals.Base {
-					var term koalabear.Element
-					term.Mul(&v, &gamma)
-					running[k].Add(&running[k], &term)
-				}
+		// layers[j] = running after batching, before folding (= what T_j
+		// commits to). At round 0 the committed layer is levels[0] alone.
+		if j == 0 {
+			layers[0] = levels[0].Evals.Base
+		}
+		// Level batching step: mix γ_l·levels[l].Evals into running, for every
+		// level entering at round j.
+		for i, l := range plan.levelAtRound[j] {
+			challenge, err := deriveLevelGamma(ts, l, levels[l].Tree.Root(), j == 0 && i == 0, levels[0].Tree.Root())
+			if err != nil {
+				return Proof{}, nil, fmt.Errorf("fri: Prove: %w", err)
+			}
+			var gamma koalabear.Element
+			gamma.Set(&challenge[0])
+			for k, v := range levels[l].Evals.Base {
+				var term koalabear.Element
+				term.Mul(&v, &gamma)
+				running[k].Add(&running[k], &term)
 			}
 		}
-
-		// layers[j] = running after batching, before folding (= what T_j commits to).
-		layers[j] = running
+		if j > 0 {
+			layers[j] = running
+		}
 
 		var tree *merkle.Tree
 		if j == 0 {
@@ -527,29 +549,24 @@ func proveExt(p Params, levels []Level, plan provePlan, ts *fiatshamir.Transcrip
 	}
 
 	for j := 0; j < p.numRounds; j++ {
-		if j > 0 {
-			if l, ok := plan.levelAtRound[j]; ok {
-				gammaName := levelGammaName(l)
-				root := levels[l].Tree.Root()
-				if err := ts.Bind(gammaName, root[:]); err != nil {
-					return Proof{}, nil, fmt.Errorf("fri: Prove: bind level l=%d: %w", l, err)
-				}
-				challenge, err := ts.ComputeChallenge(gammaName)
-				if err != nil {
-					return Proof{}, nil, fmt.Errorf("fri: Prove: compute level gamma l=%d: %w", l, err)
-				}
-				var gamma ext.E6
-				gamma = hash.OutputToExt(challenge)
-
-				for k, v := range levels[l].Evals.Ext {
-					var term ext.E6
-					term.Mul(&v, &gamma)
-					running[k].Add(&running[k], &term)
-				}
+		if j == 0 {
+			layers[0] = levels[0].Evals.Ext
+		}
+		for i, l := range plan.levelAtRound[j] {
+			challenge, err := deriveLevelGamma(ts, l, levels[l].Tree.Root(), j == 0 && i == 0, levels[0].Tree.Root())
+			if err != nil {
+				return Proof{}, nil, fmt.Errorf("fri: Prove: %w", err)
+			}
+			gamma := hash.OutputToExt(challenge)
+			for k, v := range levels[l].Evals.Ext {
+				var term ext.E6
+				term.Mul(&v, &gamma)
+				running[k].Add(&running[k], &term)
 			}
 		}
-
-		layers[j] = running
+		if j > 0 {
+			layers[j] = running
+		}
 
 		var tree *merkle.Tree
 		if j == 0 {
@@ -700,24 +717,24 @@ func Verify(p Params, levelRoots []hash.Digest, levelDs []int, prf Proof, ts *fi
 		return fmt.Errorf("fri: Verify: ext final field with empty FinalPolyExt")
 	}
 
-	// levelAtRound: folding round j → level index l (1-based).
-	levelAtRound := make(map[int]int, numExtraLevels)
+	// levelAtRound: folding round j → level indices l ≥ 1, in order.
+	levelAtRound := make(map[int][]int, numExtraLevels)
 	for l := 1; l < numLevels; l++ {
 		if levelDs[l] <= 0 || levelDs[l]&(levelDs[l]-1) != 0 {
 			return fmt.Errorf("fri: Verify: levelDs[%d]=%d is not a positive power of two", l, levelDs[l])
+		}
+		if levelDs[l] > levelDs[l-1] {
+			return fmt.Errorf("fri: Verify: levelDs must not increase (levelDs[%d]=%d > levelDs[%d]=%d)", l, levelDs[l], l-1, levelDs[l-1])
 		}
 		ratio := p.D / levelDs[l]
 		if ratio <= 0 || ratio*levelDs[l] != p.D || ratio&(ratio-1) != 0 {
 			return fmt.Errorf("fri: Verify: levelDs[%d]=%d does not divide p.D=%d by a power-of-two ratio", l, levelDs[l], p.D)
 		}
 		jl := log2(ratio)
-		if jl < 1 || jl >= p.numRounds {
-			return fmt.Errorf("fri: Verify: levelDs[%d]=%d gives intro round %d, must be in 1..%d", l, levelDs[l], jl, p.numRounds-1)
+		if jl >= p.numRounds {
+			return fmt.Errorf("fri: Verify: levelDs[%d]=%d gives intro round %d, must be in 0..%d", l, levelDs[l], jl, p.numRounds-1)
 		}
-		if _, dup := levelAtRound[jl]; dup {
-			return fmt.Errorf("fri: Verify: two levels share intro round %d", jl)
-		}
-		levelAtRound[jl] = l
+		levelAtRound[jl] = append(levelAtRound[jl], l)
 	}
 
 	registerChallenges(p, levelAtRound, ts)
@@ -741,7 +758,7 @@ func Verify(p Params, levelRoots []hash.Digest, levelDs []int, prf Proof, ts *fi
 	return verifyBase(p, levelRoots, levelRootsExtra, levelAtRound, roots, prf, ts)
 }
 
-func verifyBase(p Params, levelRoots, levelRootsExtra []hash.Digest, levelAtRound map[int]int, roots []hash.Digest, prf Proof, ts *fiatshamir.Transcript) error {
+func verifyBase(p Params, levelRoots, levelRootsExtra []hash.Digest, levelAtRound map[int][]int, roots []hash.Digest, prf Proof, ts *fiatshamir.Transcript) error {
 	numLevels := len(levelRoots)
 	numExtraLevels := numLevels - 1
 
@@ -750,19 +767,12 @@ func verifyBase(p Params, levelRoots, levelRootsExtra []hash.Digest, levelAtRoun
 	alphas := make([]koalabear.Element, p.numRounds)
 
 	for j := 0; j < p.numRounds; j++ {
-		if j > 0 {
-			if l, ok := levelAtRound[j]; ok {
-				gammaName := levelGammaName(l)
-				root := levelRoots[l]
-				if err := ts.Bind(gammaName, root[:]); err != nil {
-					return fmt.Errorf("fri: Verify: bind level l=%d: %w", l, err)
-				}
-				challenge, err := ts.ComputeChallenge(gammaName)
-				if err != nil {
-					return fmt.Errorf("fri: Verify: compute level gamma l=%d: %w", l, err)
-				}
-				gammas[l].Set(&challenge[0])
+		for i, l := range levelAtRound[j] {
+			challenge, err := deriveLevelGamma(ts, l, levelRoots[l], j == 0 && i == 0, levelRoots[0])
+			if err != nil {
+				return fmt.Errorf("fri: Verify: %w", err)
 			}
+			gammas[l].Set(&challenge[0])
 		}
 
 		name := foldName(j)
@@ -812,7 +822,7 @@ func verifyBase(p Params, levelRoots, levelRootsExtra []hash.Digest, levelAtRoun
 	return nil
 }
 
-func verifyExt(p Params, levelRoots, levelRootsExtra []hash.Digest, levelAtRound map[int]int, roots []hash.Digest, prf Proof, ts *fiatshamir.Transcript) error {
+func verifyExt(p Params, levelRoots, levelRootsExtra []hash.Digest, levelAtRound map[int][]int, roots []hash.Digest, prf Proof, ts *fiatshamir.Transcript) error {
 	numLevels := len(levelRoots)
 	numExtraLevels := numLevels - 1
 
@@ -820,19 +830,12 @@ func verifyExt(p Params, levelRoots, levelRootsExtra []hash.Digest, levelAtRound
 	alphas := make([]ext.E6, p.numRounds)
 
 	for j := 0; j < p.numRounds; j++ {
-		if j > 0 {
-			if l, ok := levelAtRound[j]; ok {
-				gammaName := levelGammaName(l)
-				root := levelRoots[l]
-				if err := ts.Bind(gammaName, root[:]); err != nil {
-					return fmt.Errorf("fri: Verify: bind level l=%d: %w", l, err)
-				}
-				challenge, err := ts.ComputeChallenge(gammaName)
-				if err != nil {
-					return fmt.Errorf("fri: Verify: compute level gamma l=%d: %w", l, err)
-				}
-				gammas[l] = hash.OutputToExt(challenge)
+		for i, l := range levelAtRound[j] {
+			challenge, err := deriveLevelGamma(ts, l, levelRoots[l], j == 0 && i == 0, levelRoots[0])
+			if err != nil {
+				return fmt.Errorf("fri: Verify: %w", err)
 			}
+			gammas[l] = hash.OutputToExt(challenge)
 		}
 
 		name := foldName(j)
@@ -1159,7 +1162,7 @@ func verifyAdjacentExtOpening(root hash.Digest, layer QueryLayer, context string
 func checkQuery(s int, fq Query,
 	levelQueriesForQuery []QueryLayer,
 	levelRoots []hash.Digest,
-	levelAtRound map[int]int,
+	levelAtRound map[int][]int,
 	gammas []koalabear.Element,
 	roots []hash.Digest,
 	finalPoly []koalabear.Element,
@@ -1189,15 +1192,32 @@ func checkQuery(s int, fq Query,
 			return err
 		}
 
+		// The folded pair: the layer's opening, plus at round 0 γ_l times
+		// the opening of every other level entering at round 0.
+		leafP, leafQ := layer.LeafPBase, layer.LeafQBase
+		if j == 0 {
+			for _, li := range levelAtRound[0] {
+				ld := levelQueriesForQuery[li-1]
+				if ld.Row != row {
+					return fmt.Errorf("round 0: level %d query row = %d, want %d", li, ld.Row, row)
+				}
+				var term koalabear.Element
+				term.Mul(&ld.LeafPBase, &gammas[li])
+				leafP.Add(&leafP, &term)
+				term.Mul(&ld.LeafQBase, &gammas[li])
+				leafQ.Add(&leafQ, &term)
+			}
+		}
+
 		// Fold: expected = (LeafP+LeafQ)/2 + α*(LeafP-LeafQ)/(2·X),
 		// with X = ωⱼ^bitrev(row/2) for adjacent bit-reversed rows.
 		var xInv, sum, diff, expected koalabear.Element
 		generatorInv := p.domainsLight[j].generator
 		generatorInv.Inverse(&generatorInv)
 		xInv = bitReversedFoldXInv(generatorInv, lo>>1, Nj>>1)
-		sum.Add(&layer.LeafPBase, &layer.LeafQBase)
+		sum.Add(&leafP, &leafQ)
 		sum.Mul(&sum, &p.invTwo)
-		diff.Sub(&layer.LeafPBase, &layer.LeafQBase)
+		diff.Sub(&leafP, &leafQ)
 		diff.Mul(&diff, &p.invTwo)
 		diff.Mul(&diff, &xInv)
 		diff.Mul(&diff, &alphas[j])
@@ -1212,7 +1232,7 @@ func checkQuery(s int, fq Query,
 			var expectedNext koalabear.Element
 			expectedNext.Set(&expected)
 
-			if li, ok := levelAtRound[j+1]; ok {
+			for _, li := range levelAtRound[j+1] {
 				gamma := gammas[li]
 				ld := levelQueriesForQuery[li-1]
 				if ld.Row != nextRow {
@@ -1252,7 +1272,7 @@ func checkQuery(s int, fq Query,
 func checkQueryExt(s int, fq Query,
 	levelQueriesForQuery []QueryLayer,
 	levelRoots []hash.Digest,
-	levelAtRound map[int]int,
+	levelAtRound map[int][]int,
 	gammas []ext.E6,
 	roots []hash.Digest,
 	finalPoly []ext.E6,
@@ -1280,14 +1300,31 @@ func checkQueryExt(s int, fq Query,
 			return err
 		}
 
+		// The folded pair: the layer's opening, plus at round 0 γ_l times
+		// the opening of every other level entering at round 0.
+		leafP, leafQ := layer.LeafPExt, layer.LeafQExt
+		if j == 0 {
+			for _, li := range levelAtRound[0] {
+				ld := levelQueriesForQuery[li-1]
+				if ld.Row != row {
+					return fmt.Errorf("round 0: level %d query row = %d, want %d", li, ld.Row, row)
+				}
+				var term ext.E6
+				term.Mul(&ld.LeafPExt, &gammas[li])
+				leafP.Add(&leafP, &term)
+				term.Mul(&ld.LeafQExt, &gammas[li])
+				leafQ.Add(&leafQ, &term)
+			}
+		}
+
 		generatorInv := p.domainsLight[j].generator
 		generatorInv.Inverse(&generatorInv)
 		xInv := bitReversedFoldXInv(generatorInv, lo>>1, Nj>>1)
 
 		var sum, diff, expected ext.E6
-		sum.Add(&layer.LeafPExt, &layer.LeafQExt)
+		sum.Add(&leafP, &leafQ)
 		sum.MulByElement(&sum, &p.invTwo)
-		diff.Sub(&layer.LeafPExt, &layer.LeafQExt)
+		diff.Sub(&leafP, &leafQ)
 		diff.MulByElement(&diff, &p.invTwo)
 		diff.MulByElement(&diff, &xInv)
 		diff.Mul(&diff, &alphas[j])
@@ -1301,7 +1338,7 @@ func checkQueryExt(s int, fq Query,
 			var expectedNext ext.E6
 			expectedNext.Set(&expected)
 
-			if li, ok := levelAtRound[j+1]; ok {
+			for _, li := range levelAtRound[j+1] {
 				gamma := gammas[li]
 				ld := levelQueriesForQuery[li-1]
 				if ld.Row != nextRow {

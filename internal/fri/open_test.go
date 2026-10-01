@@ -284,7 +284,7 @@ func TestOpenFRIVerifyRoundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := bindClaimedValuesByPolynomialOrder(verifierFS, openProof.ClaimedValues, shifts, sizes); err != nil {
+	if err := bindClaimedValuesByPolynomialOrder(verifierFS, openProof.ClaimedValues, shifts, mustDeepPlan(t, sizes)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := verifierFS.ComputeChallenge(deepAlphaName); err != nil {
@@ -365,6 +365,7 @@ func runOpenFixture(
 	shifts []BatchShifts,
 	rate uint64,
 	numQueries int,
+	opts ...OpenOption,
 ) ([]Committed, OpeningProof, Params, ext.E6) {
 	t.Helper()
 
@@ -415,7 +416,7 @@ func runOpenFixture(
 	}
 	zeta := hash.OutputToExt(zetaOut)
 
-	openProof, err := pcs.Open(batches, committed, shifts, zeta, fs, WithOpenDomainCache(&domainCache))
+	openProof, err := pcs.Open(batches, committed, shifts, zeta, fs, append([]OpenOption{WithOpenDomainCache(&domainCache)}, opts...)...)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}

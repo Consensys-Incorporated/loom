@@ -92,11 +92,11 @@ func TestComputeDeepQuotientCodewordsByPolynomialMatchesReference(t *testing.T) 
 		t.Fatalf("computeClaimedValues: %v", err)
 	}
 
-	gotMap, gotSizes, err := computeDeepQuotientCodewordsByPolynomial(
+	gotMap, gotSizes, err := deepCodewordsBySize(
 		batches, shifts, cv, alpha, zeta, rate, &cache,
 	)
 	if err != nil {
-		t.Fatalf("computeDeepQuotientCodewordsByPolynomial: %v", err)
+		t.Fatalf("deepCodewordsBySize: %v", err)
 	}
 
 	// The reference deliberately uses committed[b].Sources to read
@@ -132,7 +132,7 @@ func TestComputeDeepQuotientCodewordsShapeMismatch(t *testing.T) {
 	alpha.SetOne()
 
 	t.Run("shifts length mismatch", func(t *testing.T) {
-		_, _, err := computeDeepQuotientCodewordsByPolynomial(
+		_, _, err := deepCodewordsBySize(
 			batches, []BatchShifts{}, cv, alpha, zeta, 2, &cache,
 		)
 		if err == nil {
@@ -140,7 +140,7 @@ func TestComputeDeepQuotientCodewordsShapeMismatch(t *testing.T) {
 		}
 	})
 	t.Run("claimedValues length mismatch", func(t *testing.T) {
-		_, _, err := computeDeepQuotientCodewordsByPolynomial(
+		_, _, err := deepCodewordsBySize(
 			batches, shifts, []BatchClaimedValues{}, alpha, zeta, 2, &cache,
 		)
 		if err == nil {
@@ -148,7 +148,7 @@ func TestComputeDeepQuotientCodewordsShapeMismatch(t *testing.T) {
 		}
 	})
 	t.Run("rate must be power of two", func(t *testing.T) {
-		_, _, err := computeDeepQuotientCodewordsByPolynomial(
+		_, _, err := deepCodewordsBySize(
 			batches, shifts, cv, alpha, zeta, 3, &cache,
 		)
 		if err == nil {
@@ -213,11 +213,11 @@ func TestComputeDeepQuotientCodewordsByPolynomialMultiShiftMatchesReference(t *t
 		t.Fatalf("computeClaimedValues: %v", err)
 	}
 
-	newMap, newSizes, err := computeDeepQuotientCodewordsByPolynomial(
+	newMap, newSizes, err := deepCodewordsBySize(
 		batches, shifts, cv, alpha, zeta, rate, &cache,
 	)
 	if err != nil {
-		t.Fatalf("computeDeepQuotientCodewordsByPolynomial: %v", err)
+		t.Fatalf("deepCodewordsBySize: %v", err)
 	}
 
 	wantMap, wantSizes := referenceDeepQuotientByPolynomial(
@@ -398,4 +398,33 @@ func shiftedZetaForTest(zeta ext.E6, traceGenerator koalabear.Element, shift, N 
 	var zs ext.E6
 	zs.MulByElement(&zeta, &omegaShift)
 	return zs
+}
+
+// deepCodewordsBySize runs computeDeepQuotientCodewordsByPolynomial with the
+// default classes (one per size) and indexes the codewords by size.
+func deepCodewordsBySize(
+	batches []Batch,
+	shifts []BatchShifts,
+	claimedValues []BatchClaimedValues,
+	alpha, zeta ext.E6,
+	rate uint64,
+	cache *poly.DomainCache,
+) (map[int][]ext.E6, []int, error) {
+	sizes, err := groupNativeSizesFromBatches(batches)
+	if err != nil {
+		return nil, nil, err
+	}
+	plan, err := newDeepPlan(sizes, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	byClass, err := computeDeepQuotientCodewordsByPolynomial(batches, shifts, claimedValues, alpha, zeta, rate, plan, cache)
+	if err != nil {
+		return nil, nil, err
+	}
+	res := make(map[int][]ext.E6, len(byClass))
+	for c, cw := range byClass {
+		res[plan.sizes[c]] = cw
+	}
+	return res, plan.sizes, nil
 }

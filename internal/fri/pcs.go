@@ -121,9 +121,9 @@ type BatchClaimedValues = []GroupClaimedValues
 //
 //   - ClaimedValues[b] is the GroupClaimedValues slice for batches[b], in
 //     the same order Open / Verify received batches and shifts.
-//   - DeepQuotientRoots is one Merkle root per distinct native size in
-//     decreasing size order (same order as the per-polynomial DEEP quotient
-//     FRI levels).
+//   - DeepQuotientRoots is one Merkle root per DEEP class (one per distinct
+//     native size by default, see WithDeepClasses), in FRI level order:
+//     decreasing size, equal sizes in class order.
 //   - FRIProof is the multi-degree FRI proof on the DEEP-quotient
 //     codewords.
 //   - PointSamplings[q][b] is the WMerkleProof opening batches[b] at the

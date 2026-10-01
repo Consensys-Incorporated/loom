@@ -197,7 +197,7 @@ func TestCheckFRIBridgeUsesCompactRows(t *testing.T) {
 	_, shapes := rootsAndShapes(committed)
 	pcs, sizes, alpha, queryPositions := bridgeInputsForTest(t, committed, openProof, params, shapes, shifts)
 
-	if err := checkFRIBridgeByPolynomial(&pcs, &openProof, sizes, shapes, shifts, alpha, zeta, queryPositions); err != nil {
+	if err := checkFRIBridgeByPolynomial(&pcs, &openProof, mustDeepPlan(t, sizes), shapes, shifts, alpha, zeta, queryPositions); err != nil {
 		t.Fatalf("checkFRIBridge rejected valid compact rows: %v", err)
 	}
 
@@ -205,7 +205,7 @@ func TestCheckFRIBridgeUsesCompactRows(t *testing.T) {
 		tampered := openProof
 		tampered.PointSamplings = clonePointSamplings(openProof.PointSamplings)
 		tampered.PointSamplings[0][0].TopRows.Lo.RawRowBase[0].SetUint64(0xdeadbeef)
-		if err := checkFRIBridgeByPolynomial(&pcs, &tampered, sizes, shapes, shifts, alpha, zeta, queryPositions); err == nil {
+		if err := checkFRIBridgeByPolynomial(&pcs, &tampered, mustDeepPlan(t, sizes), shapes, shifts, alpha, zeta, queryPositions); err == nil {
 			t.Fatal("checkFRIBridge accepted a tampered largest-group compact row")
 		}
 	})
@@ -214,7 +214,7 @@ func TestCheckFRIBridgeUsesCompactRows(t *testing.T) {
 		tampered := openProof
 		tampered.PointSamplings = clonePointSamplings(openProof.PointSamplings)
 		tampered.PointSamplings[0][0].Injections[0].Rows.Hi.RawRowBase[0].SetUint64(0xdeadbeef)
-		if err := checkFRIBridgeByPolynomial(&pcs, &tampered, sizes, shapes, shifts, alpha, zeta, queryPositions); err == nil {
+		if err := checkFRIBridgeByPolynomial(&pcs, &tampered, mustDeepPlan(t, sizes), shapes, shifts, alpha, zeta, queryPositions); err == nil {
 			t.Fatal("checkFRIBridge accepted a tampered injected compact row")
 		}
 	})
@@ -370,7 +370,7 @@ func bridgeInputsForTest(
 	if err := fs.NewChallenge(deepAlphaName); err != nil {
 		t.Fatal(err)
 	}
-	if err := bindClaimedValuesByPolynomialOrder(fs, openProof.ClaimedValues, shifts, sizes); err != nil {
+	if err := bindClaimedValuesByPolynomialOrder(fs, openProof.ClaimedValues, shifts, mustDeepPlan(t, sizes)); err != nil {
 		t.Fatal(err)
 	}
 	alphaOut, err := fs.ComputeChallenge(deepAlphaName)
@@ -694,5 +694,67 @@ func TestPCSVerifyRoundtripEqualSizes(t *testing.T) {
 				t.Fatal("tampered proof accepted")
 			}
 		})
+	}
+}
+
+func mustDeepPlan(t *testing.T, sizes [][]int) deepPlan {
+	t.Helper()
+	plan, err := newDeepPlan(sizes, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return plan
+}
+
+// TestPCSVerifyDeepClasses opens two batches whose groups fall in three DEEP
+// classes: two classes of the same size (they share FRI round 0) and a
+// smaller one. Class ids are sparse and the first class is not the largest.
+func TestPCSVerifyDeepClasses(t *testing.T) {
+	const rate uint64 = 2
+	const numQueries = 4
+	big := func(o uint64) poly.Polynomial {
+		return poly.Polynomial{baseElement(o), baseElement(o + 3), baseElement(o + 5), baseElement(o + 7),
+			baseElement(o + 11), baseElement(o + 13), baseElement(o + 17), baseElement(o + 19)}
+	}
+	small := func(o uint64) poly.Polynomial {
+		return poly.Polynomial{baseElement(o), baseElement(o + 2), baseElement(o + 9), baseElement(o + 4)}
+	}
+	batches := []Batch{
+		{{Base: []poly.Polynomial{small(1)}}, {Base: []poly.Polynomial{big(20)}}, {Base: []poly.Polynomial{big(40)}}},
+		{{Base: []poly.Polynomial{big(60), big(70)}}, {Base: []poly.Polynomial{small(80)}}},
+	}
+	shifts := []BatchShifts{
+		{{Base: [][]int{{0, 1}}}, {Base: [][]int{{0}}}, {Base: [][]int{{0, 2}}}},
+		{{Base: [][]int{{0}, {1}}}, {Base: [][]int{{0}}}},
+	}
+	// classes: 2 = small groups, 5 = first big class, 9 = second big class
+	classes := [][]int{{2, 5, 9}, {9, 2}}
+	committed, openProof, params, zeta := runOpenFixture(t, batches, shifts, rate, numQueries, WithDeepClasses(classes))
+	roots, shapes := rootsAndShapes(committed)
+	pcs := NewPCSWithParams(params)
+	if got := len(openProof.DeepQuotientRoots); got != 3 {
+		t.Fatalf("DeepQuotientRoots = %d, want 3", got)
+	}
+	if err := pcs.Verify(roots, shapes, shifts, zeta, openProof, buildVerifierTranscript(t, committed), WithDeepClasses(classes)); err != nil {
+		t.Fatalf("PCS.Verify rejected valid DEEP classes: %v", err)
+	}
+	// The verifier must use the prover's classes.
+	if err := pcs.Verify(roots, shapes, shifts, zeta, openProof, buildVerifierTranscript(t, committed)); err == nil {
+		t.Fatal("PCS.Verify accepted the proof with the default classes")
+	}
+	if err := pcs.Verify(roots, shapes, shifts, zeta, openProof, buildVerifierTranscript(t, committed), WithDeepClasses([][]int{{2, 9, 5}, {9, 2}})); err == nil {
+		t.Fatal("PCS.Verify accepted the proof with other classes")
+	}
+	// A class must have a single size.
+	if err := pcs.Verify(roots, shapes, shifts, zeta, openProof, buildVerifierTranscript(t, committed), WithDeepClasses([][]int{{5, 5, 9}, {9, 2}})); err == nil {
+		t.Fatal("PCS.Verify accepted a class mixing two sizes")
+	}
+	// A row of the second big class, which enters FRI at round 0 next to
+	// level 0.
+	tampered := openProof
+	tampered.PointSamplings = clonePointSamplings(openProof.PointSamplings)
+	tampered.PointSamplings[0][1].TopRows.Hi.RawRowBase[1].SetUint64(0xdeadbeef)
+	if err := pcs.Verify(roots, shapes, shifts, zeta, tampered, buildVerifierTranscript(t, committed), WithDeepClasses(classes)); err == nil {
+		t.Fatal("tampered row accepted")
 	}
 }

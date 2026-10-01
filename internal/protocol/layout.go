@@ -17,7 +17,6 @@ import (
 	"sort"
 
 	"github.com/consensys/loom/board"
-	"github.com/consensys/loom/expr"
 	"github.com/consensys/loom/field"
 	"github.com/consensys/loom/internal/constants"
 	"github.com/consensys/loom/internal/poly"
@@ -78,6 +77,27 @@ type Layout struct {
 
 	// "module.chunkIdx" name → Slot for AIR-quotient chunks.
 	AIRChunkSlot map[string]Slot
+
+	// Modules is ModuleOrder(program).
+	Modules []string
+}
+
+// DeepClasses returns, for every tree and group, the index of the group's
+// module in Modules: the DEEP class of the group (fri.WithDeepClasses), so
+// that the PCS builds one DEEP quotient per module, in module order.
+func (l Layout) DeepClasses() [][]int {
+	index := make(map[string]int, len(l.Modules))
+	for i, m := range l.Modules {
+		index[m] = i
+	}
+	res := make([][]int, len(l.TreeGroups))
+	for t, groups := range l.TreeGroups {
+		res[t] = make([]int, len(groups))
+		for g, group := range groups {
+			res[t][g] = index[group.Module]
+		}
+	}
+	return res
 }
 
 // ModuleOrder returns the canonical module order of the commitment layout:
@@ -130,6 +150,7 @@ func BuildLayout(program board.Program, _ int) Layout {
 	layout.ColSlot = make(map[string]Slot)
 	layout.AIRChunkSlot = make(map[string]Slot)
 	order := ModuleOrder(program)
+	layout.Modules = order
 
 	treeIdx := 0
 	// addTree appends a tree whose groups are the non-empty column lists of
@@ -206,144 +227,4 @@ func nextRailPolyIdx(counters map[field.Kind]int, f field.Kind) int {
 	idx := counters[f]
 	counters[f] = idx + 1
 	return idx
-}
-
-// sortedSizesDesc returns the keys of m sorted in decreasing order.
-func sortedSizesDesc[V any](m map[int]V) []int {
-	out := make([]int, 0, len(m))
-	for n := range m {
-		out = append(out, n)
-	}
-	sort.Sort(sort.Reverse(sort.IntSlice(out)))
-	return out
-}
-
-// DEEPquotientLayout describes the iteration order used by ComputeDeepQuotient
-// (prover) and checkFRIBridge (verifier) when assembling the per-size DEEP
-// quotient. The layout is purely metadata — no field values, no tree handles —
-// so the same struct can drive both sides.
-//
-// Phase 1 (vanishing-relation columns): for each size i (decreasing N), and
-// each shift j (increasing) at that size, Names[i][j] / Keys[i][j] hold the
-// bare column names and their leaf.String() forms (parallel arrays sorted by
-// Keys[i][j]). A column referenced by several modules of the same size is
-// pooled and dedup'd by leaf.String().
-//
-// Phase 2 (AIR-quotient chunks): AIRChunks[i] is the ordered list of chunk
-// names of size Sizes[i], in canonical (sortedModule × chunkIdx) order.
-// Modules from different names of the same size are merged into a single
-// accumulate-and-divide step (mathematically equivalent to per-module).
-type DEEPquotientLayout struct {
-	Sizes  []int        // decreasing N
-	Shifts [][]int      // Shifts[i] = shifts at Sizes[i] (increasing)
-	Names  [][][]string // Names[i][j] = bare column names at (Sizes[i], Shifts[i][j])
-	Keys   [][][]string // Keys[i][j]  = parallel leaf.String() keys (for ValuesAtZeta lookup)
-
-	AIRChunks [][]string // AIRChunks[i] = chunk names of size Sizes[i] in canonical order
-}
-
-// BuildDeepQuotientLayout constructs the iteration layout used by both the
-// prover's ComputeDeepQuotient and the verifier's checkFRIBridge.
-//
-// The function is deterministic in `program`. Module sizes can be changed
-// between Compile and Prove (via program.SetSize); the layout reflects the
-// current sizes.
-func BuildDeepQuotientLayout(program board.Program) DEEPquotientLayout {
-	leafConfig := expr.NewConfig(
-		expr.WithoutChallenges(),
-		expr.WithoutVerifierColumns(),
-	)
-
-	// Group module names by size, deterministic within a size.
-	modulesByN := map[int][]string{}
-	for name, m := range program.Modules {
-		modulesByN[m.N] = append(modulesByN[m.N], name)
-	}
-	for _, names := range modulesByN {
-		sort.Strings(names)
-	}
-	sizes := sortedSizesDesc(modulesByN)
-
-	out := DEEPquotientLayout{
-		Sizes:     sizes,
-		Shifts:    make([][]int, len(sizes)),
-		Names:     make([][][]string, len(sizes)),
-		Keys:      make([][][]string, len(sizes)),
-		AIRChunks: make([][]string, len(sizes)),
-	}
-
-	sizeIdx := make(map[int]int, len(sizes))
-	for i, N := range sizes {
-		sizeIdx[N] = i
-	}
-
-	// ---- Phase 1: pool vanishing-relation leaves per size ----
-	type colEntry struct{ name, key string }
-	for i, N := range sizes {
-		byShift := map[int][]colEntry{}
-		seenKey := map[string]bool{}
-		for _, moduleName := range modulesByN[N] {
-			module := program.Modules[moduleName]
-			if module.VanishingRelation == nil {
-				continue
-			}
-			for _, leaf := range module.VanishingRelation.LeavesFull(leafConfig) {
-				k := leaf.String()
-				if seenKey[k] {
-					continue
-				}
-				seenKey[k] = true
-				normalizedShift := 0
-				if leaf.Shift != 0 {
-					normalizedShift = ((leaf.Shift % N) + N) % N
-				}
-				byShift[normalizedShift] = append(byShift[normalizedShift], colEntry{name: leaf.Name, key: k})
-			}
-		}
-
-		shifts := make([]int, 0, len(byShift))
-		for sh := range byShift {
-			shifts = append(shifts, sh)
-		}
-		sort.Ints(shifts)
-
-		out.Shifts[i] = shifts
-		out.Names[i] = make([][]string, len(shifts))
-		out.Keys[i] = make([][]string, len(shifts))
-		for j, sh := range shifts {
-			entries := byShift[sh]
-			sort.Slice(entries, func(a, b int) bool { return entries[a].key < entries[b].key })
-			names := make([]string, len(entries))
-			keys := make([]string, len(entries))
-			for k, e := range entries {
-				names[k] = e.name
-				keys[k] = e.key
-			}
-			out.Names[i][j] = names
-			out.Keys[i][j] = keys
-		}
-	}
-
-	// ---- Phase 2: AIR chunk names per size, in (sortedModule × chunkIdx) order ----
-	moduleNames := make([]string, 0, len(program.Modules))
-	for name := range program.Modules {
-		moduleNames = append(moduleNames, name)
-	}
-	sort.Strings(moduleNames)
-	for _, moduleName := range moduleNames {
-		m := program.Modules[moduleName]
-		if m.VanishingRelation == nil || m.VanishingRelation.Degree() <= 0 {
-			continue
-		}
-		N := m.N
-		eDeg := m.VanishingRelation.Degree()
-		bigSize := poly.NextPowerOfTwo(eDeg * N)
-		numChunks := bigSize / N
-		i := sizeIdx[N]
-		for c := 0; c < numChunks; c++ {
-			out.AIRChunks[i] = append(out.AIRChunks[i], constants.QuotientChunkName(moduleName, c))
-		}
-	}
-
-	return out
 }

@@ -52,21 +52,22 @@ type deepDenominatorPlan struct {
 }
 
 // computeDeepQuotientCodewordsByPolynomial builds one DEEP-quotient codeword
-// per distinct native size using the per-polynomial convention. For each
+// per DEEP class (see deepPlan) using the per-polynomial convention. For each
 // polynomial P_i, all requested shifts are first summed:
 //
 //	B_i(X) = sum_s (v_i,s - P_i(X)) / (z_i,s - X)
 //
-// Then the per-size quotient folds those polynomial bundles with alpha powers:
+// Then the per-class quotient folds those polynomial bundles with alpha powers:
 //
-//	DQ_N(X) = sum_i alpha^i * B_i(X)
+//	DQ_c(X) = sum_i alpha^i * B_i(X)
 //
-// The DEEP quotient polynomial has degree < N and is built directly on the
-// size-N trace subgroup before being RS-encoded to size rate*N for FRI.
+// The DEEP quotient polynomial has degree < N (the class's size) and is built
+// directly on the size-N trace subgroup before being RS-encoded to size
+// rate*N for FRI. The result is indexed by class.
 //
-// The alpha counter resets at each native size and runs in deterministic
-// order: size descending, batch declaration order, group declaration order,
-// base rail then extension rail.
+// The alpha counter resets at each class and runs in deterministic order:
+// batch declaration order, group declaration order, base rail then extension
+// rail.
 func computeDeepQuotientCodewordsByPolynomial(
 	batches []Batch,
 	shifts []BatchShifts,
@@ -74,47 +75,45 @@ func computeDeepQuotientCodewordsByPolynomial(
 	alpha ext.E6,
 	zeta ext.E6,
 	rate uint64,
+	plan deepPlan,
 	domainCache *poly.DomainCache,
-) (map[int][]ext.E6, []int, error) {
+) ([][]ext.E6, error) {
 	if len(claimedValues) != len(batches) {
-		return nil, nil, fmt.Errorf("fri: computeDeepQuotientCodewordsByPolynomial: claimedValues has %d entries, batches has %d", len(claimedValues), len(batches))
+		return nil, fmt.Errorf("fri: computeDeepQuotientCodewordsByPolynomial: claimedValues has %d entries, batches has %d", len(claimedValues), len(batches))
 	}
 	if rate == 0 || rate&(rate-1) != 0 {
-		return nil, nil, fmt.Errorf("fri: computeDeepQuotientCodewordsByPolynomial: rate %d must be a positive power of two", rate)
+		return nil, fmt.Errorf("fri: computeDeepQuotientCodewordsByPolynomial: rate %d must be a positive power of two", rate)
 	}
 	if err := validateBatchShifts(batches, shifts); err != nil {
-		return nil, nil, fmt.Errorf("fri: computeDeepQuotientCodewordsByPolynomial: %w", err)
+		return nil, fmt.Errorf("fri: computeDeepQuotientCodewordsByPolynomial: %w", err)
 	}
-	sizes, err := groupNativeSizesFromBatches(batches)
-	if err != nil {
-		return nil, nil, fmt.Errorf("fri: computeDeepQuotientCodewordsByPolynomial: %w", err)
+	if len(plan.classOf) != len(batches) {
+		return nil, fmt.Errorf("fri: computeDeepQuotientCodewordsByPolynomial: DEEP plan has %d batches, got %d", len(plan.classOf), len(batches))
 	}
-	sizesDesc := sizesDescFromSizes(sizes)
 
-	deepEvalsBySize := make(map[int][]ext.E6, len(sizesDesc))
-	for _, N := range sizesDesc {
+	deepByClass := make([][]ext.E6, plan.numClasses())
+	for class, N := range plan.sizes {
 		ratN := uint64(rate) * uint64(N)
 		traceDomain := domainCache.Get(uint64(N))
 
-		bundles, err := deepPolyBundlesForSize(N, batches, sizes, shifts, claimedValues, alpha, zeta, traceDomain)
+		bundles, err := deepPolyBundlesForClass(class, N, batches, plan, shifts, claimedValues, alpha, zeta, traceDomain)
 		if err != nil {
-			return nil, nil, err
+			return nil, err
 		}
 
 		deepLagrange := make(poly.ExtPolynomial, N)
 		accumulateDeepQuotientByPolynomialOnTrace(deepLagrange, bundles, traceDomain)
 
 		encoder := reedsolomon.NewEncoder(ratN, reedsolomon.WithCache(domainCache))
-		deepEncoded := encoder.EncodeExt(deepLagrange, traceDomain)
-		deepEvalsBySize[N] = deepEncoded
+		deepByClass[class] = encoder.EncodeExt(deepLagrange, traceDomain)
 	}
-	return deepEvalsBySize, sizesDesc, nil
+	return deepByClass, nil
 }
 
-func deepPolyBundlesForSize(
-	N int,
+func deepPolyBundlesForClass(
+	class, N int,
 	batches []Batch,
-	sizes [][]int,
+	plan deepPlan,
 	shifts []BatchShifts,
 	claimedValues []BatchClaimedValues,
 	alpha ext.E6,
@@ -130,7 +129,7 @@ func deepPolyBundlesForSize(
 			return nil, fmt.Errorf("fri: computeDeepQuotientCodewordsByPolynomial: claimedValues[%d] has %d groups, batches[%d] has %d", b, len(claimedValues[b]), b, len(batch))
 		}
 		for g, group := range batch {
-			if sizes[b][g] != N {
+			if plan.classOf[b][g] != class {
 				continue
 			}
 			gShifts := shifts[b][g]
