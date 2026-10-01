@@ -125,8 +125,10 @@ func (m *Machine) spongeChip(b *board.Builder, bus *Bus, t trace.Trace, p2 *[][w
 // merkleChip: one row per level of a Merkle path, leaf level first.
 //
 // Columns: cur0..7 (the digest entering the level), s0..7 (the sibling), b
-// (the direction bit), idx (the index at this level), out0..7. Setup: first,
-// last, active, leaf_addr, idx_addr, sib_addr, root_addr.
+// (the direction bit), idx (the index at this level), out0..7, x (the x⁻¹
+// accumulator), b0 (the index's low bit). Setup: first, last, active,
+// leaf_addr, idx_addr, sib_addr, root_addr, g (the accumulator constant of the
+// level), xb_addr and xb_mult (the cell [x⁻¹, b0], written on the last row).
 //
 // Constraints:
 //
@@ -135,6 +137,9 @@ func (m *Machine) spongeChip(b *board.Builder, bus *Bus, t trace.Trace, p2 *[][w
 //	idx = b                    on the last row (the index is below 2^depth)
 //	                           and on padding rows
 //	cur = out[−1]              on every row but the first of a path
+//	x = 1 + b·(g − 1)          on the first row
+//	x = x[−1]·(1 + b·(g − 1))  on the others
+//	b0 = b on the first row, b0 = b0[−1] on the others
 //
 // and out = compress(b ? (s, cur) : (cur, s)), looked up in the P2 core. The
 // first row reads the leaf digest and the index (lane 0 of its cell); the last
@@ -160,6 +165,20 @@ func (m *Machine) merkleChip(b *board.Builder, bus *Bus, t trace.Trace, p2 *[][w
 		cur, prev := col(merkleMod, fmt.Sprintf("cur%d", i)), colShift(merkleMod, fmt.Sprintf("out%d", i), -1)
 		mm.AssertZero(one().Sub(first).Mul(cur.Sub(prev)))
 	}
+	// x⁻¹ = Π_lvl (b_lvl ? g_lvl : 1), with g_lvl = gInv^(2^(depth−1−lvl)).
+	x, b0 := col(merkleMod, "x"), col(merkleMod, "b0")
+	factor := one().Add(bit.Mul(setupCol(merkleMod, "g").Sub(one())))
+	notFirst := active.Sub(first)
+	mm.AssertZero(first.Mul(x.Sub(factor)))
+	mm.AssertZero(notFirst.Mul(x.Sub(colShift(merkleMod, "x", -1).Mul(factor))))
+	mm.AssertZero(first.Mul(b0.Sub(bit)))
+	mm.AssertZero(notFirst.Mul(b0.Sub(colShift(merkleMod, "b0", -1))))
+	var xbCell [CellWidth]expr.Expr
+	xbCell[0], xbCell[1] = x, b0
+	for i := 2; i < CellWidth; i++ {
+		xbCell[i] = expr.Const(koalabear.Element{})
+	}
+	bus.Write(merkleMod, setupCol(merkleMod, "xb_addr"), xbCell, setupCol(merkleMod, "xb_mult"))
 
 	var idxCell [CellWidth]expr.Expr
 	idxCell[0] = idx
@@ -187,7 +206,8 @@ func (m *Machine) merkleChip(b *board.Builder, bus *Bus, t trace.Trace, p2 *[][w
 	}
 
 	c := newCols(n)
-	c.declare("first", "last", "active", "leaf_addr", "idx_addr", "sib_addr", "root_addr", "b", "idx")
+	c.declare("first", "last", "active", "leaf_addr", "idx_addr", "sib_addr", "root_addr", "b", "idx",
+		"x", "b0", "g", "xb_addr", "xb_mult")
 	for i := range digest {
 		c.declare(fmt.Sprintf("cur%d", i), fmt.Sprintf("s%d", i), fmt.Sprintf("out%d", i))
 	}
@@ -197,6 +217,9 @@ func (m *Machine) merkleChip(b *board.Builder, bus *Bus, t trace.Trace, p2 *[][w
 	for _, p := range m.paths {
 		cur := m.cells[p.leaf]
 		index := m.cells[p.index][0].Uint64()
+		b0 := index & 1
+		var x koalabear.Element
+		x.SetOne()
 		for lvl, sAddr := range p.siblings {
 			sib := m.cells[sAddr]
 			bitV := index & 1
@@ -209,6 +232,16 @@ func (m *Machine) merkleChip(b *board.Builder, bus *Bus, t trace.Trace, p2 *[][w
 			}
 			c.set("b", row, bitV)
 			c.set("idx", row, index)
+			c.set("b0", row, b0)
+			g := koalabear.One()
+			if p.gens != nil {
+				g = p.gens[lvl]
+			}
+			c.setElem("g", row, g)
+			if bitV == 1 {
+				x.Mul(&x, &g)
+			}
+			c.setElem("x", row, x)
 			var in [width]koalabear.Element
 			in[0].SetUint64(nodeTag)
 			left, right := cur, sib
@@ -230,6 +263,10 @@ func (m *Machine) merkleChip(b *board.Builder, bus *Bus, t trace.Trace, p2 *[][w
 			if lvl == len(p.siblings)-1 {
 				c.set("last", row, 1)
 				c.set("root_addr", row, uint64(p.root))
+				if p.gens != nil {
+					c.set("xb_addr", row, uint64(p.xb))
+					c.set("xb_mult", row, uint64(m.reads[p.xb]))
+				}
 			}
 			copy(prevOut[:], out[:digest])
 			copy(cur[:], out[:digest])
@@ -272,6 +309,8 @@ func (c *cols) get(name string) []koalabear.Element {
 }
 
 func (c *cols) set(name string, row int, v uint64) { c.get(name)[row].SetUint64(v) }
+
+func (c *cols) setInt(name string, row int, v int64) { c.get(name)[row].SetInt64(v) }
 
 func (c *cols) setElem(name string, row int, v koalabear.Element) { c.get(name)[row] = v }
 

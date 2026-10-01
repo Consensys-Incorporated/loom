@@ -15,6 +15,7 @@ package recursion
 
 import (
 	"fmt"
+	"math/big"
 
 	"github.com/consensys/gnark-crypto/field/koalabear"
 	"github.com/consensys/gnark-crypto/field/koalabear/poseidon2"
@@ -36,8 +37,13 @@ const (
 // Module names of the chips.
 const (
 	witnessMod = "witness"
+	constMod   = "const"
 	spongeMod  = "sponge"
 	merkleMod  = "merkle"
+	windowMod  = "window"
+	bitsMod    = "bits"
+	e6Mod      = "e6"
+	foldMod    = "fold"
 	p2Mod      = "p2"
 )
 
@@ -48,11 +54,17 @@ type Cell [CellWidth]koalabear.Element
 // the compiler assigns addresses, counts reads, and runs the computation to
 // fill the trace.
 type Machine struct {
-	cells   []Cell // value of every address
-	reads   []int  // read count of every address
-	witness []int  // addresses written by the witness chip
-	sponges []spongeInst
-	paths   []pathInst
+	cells     []Cell // value of every address
+	reads     []int  // read count of every address
+	witness   []int  // addresses written by the witness chip
+	consts    map[Cell]int
+	constList []int // addresses written by the const chip
+	sponges   []spongeInst
+	paths     []pathInst
+	windows   []windowInst
+	bits      []bitsInst
+	e6Rows    []e6Row
+	folds     [][]foldRow
 }
 
 type spongeInst struct {
@@ -64,6 +76,8 @@ type spongeInst struct {
 type pathInst struct {
 	leaf, index, root int
 	siblings          []int
+	gens              []koalabear.Element // x⁻¹ accumulator constants, nil if unused
+	xb                int                 // address of [x⁻¹, b0], if gens != nil
 }
 
 func (m *Machine) alloc(v Cell) int {
@@ -145,6 +159,32 @@ func (m *Machine) MerklePath(leaf int, siblings []int, index int, root int) {
 	m.paths = append(m.paths, pathInst{leaf: leaf, index: index, root: root, siblings: siblings})
 }
 
+// MerklePathX is MerklePath for the Merkle tree of a FRI layer over a domain
+// of generator g⁻¹ = gInv: it also returns the cell [x⁻¹, b0], where x⁻¹ =
+// gInv^bitrev(index) (bit-reversed over the path depth) is the inverse of the
+// fold point of the queried pair, and b0 is the index's low bit.
+func (m *Machine) MerklePathX(leaf int, siblings []int, index int, root int, gInv koalabear.Element) int {
+	m.MerklePath(leaf, siblings, index, root)
+	d := len(siblings)
+	p := &m.paths[len(m.paths)-1]
+	idx := m.cells[index][0].Uint64()
+	var x koalabear.Element
+	x.SetOne()
+	for lvl := range d {
+		var g koalabear.Element
+		g.Exp(gInv, new(big.Int).Lsh(big.NewInt(1), uint(d-1-lvl)))
+		p.gens = append(p.gens, g)
+		if idx>>lvl&1 == 1 {
+			x.Mul(&x, &g)
+		}
+	}
+	var xb Cell
+	xb[0] = x
+	xb[1].SetUint64(idx & 1)
+	p.xb = m.alloc(xb)
+	return p.xb
+}
+
 // Program is a compiled machine: the loom program and its trace.
 type Program struct {
 	Loom  board.Program
@@ -212,6 +252,13 @@ func (m *Machine) Compile() (*Program, error) {
 	}
 	if err := m.merkleChip(&b, bus, t, &p2Inputs); err != nil {
 		return nil, err
+	}
+	for _, chip := range []func(*board.Builder, *Bus, trace.Trace) error{
+		m.constChip, m.windowChip, m.bitsChip, m.e6Chip, m.foldChip,
+	} {
+		if err := chip(&b, bus, t); err != nil {
+			return nil, err
+		}
 	}
 
 	// P2 core: one row per permutation, the Poseidon2 gadget's constraints.

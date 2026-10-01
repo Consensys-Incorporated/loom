@@ -85,10 +85,18 @@ func TestOpenings(t *testing.T) {
 	if err := prove(t, p); err != nil {
 		t.Fatalf("valid openings rejected: %v", err)
 	}
+	logBreakdown(t, p)
+}
+
+// logBreakdown logs, per chip, its rows and its columns by kind (base trace,
+// E6 logup, multiplicity, E6 quotient chunks), and the next-level leaf cost.
+func logBreakdown(t *testing.T, p *Program) {
+	t.Helper()
 	var sb []byte
 	for _, l := range zkcv.LeafBreakdownOf(p.Loom) {
-		sb = fmt.Appendf(sb, "%-10s rows=%5d trace=%4d logup=%4d mult=%3d quotient=%3d\n",
-			l.Module, p.Loom.Modules[l.Module].N, l.Trace/2, l.Logup/12, l.Mult/2, l.Quotient/12)
+		sb = fmt.Appendf(sb, "%-8s rows=%5d trace=%4d logup=%4d mult=%3d quotient=%3d  leaf elements=%4d\n",
+			l.Module, p.Loom.Modules[l.Module].N, l.Trace/2, l.Logup/12, l.Mult/2, l.Quotient/12,
+			l.Trace+l.Logup+l.Mult+l.Quotient)
 	}
 	leaf := zkcv.LeafCostOf(p.Loom)
 	t.Logf("\n%sleaf elements/query %d, leaf perms/query %d", sb, leaf.Elements, leaf.Perms)
