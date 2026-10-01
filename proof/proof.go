@@ -37,9 +37,10 @@ type Proof struct {
 
 	// Commitments holds the Merkle roots of every WMerkleTree the prover
 	// commits during the protocol, in canonical order:
-	//   trace-round-0 → trace-round-1 → … → trace-round-{r-1} → AIR (decreasing N)
-	// A trace-round root may be mixed-size; setup roots are NOT stored here,
-	// they live in the verifier's VerificationKey.
+	//   trace-round-0 → trace-round-1 → … → trace-round-{r-1} → AIR
+	// Each root is a mixed-height tree with one group per module, in sorted
+	// module order; setup roots are NOT stored here, they live in the
+	// verifier's VerificationKey.
 	Commitments []hash.Digest
 
 	// Opening is the multi-degree FRI opening proof for the canonical

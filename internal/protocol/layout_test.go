@@ -104,7 +104,7 @@ func TestBuildLayoutBaseOnlySlotStability(t *testing.T) {
 	if got := layout.NumTrees; got != 3 {
 		t.Errorf("NumTrees = %d, want 3", got)
 	}
-	if wantTreeGroups := [][]TreeGroup{{{N: 8}}, {{N: 8}}, {{N: 8}}}; !reflect.DeepEqual(layout.TreeGroups, wantTreeGroups) {
+	if wantTreeGroups := [][]TreeGroup{{{Module: "m", N: 8}}, {{Module: "m", N: 8}}, {{Module: "m", N: 8}}}; !reflect.DeepEqual(layout.TreeGroups, wantTreeGroups) {
 		t.Errorf("TreeGroups = %v, want %v", layout.TreeGroups, wantTreeGroups)
 	}
 	if got := layout.SetupEnd - layout.SetupBegin; got != 1 {
@@ -141,7 +141,7 @@ func TestBuildLayoutMixedSizeSetupUsesSingleTree(t *testing.T) {
 	if got := layout.NumTrees; got != 1 {
 		t.Fatalf("NumTrees = %d, want 1", got)
 	}
-	if want := [][]TreeGroup{{{N: 8}, {N: 4}}}; !reflect.DeepEqual(layout.TreeGroups, want) {
+	if want := [][]TreeGroup{{{Module: "big", N: 8}, {Module: "small", N: 4}}}; !reflect.DeepEqual(layout.TreeGroups, want) {
 		t.Errorf("TreeGroups = %v, want %v", layout.TreeGroups, want)
 	}
 
@@ -160,6 +160,8 @@ func TestBuildLayoutMixedSizeSetupUsesSingleTree(t *testing.T) {
 	}
 }
 
+// Two modules of the same size get one group each, and PolyIdx is relative to
+// the rail within a group.
 func TestBuildLayoutRailRelativePolyIdx(t *testing.T) {
 	baseRelation := dag.ExprToDAG(expr.Col("base_air"))
 	extRelation := dag.ExprToDAG(expr.ExtCol("ext_air"))
@@ -183,8 +185,8 @@ func TestBuildLayoutRailRelativePolyIdx(t *testing.T) {
 	wantColSlot := map[string]Slot{
 		"base_0": {TreeIdx: 0, GroupIdx: 0, PolyIdx: 0, Field: field.Base},
 		"base_1": {TreeIdx: 0, GroupIdx: 0, PolyIdx: 1, Field: field.Base},
-		"ext_0":  {TreeIdx: 0, GroupIdx: 0, PolyIdx: 0, Field: field.Ext},
-		"ext_1":  {TreeIdx: 0, GroupIdx: 0, PolyIdx: 1, Field: field.Ext},
+		"ext_0":  {TreeIdx: 0, GroupIdx: 1, PolyIdx: 0, Field: field.Ext},
+		"ext_1":  {TreeIdx: 0, GroupIdx: 1, PolyIdx: 1, Field: field.Ext},
 	}
 	for name, want := range wantColSlot {
 		if got := layout.ColSlot[name]; got != want {
@@ -194,7 +196,7 @@ func TestBuildLayoutRailRelativePolyIdx(t *testing.T) {
 
 	wantAIRSlot := map[string]Slot{
 		constants.QuotientChunkName("base", 0): {TreeIdx: 1, GroupIdx: 0, PolyIdx: 0, Field: field.Base},
-		constants.QuotientChunkName("ext", 0):  {TreeIdx: 1, GroupIdx: 0, PolyIdx: 0, Field: field.Ext},
+		constants.QuotientChunkName("ext", 0):  {TreeIdx: 1, GroupIdx: 1, PolyIdx: 0, Field: field.Ext},
 	}
 	for name, want := range wantAIRSlot {
 		if got := layout.AIRChunkSlot[name]; got != want {
@@ -202,7 +204,7 @@ func TestBuildLayoutRailRelativePolyIdx(t *testing.T) {
 		}
 	}
 
-	if wantTreeGroups := [][]TreeGroup{{{N: 8}}, {{N: 8}}}; !reflect.DeepEqual(layout.TreeGroups, wantTreeGroups) {
+	if wantTreeGroups := [][]TreeGroup{{{Module: "base", N: 8}, {Module: "ext", N: 8}}, {{Module: "base", N: 8}, {Module: "ext", N: 8}}}; !reflect.DeepEqual(layout.TreeGroups, wantTreeGroups) {
 		t.Errorf("TreeGroups = %v, want %v", layout.TreeGroups, wantTreeGroups)
 	}
 }
@@ -231,7 +233,7 @@ func TestBuildLayoutMixedSizeTraceRoundUsesSingleTree(t *testing.T) {
 	if got := layout.TraceEnd[0] - layout.TraceBegin[0]; got != 1 {
 		t.Fatalf("trace round 0 has %d trees, want 1", got)
 	}
-	if wantTreeGroups := [][]TreeGroup{{{N: 8}, {N: 4}}}; !reflect.DeepEqual(layout.TreeGroups, wantTreeGroups) {
+	if wantTreeGroups := [][]TreeGroup{{{Module: "big", N: 8}, {Module: "small", N: 4}}}; !reflect.DeepEqual(layout.TreeGroups, wantTreeGroups) {
 		t.Errorf("TreeGroups = %v, want %v", layout.TreeGroups, wantTreeGroups)
 	}
 
@@ -283,7 +285,7 @@ func TestBuildCanonicalScheduleMixedTraceGroupsMatchLayout(t *testing.T) {
 	if got := layout.TraceEnd[0] - layout.TraceBegin[0]; got != 1 {
 		t.Fatalf("trace round 0 has %d trees, want 1", got)
 	}
-	if want := []TreeGroup{{N: 8}, {N: 4}}; !reflect.DeepEqual(layout.TreeGroups[treeIdx], want) {
+	if want := []TreeGroup{{Module: "big", N: 8}, {Module: "small", N: 4}}; !reflect.DeepEqual(layout.TreeGroups[treeIdx], want) {
 		t.Fatalf("trace TreeGroups = %v, want %v", layout.TreeGroups[treeIdx], want)
 	}
 	if got, want := len(schedule.Shifts[treeIdx]), len(layout.TreeGroups[treeIdx]); got != want {
@@ -377,4 +379,34 @@ func roundsOf(staged [][]board.ColumnRef) []board.ProverRound {
 		res[r].Staged = cols
 	}
 	return res
+}
+
+// The groups of a tree follow the module names, not their sizes: the layout
+// does not change when module sizes change.
+func TestBuildLayoutGroupsFollowModuleOrder(t *testing.T) {
+	cols := [][]board.ColumnRef{{
+		{Name: "z_0", Module: "z", Field: field.Base},
+		{Name: "a_0", Module: "a", Field: field.Base},
+		{Name: "m_0", Module: "m", Field: field.Base},
+	}}
+	for _, sizes := range [][3]int{{4, 8, 16}, {16, 8, 4}, {8, 8, 8}} {
+		program := board.Program{
+			Modules: map[string]board.CompiledModule{
+				"a": {Name: "a", N: sizes[0]},
+				"m": {Name: "m", N: sizes[1]},
+				"z": {Name: "z", N: sizes[2]},
+			},
+			Rounds: roundsOf(cols),
+		}
+		layout := BuildLayout(program, 0)
+		want := [][]TreeGroup{{{Module: "a", N: sizes[0]}, {Module: "m", N: sizes[1]}, {Module: "z", N: sizes[2]}}}
+		if !reflect.DeepEqual(layout.TreeGroups, want) {
+			t.Errorf("sizes %v: TreeGroups = %v, want %v", sizes, layout.TreeGroups, want)
+		}
+		for g, name := range []string{"a_0", "m_0", "z_0"} {
+			if got := layout.ColSlot[name].GroupIdx; got != g {
+				t.Errorf("sizes %v: ColSlot[%q].GroupIdx = %d, want %d", sizes, name, got, g)
+			}
+		}
+	}
 }

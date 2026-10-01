@@ -38,10 +38,11 @@ type Slot struct {
 	Field    field.Kind
 }
 
-// TreeGroup records the native polynomial size of one declaration-order group
+// TreeGroup records the module and native polynomial size of one group
 // inside a canonical commitment tree.
 type TreeGroup struct {
-	N int
+	Module string
+	N      int
 }
 
 // Layout describes the canonical order of WMerkleTrees produced by the
@@ -51,11 +52,12 @@ type TreeGroup struct {
 //
 // Tree order (flat):
 //
-//	[setup (0 or 1 tree)] [trace-round-0] … [trace-round-{r-1}] [AIR, decreasing N]
+//	[setup (0 or 1 tree)] [trace-round-0] … [trace-round-{r-1}] [AIR (0 or 1 tree)]
 //
-// Each non-empty trace round occupies one tree whose groups are ordered by
-// decreasing native size. The setup section occupies at most one tree that
-// also uses multiple groups in decreasing-N order. AIR uses one tree per size.
+// Every tree holds one group per module, in ModuleOrder (sorted module
+// names), skipping modules with nothing to commit in it. The structure does
+// not depend on which modules share a size: groups of equal size are
+// distinct injections of the mixed-height tree (see fri.Commit).
 type Layout struct {
 	NumTrees int // total number of trees in the canonical order
 
@@ -68,8 +70,7 @@ type Layout struct {
 	AIRBegin   int
 	AIREnd     int // = NumTrees
 
-	// Per-tree group metadata. Trace and setup trees can contain several
-	// groups in decreasing N; AIR trees are single-group.
+	// Per-tree group metadata, one group per module in ModuleOrder.
 	TreeGroups [][]TreeGroup
 
 	// Column-name → Slot for trace columns and setup public columns.
@@ -79,6 +80,48 @@ type Layout struct {
 	AIRChunkSlot map[string]Slot
 }
 
+// ModuleOrder returns the canonical module order of the commitment layout:
+// the sorted module names.
+func ModuleOrder(program board.Program) []string {
+	names := make([]string, 0, len(program.Modules))
+	for name := range program.Modules {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// SetupGroups returns the setup columns grouped by module, in ModuleOrder,
+// sorted by name within a module: the groups of the setup tree. Modules
+// without setup columns are skipped.
+func SetupGroups(program board.Program) [][]board.ColumnRef {
+	byModule := map[string][]board.ColumnRef{}
+	for _, c := range program.SetupColumns {
+		if _, ok := program.Modules[c.Module]; ok {
+			byModule[c.Module] = append(byModule[c.Module], c)
+		}
+	}
+	var res [][]board.ColumnRef
+	for _, m := range ModuleOrder(program) {
+		cols := byModule[m]
+		if len(cols) == 0 {
+			continue
+		}
+		sort.Slice(cols, func(i, j int) bool { return cols[i].Name < cols[j].Name })
+		res = append(res, cols)
+	}
+	return res
+}
+
+// AIRChunkCount returns the number of AIR-quotient chunks of a module, 0 if
+// its vanishing relation is trivial.
+func AIRChunkCount(m board.CompiledModule) int {
+	if m.VanishingRelation == nil || m.VanishingRelation.Degree() <= 0 {
+		return 0
+	}
+	return poly.NextPowerOfTwo(m.VanishingRelation.Degree()*m.N) / m.N
+}
+
 // BuildLayout builds the canonical commitment layout for a Prove/Verify run.
 //
 // The function is deterministic in `program`; it does not look at the trace.
@@ -86,134 +129,73 @@ func BuildLayout(program board.Program, _ int) Layout {
 	var layout Layout
 	layout.ColSlot = make(map[string]Slot)
 	layout.AIRChunkSlot = make(map[string]Slot)
+	order := ModuleOrder(program)
 
 	treeIdx := 0
-
-	// ---- Setup section ----
-	// All setup columns across all sizes share a single tree, with one group
-	// per distinct native size in decreasing order — mirroring the trace-round
-	// multi-group layout.
-	layout.SetupBegin = treeIdx
-	{
-		colsByN := map[int][]board.ColumnRef{}
-		for _, c := range program.SetupColumns {
-			m, ok := program.Modules[c.Module]
-			if !ok {
+	// addTree appends a tree whose groups are the non-empty column lists of
+	// byModule, in module order, and assigns their slots via assign.
+	addTree := func(byModule map[string][]board.ColumnRef, assign func(name string, s Slot)) {
+		var groups []TreeGroup
+		for _, m := range order {
+			cols := byModule[m]
+			if len(cols) == 0 {
 				continue
 			}
-			colsByN[m.N] = append(colsByN[m.N], c)
-		}
-		sizes := sortedSizesDesc(colsByN)
-		if len(sizes) > 0 {
-			setupTreeIdx := treeIdx
-			groups := make([]TreeGroup, len(sizes))
-			for groupIdx, N := range sizes {
-				groups[groupIdx] = TreeGroup{N: N}
+			groupIdx := len(groups)
+			groups = append(groups, TreeGroup{Module: m, N: program.Modules[m].N})
+			railIdx := map[field.Kind]int{}
+			for _, c := range cols {
+				polyIdx := nextRailPolyIdx(railIdx, c.Field)
+				assign(c.Name, Slot{TreeIdx: treeIdx, GroupIdx: groupIdx, PolyIdx: polyIdx, Field: c.Field})
 			}
-			layout.TreeGroups = append(layout.TreeGroups, groups)
-			for groupIdx, N := range sizes {
-				cols := colsByN[N]
-				sort.Slice(cols, func(i, j int) bool { return cols[i].Name < cols[j].Name })
-				railIdx := map[field.Kind]int{}
-				for _, col := range cols {
-					polyIdx := nextRailPolyIdx(railIdx, col.Field)
-					layout.ColSlot[col.Name] = Slot{TreeIdx: setupTreeIdx, GroupIdx: groupIdx, PolyIdx: polyIdx, Field: col.Field}
-				}
-			}
-			treeIdx++
 		}
+		if len(groups) == 0 {
+			return
+		}
+		layout.TreeGroups = append(layout.TreeGroups, groups)
+		treeIdx++
 	}
+	colSlot := func(name string, s Slot) { layout.ColSlot[name] = s }
+
+	// ---- Setup section: one tree, one group per module ----
+	layout.SetupBegin = treeIdx
+	setupByModule := map[string][]board.ColumnRef{}
+	for _, cols := range SetupGroups(program) {
+		setupByModule[cols[0].Module] = cols
+	}
+	addTree(setupByModule, colSlot)
 	layout.SetupEnd = treeIdx
 
-	// ---- Trace section, per FS round ----
+	// ---- Trace section: one tree per FS round, one group per module ----
+	// Within a module, columns keep the order of Rounds[r].Staged.
 	numRounds := len(program.Rounds)
 	layout.TraceBegin = make([]int, numRounds)
 	layout.TraceEnd = make([]int, numRounds)
 	for r, round := range program.Rounds {
-		deps := round.Staged
 		layout.TraceBegin[r] = treeIdx
-
-		// Group dependencies by size, decreasing N. Every non-empty round is
-		// committed as a single mixed-size tree, with one group per size.
-		// Stable order within a size group matches the dependency order.
-		depsByN := map[int][]board.ColumnRef{}
-		for _, dep := range deps {
-			m, ok := program.Modules[dep.Module]
-			if !ok {
-				continue
+		byModule := map[string][]board.ColumnRef{}
+		for _, dep := range round.Staged {
+			if _, ok := program.Modules[dep.Module]; ok {
+				byModule[dep.Module] = append(byModule[dep.Module], dep)
 			}
-			depsByN[m.N] = append(depsByN[m.N], dep)
 		}
-		sizes := sortedSizesDesc(depsByN)
-		if len(sizes) > 0 {
-			roundTreeIdx := treeIdx
-			groups := make([]TreeGroup, len(sizes))
-			for groupIdx, N := range sizes {
-				groups[groupIdx] = TreeGroup{N: N}
-			}
-			layout.TreeGroups = append(layout.TreeGroups, groups)
-			for groupIdx, N := range sizes {
-				group := depsByN[N]
-				// Preserve iteration order of Rounds[r].Staged within
-				// a size by NOT re-sorting here.
-				railIdx := map[field.Kind]int{}
-				for _, dep := range group {
-					polyIdx := nextRailPolyIdx(railIdx, dep.Field)
-					layout.ColSlot[dep.Name] = Slot{TreeIdx: roundTreeIdx, GroupIdx: groupIdx, PolyIdx: polyIdx, Field: dep.Field}
-				}
-			}
-			treeIdx++
-		}
-
+		addTree(byModule, colSlot)
 		layout.TraceEnd[r] = treeIdx
 	}
 
-	// ---- AIR section ----
+	// ---- AIR section: one tree, one group per module, chunks in order ----
+	// Must match the chunks computed by ComputeAIRQuotients in the prover.
 	layout.AIRBegin = treeIdx
-	{
-		// Modules contributing AIR-quotient chunks: those with non-trivial
-		// vanishing relation. Iterate in deterministic name order.
-		moduleNames := make([]string, 0, len(program.Modules))
-		for name := range program.Modules {
-			moduleNames = append(moduleNames, name)
-		}
-		sort.Strings(moduleNames)
-
-		// chunksByN[N] is the ordered list of (moduleName, chunkIdx) pairs
-		// of size N, in (sortedModule × chunkIdx) order — must match
-		// ComputeAIRQuotients in the prover.
-		type airEntry struct {
-			module string
-			idx    int
-			field  field.Kind
-		}
-		chunksByN := map[int][]airEntry{}
-		for _, moduleName := range moduleNames {
-			m := program.Modules[moduleName]
-			if m.VanishingRelation == nil || m.VanishingRelation.Degree() <= 0 {
-				continue
-			}
-			N := m.N
-			eDeg := m.VanishingRelation.Degree()
-			bigSize := poly.NextPowerOfTwo(eDeg * N)
-			numChunks := bigSize / N
-			f := m.VanishingRelation.Root.Field
-			for i := 0; i < numChunks; i++ {
-				chunksByN[N] = append(chunksByN[N], airEntry{module: moduleName, idx: i, field: f})
-			}
-		}
-		sizes := sortedSizesDesc(chunksByN)
-		for _, N := range sizes {
-			railIdx := map[field.Kind]int{}
-			for _, e := range chunksByN[N] {
-				chunkName := constants.QuotientChunkName(e.module, e.idx)
-				polyIdx := nextRailPolyIdx(railIdx, e.field)
-				layout.AIRChunkSlot[chunkName] = Slot{TreeIdx: treeIdx, GroupIdx: 0, PolyIdx: polyIdx, Field: e.field}
-			}
-			layout.TreeGroups = append(layout.TreeGroups, []TreeGroup{{N: N}})
-			treeIdx++
+	airByModule := map[string][]board.ColumnRef{}
+	for _, name := range order {
+		m := program.Modules[name]
+		for i := range AIRChunkCount(m) {
+			airByModule[name] = append(airByModule[name], board.ColumnRef{
+				Name: constants.QuotientChunkName(name, i), Module: name, Field: m.VanishingRelation.Root.Field,
+			})
 		}
 	}
+	addTree(airByModule, func(name string, s Slot) { layout.AIRChunkSlot[name] = s })
 	layout.AIREnd = treeIdx
 
 	layout.NumTrees = treeIdx

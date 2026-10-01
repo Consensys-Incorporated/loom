@@ -15,7 +15,6 @@ package setup
 
 import (
 	"fmt"
-	"sort"
 
 	"github.com/consensys/loom/board"
 	"github.com/consensys/loom/field"
@@ -23,6 +22,7 @@ import (
 	"github.com/consensys/loom/internal/fri"
 	"github.com/consensys/loom/internal/hash"
 	"github.com/consensys/loom/internal/poly"
+	"github.com/consensys/loom/internal/protocol"
 	"github.com/consensys/loom/trace"
 )
 
@@ -87,27 +87,10 @@ func Setup(t trace.Trace, program board.Program, opts ...Option) (ProvingKey, Ve
 		return pk, pk.VerificationKey(), nil
 	}
 
-	// Group setup columns by size in decreasing order, matching BuildLayout.
-	// All sizes are committed into a single multi-group tree so the setup
-	// section occupies exactly one slot in the canonical layout.
-	colsByN := map[int][]board.ColumnRef{}
-	for _, c := range program.SetupColumns {
-		m, ok := program.Modules[c.Module]
-		if !ok {
-			continue
-		}
-		colsByN[m.N] = append(colsByN[m.N], c)
-	}
-	sizes := make([]int, 0, len(colsByN))
-	for n := range colsByN {
-		sizes = append(sizes, n)
-	}
-	sort.Sort(sort.Reverse(sort.IntSlice(sizes)))
-
-	groups := make([]fri.Group, len(sizes))
-	for i, N := range sizes {
-		refs := colsByN[N]
-		sort.Slice(refs, func(i, j int) bool { return refs[i].Name < refs[j].Name })
+	// One group per module, in the order of protocol.BuildLayout's setup tree.
+	setupGroups := protocol.SetupGroups(program)
+	groups := make([]fri.Group, len(setupGroups))
+	for i, refs := range setupGroups {
 		var basePolys []poly.Polynomial
 		var extPolys []poly.ExtPolynomial
 		for _, ref := range refs {
@@ -129,7 +112,6 @@ func Setup(t trace.Trace, program board.Program, opts ...Option) (ProvingKey, Ve
 			}
 		}
 		groups[i] = fri.Group{Base: basePolys, Ext: extPolys}
-		_ = N
 	}
 	var domainCache poly.DomainCache
 	pcs := fri.NewPCS(uint64(constants.RATE), hashBackend.LeafHasher, hashBackend.NodeHasher)

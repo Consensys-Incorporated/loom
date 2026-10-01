@@ -264,7 +264,7 @@ func (vr *verifierRunTime) deriveChallenges() error {
 		c := hash.OutputToExt(challenge)
 		vr.setValueAtZetaExt(challengeName, c)
 	}
-	// Bind every per-size AIR-quotient root before computing zeta.
+	// Bind the AIR-quotient root before computing zeta.
 	for i := vr.layout.AIRBegin; i < vr.layout.AIREnd; i++ {
 		root := vr.roots[i]
 		err := vr.fs.Bind(constants.FINAL_EVALUATION_POINT, root[:])

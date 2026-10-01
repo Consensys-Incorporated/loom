@@ -291,11 +291,6 @@ func liftPolynomialToExt(p poly.Polynomial) poly.ExtPolynomial {
 	return res
 }
 
-type mixedCommitGroup struct {
-	base []poly.Polynomial
-	ext  []poly.ExtPolynomial
-}
-
 func buildBatchFromNames(batchNames protocol.BatchNames, base map[string]poly.Polynomial, ext map[string]poly.ExtPolynomial, errPrefix string, liftExtFromBase bool) (fri.Batch, error) {
 	batch := make(fri.Batch, len(batchNames))
 	for groupIdx, names := range batchNames {
@@ -532,61 +527,30 @@ func (pr *proverRuntime) ComputeAIRQuotients() error {
 		return firstErr
 	}
 
-	chunksByN := map[int]*mixedCommitGroup{}
-	for _, moduleName := range moduleNames {
-		module := pr.program.Modules[moduleName]
-		N := module.N
-		for i := 0; ; i++ {
-			chunkName := constants.QuotientChunkName(moduleName, i)
-			group := chunksByN[N]
-			if group == nil {
-				group = &mixedCommitGroup{}
-				chunksByN[N] = group
-			}
-			if chunk, ok := pr.airTrace.Base[chunkName]; ok {
-				group.base = append(group.base, chunk)
-				continue
-			}
-			if chunk, ok := pr.airTrace.Ext[chunkName]; ok {
-				group.ext = append(group.ext, chunk)
-				continue
-			}
-			if group.base == nil && group.ext == nil {
-				delete(chunksByN, N)
-			}
-			break
-		}
-	}
-	sizes := make([]int, 0, len(chunksByN))
-	for n, group := range chunksByN {
-		if len(group.base) == 0 && len(group.ext) == 0 {
-			continue
-		}
-		sizes = append(sizes, n)
-	}
-	sort.Sort(sort.Reverse(sort.IntSlice(sizes)))
-
-	if len(sizes) != pr.layout.AIREnd-pr.layout.AIRBegin {
-		return fmt.Errorf("ComputeAIRQuotients: %d AIR size groups, layout expects %d", len(sizes), pr.layout.AIREnd-pr.layout.AIRBegin)
-	}
-	for i, N := range sizes {
-		group := chunksByN[N]
-		pcs := fri.NewPCS(uint64(constants.RATE), pr.hashBackend.LeafHasher, pr.hashBackend.NodeHasher)
-		committed, err := pcs.Commit(
-			[]fri.Group{{Base: group.base, Ext: group.ext}},
-			fri.WithDomainCache(&pr.domainCache),
+	// Commit the AIR section: one tree (one group per module), as laid out
+	// by protocol.BuildLayout.
+	for treeIdx := pr.layout.AIRBegin; treeIdx < pr.layout.AIREnd; treeIdx++ {
+		batch, err := buildBatchFromNames(
+			pr.schedule.ColNamesByTree[treeIdx],
+			pr.airTrace.Base,
+			pr.airTrace.Ext,
+			fmt.Sprintf("ComputeAIRQuotients: tree %d", treeIdx),
+			false,
 		)
 		if err != nil {
 			return err
 		}
-		treeIdx := pr.layout.AIRBegin + i
+		pcs := fri.NewPCS(uint64(constants.RATE), pr.hashBackend.LeafHasher, pr.hashBackend.NodeHasher)
+		committed, err := pcs.Commit(batch, fri.WithDomainCache(&pr.domainCache))
+		if err != nil {
+			return err
+		}
 		pr.committed[treeIdx] = committed
 		root := committed.Tree.Root()
 		pr.Proof.Commitments[pr.commitIdxOf(treeIdx)] = root
 		if err := pr.fs.Bind(constants.FINAL_EVALUATION_POINT, root[:]); err != nil {
 			return err
 		}
-		_ = N
 	}
 
 	zeta, err := pr.fs.ComputeChallenge(constants.FINAL_EVALUATION_POINT)
