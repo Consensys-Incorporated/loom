@@ -388,6 +388,7 @@ func (pr *proverRuntime) ExecuteSteps() error {
 		}
 		switch round.FSHook {
 		case board.NoFSHook:
+		// TODO make fsHooks functions which define their behavious (find which signature makes the most sense)
 		case board.BindExposedValues:
 			for _, name := range round.ExposedValueNames() {
 				v, ok := pr.Proof.ExposedValues[name]
