@@ -55,16 +55,11 @@ func groupNativeSizesFromBatches(batches []Batch) ([][]int, error) {
 	sizes := make([][]int, len(batches))
 	for b, batch := range batches {
 		sizes[b] = make([]int, len(batch))
-		seen := make(map[int]struct{}, len(batch))
 		for g, group := range batch {
 			N, err := groupNativeSize(group)
 			if err != nil {
 				return nil, fmt.Errorf("fri: batches[%d][%d]: %w", b, g, err)
 			}
-			if _, dup := seen[N]; dup {
-				return nil, fmt.Errorf("fri: batch %d has duplicate Group size %d at index %d", b, N, g)
-			}
-			seen[N] = struct{}{}
 			sizes[b][g] = N
 		}
 	}
@@ -111,7 +106,6 @@ func groupNativeSizesFromShapes(shapes []BatchShapes, rate uint64) ([][]int, err
 	sizes := make([][]int, len(shapes))
 	for b, batchShapes := range shapes {
 		sizes[b] = make([]int, len(batchShapes))
-		seen := make(map[int]struct{}, len(batchShapes))
 		for g, gs := range batchShapes {
 			if gs.Rows <= 0 {
 				return nil, fmt.Errorf("fri: shapes[%d][%d].Rows=%d must be positive", b, g, gs.Rows)
@@ -124,10 +118,6 @@ func groupNativeSizesFromShapes(shapes []BatchShapes, rate uint64) ([][]int, err
 			if N <= 0 || N&(N-1) != 0 {
 				return nil, fmt.Errorf("fri: shapes[%d][%d] yields N=%d (not a positive power of two)", b, g, N)
 			}
-			if _, dup := seen[N]; dup {
-				return nil, fmt.Errorf("fri: batch %d has duplicate Group size %d at index %d", b, N, g)
-			}
-			seen[N] = struct{}{}
 			sizes[b][g] = N
 		}
 	}

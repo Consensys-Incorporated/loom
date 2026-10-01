@@ -632,3 +632,67 @@ func buildVerifierTranscript(t *testing.T, committed []Committed) *fiatshamir.Tr
 	}
 	return fs
 }
+
+// TestPCSVerifyRoundtripEqualSizes opens a batch with two groups at each of
+// two sizes: one large group is a leaf-level injection, and the two small
+// groups are injected at the same level.
+func TestPCSVerifyRoundtripEqualSizes(t *testing.T) {
+	const rate uint64 = 2
+	const numQueries = 4
+	big := func(o uint64) poly.Polynomial {
+		return poly.Polynomial{baseElement(o), baseElement(o + 3), baseElement(o + 5), baseElement(o + 7),
+			baseElement(o + 11), baseElement(o + 13), baseElement(o + 17), baseElement(o + 19)}
+	}
+	small := func(o uint64) poly.Polynomial {
+		return poly.Polynomial{baseElement(o), baseElement(o + 2), baseElement(o + 9), baseElement(o + 4)}
+	}
+	batches := []Batch{{
+		{Base: []poly.Polynomial{big(1)}},
+		{Base: []poly.Polynomial{small(20)}},
+		{Base: []poly.Polynomial{big(40), big(50)}, Ext: []poly.ExtPolynomial{{
+			extElement(101, 102, 103, 104), extElement(201, 202, 203, 204),
+			extElement(301, 302, 303, 304), extElement(401, 402, 403, 404),
+			extElement(501, 502, 503, 504), extElement(601, 602, 603, 604),
+			extElement(701, 702, 703, 704), extElement(801, 802, 803, 804),
+		}}},
+		{Base: []poly.Polynomial{small(60)}},
+	}}
+	shifts := []BatchShifts{{
+		{Base: [][]int{{0, 1}}},
+		{Base: [][]int{{0}}},
+		{Base: [][]int{{0}, {0, 1}}, Ext: [][]int{{0}}},
+		{Base: [][]int{{0, 3}}},
+	}}
+	committed, openProof, params, zeta := runOpenFixture(t, batches, shifts, rate, numQueries)
+	roots, shapes := rootsAndShapes(committed)
+	pcs := NewPCSWithParams(params)
+	if err := pcs.Verify(roots, shapes, shifts, zeta, openProof, buildVerifierTranscript(t, committed)); err != nil {
+		t.Fatalf("PCS.Verify rejected a valid equal-size OpeningProof: %v", err)
+	}
+	if got := len(openProof.PointSamplings[0][0].Injections); got != 3 {
+		t.Fatalf("Injections = %d, want 3", got)
+	}
+
+	tampers := map[string]func(*OpeningProof){
+		"leaf-level injection": func(p *OpeningProof) {
+			p.PointSamplings[1][0].Injections[0].Rows.Lo.RawRowBase[1].SetUint64(0xdeadbeef)
+		},
+		"first equal-size injection": func(p *OpeningProof) {
+			p.PointSamplings[2][0].Injections[1].Rows.Hi.RawRowBase[0].SetUint64(0xdeadbeef)
+		},
+		"second equal-size injection": func(p *OpeningProof) {
+			p.PointSamplings[3][0].Injections[2].Rows.Lo.RawRowBase[0].SetUint64(0xdeadbeef)
+		},
+	}
+	for name, tamper := range tampers {
+		t.Run(name, func(t *testing.T) {
+			committed, tampered, params, zeta := runOpenFixture(t, batches, shifts, rate, numQueries)
+			roots, shapes := rootsAndShapes(committed)
+			tamper(&tampered)
+			pcs := NewPCSWithParams(params)
+			if err := pcs.Verify(roots, shapes, shifts, zeta, tampered, buildVerifierTranscript(t, committed)); err == nil {
+				t.Fatal("tampered proof accepted")
+			}
+		})
+	}
+}

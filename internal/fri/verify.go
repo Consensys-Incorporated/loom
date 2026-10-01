@@ -216,7 +216,8 @@ func validateOpeningProofShape(
 }
 
 // injectionOrderForBatch returns, for one batch's GroupShape slice, the
-// indices into shapes in *decreasing row-count* order -- the same
+// indices into shapes in *decreasing row-count* order, equal row counts in
+// declaration order -- the same
 // order PCS.Commit places the per-Group LeafSources in Committed.Sources.
 // WMerkleProof stores order[0] in TopRows and order[1:] in Injections.
 func injectionOrderForBatch(batchShapes BatchShapes) []int {
@@ -308,7 +309,6 @@ func verifyOneWMerkleProof(
 	}
 
 	injectionWidths := make([]int, len(injOrder)-1)
-	injectionByWidth := make(map[int]int, len(injOrder)-1)
 	prevWidth := topPairLeaves
 	for k := 1; k < len(injOrder); k++ {
 		rows := batchShapes[injOrder[k]].Rows
@@ -322,12 +322,10 @@ func verifyOneWMerkleProof(
 		if err != nil {
 			return fmt.Errorf("injection %d rows: %w", k-1, err)
 		}
-		if width >= prevWidth {
-			return fmt.Errorf("injection pair leaves must be strictly decreasing (got %d after %d)", width, prevWidth)
+		if width > prevWidth {
+			return fmt.Errorf("injection pair leaves must not increase (got %d after %d)", width, prevWidth)
 		}
-		injIdx := k - 1
-		injectionWidths[injIdx] = width
-		injectionByWidth[width] = injIdx
+		injectionWidths[k-1] = width
 		prevWidth = width
 	}
 
@@ -358,20 +356,7 @@ func verifyOneWMerkleProof(
 
 	h := hashRawRowPair(leafHasher, wp.TopRows)
 	pathIdx := wp.Path.LeafIdx
-	for k, sibling := range wp.Path.Siblings {
-		if pathIdx&1 == 0 {
-			h = nodeHasher.HashNode(h, sibling)
-		} else {
-			h = nodeHasher.HashNode(sibling, h)
-		}
-		pathIdx >>= 1
-
-		width := 1 << (depth - k - 1)
-		injIdx, ok := injectionByWidth[width]
-		if !ok {
-			continue
-		}
-
+	foldInjection := func(injIdx int) error {
 		rows, err := rawRowsForInjection(wp, injIdx)
 		if err != nil {
 			return err
@@ -399,9 +384,37 @@ func verifyOneWMerkleProof(
 			return fmt.Errorf("group %d injection pair hash mismatch", groupIdx)
 		}
 		h = nodeHasher.HashNode(h, pairDigest)
+		return nil
 	}
 
-	if h != root {
+	// foldLevel folds, in schedule order, the injections of the level of
+	// width `width` that the path is at; next is the first one not yet
+	// folded (the schedule is sorted by non-increasing width).
+	next := 0
+	foldLevel := func(width int) error {
+		for ; next < len(injectionWidths) && injectionWidths[next] == width; next++ {
+			if err := foldInjection(next); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := foldLevel(topPairLeaves); err != nil {
+		return err
+	}
+	for k, sibling := range wp.Path.Siblings {
+		if pathIdx&1 == 0 {
+			h = nodeHasher.HashNode(h, sibling)
+		} else {
+			h = nodeHasher.HashNode(sibling, h)
+		}
+		pathIdx >>= 1
+		if err := foldLevel(1 << (depth - k - 1)); err != nil {
+			return err
+		}
+	}
+
+	if next != len(injectionWidths) || h != root {
 		return fmt.Errorf("Merkle path does not authenticate under the given root")
 	}
 
@@ -473,7 +486,7 @@ func checkFRIBridgeByPolynomial(
 	type sizePrecomp struct {
 		ratGen      koalabear.Element
 		omegaTable  map[int]koalabear.Element // normalizedShift → traceGen^shift
-		totalShifts int                        // sum of len(shifts) for all polys of this N
+		totalShifts int                       // sum of len(shifts) for all polys of this N
 	}
 	sizePrecomps := make(map[int]sizePrecomp, len(sizesDesc))
 	for _, N := range sizesDesc {

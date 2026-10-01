@@ -55,10 +55,10 @@ type RSCommit struct {
 }
 
 // Group bundles base- and extension-rail polynomials that share the same
-// native size. A single Commit call accepts a slice of Groups, each with a
-// distinct size: the largest group occupies the actual Merkle leaves and
-// each smaller group becomes a per-level injection in the underlying
-// merkle.Tree (see internal/merkle/tree.go).
+// native size. A single Commit call accepts a slice of Groups: the first
+// largest group occupies the actual Merkle leaves and every other group
+// becomes a per-level injection in the underlying merkle.Tree (see
+// internal/merkle/tree.go), groups of equal size in declaration order.
 type Group struct {
 	Base []poly.Polynomial
 	Ext  []poly.ExtPolynomial
@@ -82,7 +82,8 @@ type BatchShapes = []GroupShape
 type WMerkleTree struct {
 	Tree *merkle.Tree
 
-	// groups in decreasing row-count order. Length 1 for the typical
+	// groups in decreasing row-count order, equal row counts in declaration
+	// order. Length 1 for the typical
 	// single-size Commit call; length > 1 when multiple sizes were committed
 	// into one tree via merkle injections.
 	groups BatchShapes
@@ -173,7 +174,8 @@ func (wt WMerkleTree) Groups() BatchShapes {
 }
 
 // InjectionWidths returns the pair-leaf LevelWidth of each merkle injection in
-// the same order as the tree's injection schedule (decreasing widths). It is
+// the same order as the tree's injection schedule (non-increasing widths; a
+// group as large as the top one is injected at the leaf level). It is
 // nil for single-group trees. Suitable for passing to merkle.VerifyWithInjections.
 func (wt WMerkleTree) InjectionWidths() []int {
 	if len(wt.groups) <= 1 {
@@ -233,10 +235,11 @@ type Batch = []Group
 
 // Commit commits to one or more Groups of polynomials into a single Merkle
 // tree. Each Group in batch must hold polynomials sharing a single power-of-two
-// length; group sizes must be pairwise distinct. The largest group's encoded
-// row-pair hashes form the actual tree leaves; each smaller group is folded in
-// as a merkle.LevelInjection at the level whose width matches its number of
-// encoded row pairs.
+// length. Groups are ordered by decreasing size, equal sizes in declaration
+// order. The first group's encoded row-pair hashes form the actual tree
+// leaves; each other group is folded in as a merkle.LevelInjection at the
+// level whose width matches its number of encoded row pairs (the leaf level
+// for groups as large as the first).
 //
 // Within a group, pair leaf i absorbs rows 2*i and 2*i+1: first all base
 // polynomial values from the two rows, then all extension polynomial values
@@ -266,7 +269,7 @@ func (rs *RSCommit) Commit(batch Batch, opts ...CommitOption) (WMerkleTree, []Le
 		return WMerkleTree{}, nil, fmt.Errorf("commitment: Commit requires at least one Group")
 	}
 
-	// 1- validate every group and sort by descending native size.
+	// 1- validate every group and sort by descending native size, stably.
 	sizes := make([]int, len(batch))
 	for k, g := range batch {
 		N, err := groupNativeSize(g)
@@ -280,11 +283,6 @@ func (rs *RSCommit) Commit(batch Batch, opts ...CommitOption) (WMerkleTree, []Le
 		order[i] = i
 	}
 	sort.SliceStable(order, func(a, b int) bool { return sizes[order[a]] > sizes[order[b]] })
-	for i := 1; i < len(order); i++ {
-		if sizes[order[i]] == sizes[order[i-1]] {
-			return WMerkleTree{}, nil, fmt.Errorf("commitment: duplicate Group size %d (groups must have distinct native sizes)", sizes[order[i]])
-		}
-	}
 
 	// 2- encode each group's polynomials on its RS-encoded domain and hash
 	//    one adjacent row pair into one digest per group. The largest

@@ -14,6 +14,7 @@
 package fri
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/consensys/gnark-crypto/field/koalabear"
@@ -758,19 +759,61 @@ func TestWMerkleProofCompactDigestAccounting(t *testing.T) {
 	}
 }
 
-// TestRSCommitDuplicateGroupSize ensures that Commit rejects two groups of
-// the same native size, since the merkle layer requires distinct LevelWidths
-// for injections.
-func TestRSCommitDuplicateGroupSize(t *testing.T) {
-	polys := []poly.Polynomial{
-		{baseElement(1), baseElement(2), baseElement(3), baseElement(4)},
+// TestRSCommitEqualGroupSizes checks that groups of equal size are committed
+// in declaration order: the first largest group forms the leaves, the other
+// groups of that size are leaf-level injections, and equal smaller sizes are
+// injected at the same level, in order.
+func TestRSCommitEqualGroupSizes(t *testing.T) {
+	big := func(o uint64) poly.Polynomial {
+		return poly.Polynomial{baseElement(o), baseElement(o + 1), baseElement(o + 2), baseElement(o + 3),
+			baseElement(o + 4), baseElement(o + 5), baseElement(o + 6), baseElement(o + 7)}
 	}
+	small := func(o uint64) poly.Polynomial {
+		return poly.Polynomial{baseElement(o), baseElement(o + 1), baseElement(o + 2), baseElement(o + 3)}
+	}
+	// declaration order A(8), B(4), C(8), D(4) → tree order A, C, B, D
+	groups := []Group{{Base: []poly.Polynomial{big(1)}}, {Base: []poly.Polynomial{small(20)}},
+		{Base: []poly.Polynomial{big(40)}}, {Base: []poly.Polynomial{small(60), small(70)}}}
 	pcs := NewPCS(2, DefaultLeafHasher, DefaultNodeHasher)
-	if _, err := pcs.Commit([]Group{
-		{Base: polys},
-		{Base: polys},
-	}); err == nil {
-		t.Fatal("Commit should reject two groups with the same native size")
+	committed, err := pcs.Commit(groups)
+	if err != nil {
+		t.Fatalf("Commit rejected equal group sizes: %v", err)
+	}
+	if got, want := committed.Tree.InjectionWidths(), []int{8, 4, 4}; fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("InjectionWidths = %v, want %v", got, want)
+	}
+	if got := committed.Tree.Groups()[3].BaseWidth; got != 2 {
+		t.Fatalf("last group BaseWidth = %d, want 2 (group D)", got)
+	}
+
+	// Reference: the same schedule built directly in merkle.
+	leaves := make([][]hash.Digest, len(committed.Sources))
+	for k, src := range committed.Sources {
+		leaves[k] = make([]hash.Digest, leafSourceRows(src)/2)
+		HashLeafPairsParallel(DefaultLeafHasher, leaves[k], src)
+	}
+	var injections []merkle.LevelInjection
+	for _, l := range leaves[1:] {
+		injections = append(injections, merkle.LevelInjection{LevelWidth: len(l), LeafHashes: l})
+	}
+	ref, err := merkle.NewWithInjections(len(leaves[0]), DefaultNodeHasher, injections)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ref.Build(leaves[0]); err != nil {
+		t.Fatal(err)
+	}
+	if committed.Tree.Root() != ref.Root() {
+		t.Fatal("root does not match the reference injection schedule")
+	}
+
+	// Swapping the two equal-size small groups changes the commitment.
+	swapped, err := pcs.Commit([]Group{groups[0], groups[3], groups[2], groups[1]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if swapped.Tree.Root() == committed.Tree.Root() {
+		t.Fatal("equal-size groups commute")
 	}
 }
 
