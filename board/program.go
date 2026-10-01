@@ -27,7 +27,6 @@ type Program struct {
 	Late []LateColumn
 }
 
-// TODO group modules per size, fold the vanishing relations per modules of the same size -> less calls to ComputeQuotient
 func (pg *Program) SetSize(module string, size int) {
 	_, ok := pg.Modules[module]
 	if !ok {
