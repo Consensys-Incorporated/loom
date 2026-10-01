@@ -56,13 +56,17 @@ type BatchNodeHasher interface {
 // the build proceeds normally with 2-to-1 compression on the post-fold
 // digests.
 //
+// Several injections may share a LevelWidth: they are folded in schedule
+// order, node j becoming HashNode(HashNode(running, A.LeafHashes[j]),
+// B.LeafHashes[j]) for A before B. An injection with LevelWidth == nLeaves is
+// folded into the leaves themselves, before the first compression.
+//
 // Invariants (enforced by NewWithInjections):
-//   - LevelWidth is a positive power of two strictly less than nLeaves.
+//   - LevelWidth is a positive power of two at most nLeaves.
 //   - len(LeafHashes) == LevelWidth.
-//   - LevelWidth values across injections are pairwise distinct.
-//   - Injections are sorted by *decreasing* LevelWidth (= increasing depth
-//     from the leaves), which matches the bottom-up order buildInternalNodes
-//     visits levels in.
+//   - Injections are sorted by *non-increasing* LevelWidth (= non-decreasing
+//     depth from the leaves), which matches the bottom-up order
+//     buildInternalNodes visits levels in.
 type LevelInjection struct {
 	LevelWidth int
 	LeafHashes []hash.Digest
@@ -137,17 +141,17 @@ func validateInjections(nLeaves int, injections []LevelInjection) error {
 	if len(injections) == 0 {
 		return nil
 	}
-	prevWidth := nLeaves // strict upper bound; injections must be strictly smaller
+	prevWidth := nLeaves // upper bound; widths must not increase
 	for k, inj := range injections {
 		w := inj.LevelWidth
 		if w <= 0 || w&(w-1) != 0 {
 			return fmt.Errorf("merkle: injection[%d].LevelWidth must be a positive power of two, got %d", k, w)
 		}
-		if w >= nLeaves {
-			return fmt.Errorf("merkle: injection[%d].LevelWidth %d must be < nLeaves %d", k, w, nLeaves)
+		if w > nLeaves {
+			return fmt.Errorf("merkle: injection[%d].LevelWidth %d must be <= nLeaves %d", k, w, nLeaves)
 		}
-		if w >= prevWidth {
-			return fmt.Errorf("merkle: injections must be sorted by decreasing LevelWidth (got %d after %d at index %d)", w, prevWidth, k)
+		if w > prevWidth {
+			return fmt.Errorf("merkle: injections must be sorted by non-increasing LevelWidth (got %d after %d at index %d)", w, prevWidth, k)
 		}
 		if len(inj.LeafHashes) != w {
 			return fmt.Errorf("merkle: injection[%d] has %d leaf hashes, want LevelWidth=%d", k, len(inj.LeafHashes), w)
@@ -198,9 +202,11 @@ type batchScratch struct{ left, right, dst []hash.Digest }
 // non-batched hashers fall back to HashNode.
 //
 // When the tree has injections, each injection level runs an additional
-// fold pass after the standard 2-to-1 compression: nodes[start+j] is
-// replaced by HashNode(nodes[start+j], injection.LeafHashes[j]). Inputs to
-// the fold are contiguous, so it skips the gather scratch entirely.
+// fold pass per injection after the standard 2-to-1 compression:
+// nodes[start+j] is replaced by HashNode(nodes[start+j],
+// injection.LeafHashes[j]). Leaf-level injections are folded into the leaves
+// first. Inputs to the fold are contiguous, so it skips the gather scratch
+// entirely.
 func (t *Tree) buildInternalNodes() {
 	batchHasher, hasBatch := t.nodeHasher.(BatchNodeHasher)
 	batchSize := 0
@@ -211,14 +217,17 @@ func (t *Tree) buildInternalNodes() {
 		}
 	}
 
-	// O(1) injection lookup keyed by level width.
-	var injectionByWidth map[int]int
-	if len(t.injections) > 0 {
-		injectionByWidth = make(map[int]int, len(t.injections))
-		for i := range t.injections {
-			injectionByWidth[t.injections[i].LevelWidth] = i
+	// next is the first injection of the schedule not yet folded; the
+	// schedule is sorted by non-increasing width, so the injections of a
+	// level are consecutive.
+	next := 0
+	foldLevel := func(start int) {
+		for next < len(t.injections) && t.injections[next].LevelWidth == start {
+			t.foldInjection(start, &t.injections[next], hasBatch, batchHasher, batchSize)
+			next++
 		}
 	}
+	foldLevel(t.nLeaves)
 
 	// Per-worker scratch slices for the batched gather/scatter path used by
 	// the standard 2-to-1 compression. Allocated once and reused across all
@@ -281,42 +290,38 @@ func (t *Tree) buildInternalNodes() {
 			}
 		}
 
-		// Phase 2: if this level has an injection, fold in the per-position
-		// injection leaf. Inputs (the running hashes just written and the
-		// injection.LeafHashes slice) are both contiguous, so we can pass
-		// subslices directly — the Poseidon2 BatchNodeHasher copies its
-		// inputs locally, so dst aliasing left is safe.
-		if injectionByWidth == nil {
-			continue
-		}
-		injIdx, ok := injectionByWidth[start]
-		if !ok {
-			continue
-		}
-		inj := &t.injections[injIdx]
+		// Phase 2: fold in the injections of this level, in schedule order.
+		foldLevel(start)
+	}
+}
 
-		if !hasBatch || start < batchSize {
-			parallel.ExecuteWithThreshold(start, parallelLevelThreshold, func(lo, hi int) {
-				for j := lo; j < hi; j++ {
-					t.nodes[start+j] = t.nodeHasher.HashNode(t.nodes[start+j], inj.LeafHashes[j])
-				}
-			})
-			continue
-		}
-		nbBatches := start / batchSize
-		parallel.ExecuteWithThreshold(nbBatches, parallelLevelThreshold/batchSize+1, func(lo, hi int) {
-			for b := lo; b < hi; b++ {
-				base := b * batchSize
-				dst := t.nodes[start+base : start+base+batchSize]
-				batchHasher.HashNodes(dst, dst, inj.LeafHashes[base:base+batchSize])
-			}
-		})
-		tail := start - nbBatches*batchSize
-		if tail > 0 {
-			base := nbBatches * batchSize
-			for j := base; j < base+tail; j++ {
+// foldInjection replaces each node j of the level of width start (nodes
+// start..2·start−1) by HashNode(node, inj.LeafHashes[j]). Inputs (the running
+// hashes and the injection.LeafHashes slice) are both contiguous, so we can
+// pass subslices directly — the Poseidon2 BatchNodeHasher copies its inputs
+// locally, so dst aliasing left is safe.
+func (t *Tree) foldInjection(start int, inj *LevelInjection, hasBatch bool, batchHasher BatchNodeHasher, batchSize int) {
+	if !hasBatch || start < batchSize {
+		parallel.ExecuteWithThreshold(start, parallelLevelThreshold, func(lo, hi int) {
+			for j := lo; j < hi; j++ {
 				t.nodes[start+j] = t.nodeHasher.HashNode(t.nodes[start+j], inj.LeafHashes[j])
 			}
+		})
+		return
+	}
+	nbBatches := start / batchSize
+	parallel.ExecuteWithThreshold(nbBatches, parallelLevelThreshold/batchSize+1, func(lo, hi int) {
+		for b := lo; b < hi; b++ {
+			base := b * batchSize
+			dst := t.nodes[start+base : start+base+batchSize]
+			batchHasher.HashNodes(dst, dst, inj.LeafHashes[base:base+batchSize])
+		}
+	})
+	tail := start - nbBatches*batchSize
+	if tail > 0 {
+		base := nbBatches * batchSize
+		for j := base; j < base+tail; j++ {
+			t.nodes[start+j] = t.nodeHasher.HashNode(t.nodes[start+j], inj.LeafHashes[j])
 		}
 	}
 }
@@ -328,8 +333,8 @@ func (t *Tree) Root() hash.Digest {
 
 // OpenProof returns the Merkle opening proof for the leaf at 0-based index idx.
 //
-// When the tree has injections, Proof.InjectionLeaves contains, in
-// decreasing-LevelWidth order (same as the tree's injection schedule), the
+// When the tree has injections, Proof.InjectionLeaves contains, in the
+// tree's injection schedule order (non-increasing LevelWidth), the
 // injection-leaf digest at the position the opening path crosses at each
 // injection level. The path position at level d (depth d above the leaves)
 // is idx >> d.
@@ -375,7 +380,9 @@ func Verify(root hash.Digest, proof Proof, leaf hash.Digest, nh NodeHasher) bool
 // schedule.
 //
 // injectionWidths must list the LevelWidth of each injection in
-// decreasing order, identical to the schedule used at construction time.
+// non-increasing order, identical to the schedule used at construction time
+// (a width may repeat; a width equal to the number of leaves, 2^depth, is a
+// leaf-level injection).
 // proof.InjectionLeaves must have the same length as injectionWidths;
 // proof.InjectionLeaves[k] is the injection leaf at the position the path
 // crosses on the level whose width is injectionWidths[k].
@@ -387,33 +394,32 @@ func VerifyWithInjections(root hash.Digest, proof Proof, leaf hash.Digest, injec
 		return false
 	}
 
-	// Map level width -> index into proof.InjectionLeaves for O(1) lookup
-	// during the walk up. Also validates the schedule's structural shape.
-	var injectionByWidth map[int]int
-	if len(injectionWidths) > 0 {
-		injectionByWidth = make(map[int]int, len(injectionWidths))
-		prevWidth := -1
-		for k, w := range injectionWidths {
-			if w <= 0 || w&(w-1) != 0 {
-				return false
-			}
-			if prevWidth >= 0 && w >= prevWidth {
-				return false
-			}
-			if _, dup := injectionByWidth[w]; dup {
-				return false
-			}
-			injectionByWidth[w] = k
-			prevWidth = w
+	// We don't know nLeaves on the verifier side; the depth of the path is
+	// len(proof.Siblings), and nLeaves = 1 << depth. Validate the schedule's
+	// structural shape.
+	depth := len(proof.Siblings)
+	prevWidth := 1 << depth
+	for _, w := range injectionWidths {
+		if w <= 0 || w&(w-1) != 0 || w > prevWidth {
+			return false
 		}
+		prevWidth = w
 	}
 
 	h := leaf
 	idx := proof.LeafIdx
-	// We don't know nLeaves on the verifier side; the depth of the path is
-	// len(proof.Siblings). Level width *above* level k (i.e., after k+1
-	// transitions) is nLeaves >> (k+1) = 1 << (depth - k - 1).
-	depth := len(proof.Siblings)
+	// next is the first injection not yet folded; fold every injection of
+	// the level of width `width`, in schedule order.
+	next := 0
+	foldLevel := func(width int) {
+		for next < len(injectionWidths) && injectionWidths[next] == width {
+			h = nh.HashNode(h, proof.InjectionLeaves[next])
+			next++
+		}
+	}
+	foldLevel(1 << depth)
+	// Level width *above* level k (i.e., after k+1 transitions) is
+	// nLeaves >> (k+1) = 1 << (depth - k - 1).
 	for k, sibling := range proof.Siblings {
 		if idx&1 == 0 {
 			h = nh.HashNode(h, sibling) // current node is the left child
@@ -423,16 +429,10 @@ func VerifyWithInjections(root hash.Digest, proof Proof, leaf hash.Digest, injec
 		idx >>= 1
 
 		// After this transition we are at level (k+1) of width
-		// 1 << (depth-k-1). If that level has an injection, fold the
-		// matching injection leaf in.
-		if injectionByWidth != nil {
-			width := 1 << (depth - k - 1)
-			if injIdx, ok := injectionByWidth[width]; ok {
-				h = nh.HashNode(h, proof.InjectionLeaves[injIdx])
-			}
-		}
+		// 1 << (depth-k-1): fold its injection leaves in.
+		foldLevel(1 << (depth - k - 1))
 	}
-	return h == root
+	return next == len(injectionWidths) && h == root
 }
 
 func log2(n int) int {
