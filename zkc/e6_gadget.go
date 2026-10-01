@@ -66,6 +66,10 @@ func e6MulExprs(x, y []expr.Expr) []expr.Expr {
 	}
 }
 
+// E6MulExprs returns z = x·y as expressions over the six base coordinates of
+// x and y, in the layout of e6MulExprs.
+func E6MulExprs(x, y []expr.Expr) []expr.Expr { return e6MulExprs(x, y) }
+
 // Define adds z = x·y on every row.
 func (E6MulGadget) Define(b *board.Builder, module string, inputs, outputs []string) error {
 	if len(inputs) != 12 || len(outputs) != 6 {
