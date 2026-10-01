@@ -410,3 +410,27 @@ func TestBuildLayoutGroupsFollowModuleOrder(t *testing.T) {
 		}
 	}
 }
+
+// The module sizes bound to the transcript follow the module order and
+// change with any module's size.
+func TestModuleSizesTranscript(t *testing.T) {
+	program := func(a, b int) board.Program {
+		return board.Program{Modules: map[string]board.CompiledModule{
+			"b": {Name: "b", N: b},
+			"a": {Name: "a", N: a},
+		}}
+	}
+	got := ModuleSizesTranscript(program(8, 16))
+	want := []uint64{constants.MODULE_SIZES_DOMAIN_TAG, 2, 8, 16}
+	if len(got) != len(want) {
+		t.Fatalf("got %d elements, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i].Uint64() != want[i] {
+			t.Fatalf("element %d = %d, want %d", i, got[i].Uint64(), want[i])
+		}
+	}
+	if reflect.DeepEqual(ModuleSizesTranscript(program(8, 16)), ModuleSizesTranscript(program(16, 8))) {
+		t.Fatal("swapping the module sizes does not change the transcript")
+	}
+}

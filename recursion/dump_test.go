@@ -8,7 +8,6 @@ import (
 
 	"github.com/consensys/loom/trace"
 	"github.com/consensys/loom/viz"
-	"github.com/consensys/loom/zkc"
 )
 
 // TestDumpTrace writes the trace of a tiny machine (one query, one leaf block)
@@ -20,8 +19,8 @@ func TestDumpTrace(t *testing.T) {
 	if dir == "" {
 		t.Skip("RECURSION_TRACE_DIR not set")
 	}
-	cfg := zkc.FixtureConfig{
-		Batches:    []zkc.BatchConfig{{{LogN: 3, NumBase: 2, NumExt: 0, Shifts: []int{0}}}},
+	cfg := FixtureConfig{
+		Batches:    []BatchConfig{{{LogN: 3, NumBase: 2, NumExt: 0, Shifts: []int{0}}}},
 		NumQueries: 1,
 		Seed:       1,
 	}

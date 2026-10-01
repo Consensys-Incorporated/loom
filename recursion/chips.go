@@ -22,7 +22,6 @@ import (
 	"github.com/consensys/loom/board"
 	"github.com/consensys/loom/expr"
 	"github.com/consensys/loom/trace"
-	"github.com/consensys/loom/zkc"
 )
 
 // spongeChip: one row per 16-element block of a sponge.
@@ -74,7 +73,7 @@ func (m *Machine) spongeChip(b *board.Builder, bus *Bus, t trace.Trace, p2 *[][w
 	for l := range width {
 		c.declare(fmt.Sprintf("out%d", l))
 	}
-	perm := poseidon2.NewPermutation(width, zkc.P2FullRounds, zkc.P2PartialRounds)
+	perm := poseidon2.NewPermutation(width, P2FullRounds, P2PartialRounds)
 	row := 0
 	for _, s := range m.sponges {
 		var state [width]koalabear.Element
@@ -211,7 +210,7 @@ func (m *Machine) merkleChip(b *board.Builder, bus *Bus, t trace.Trace, p2 *[][w
 	for i := range digest {
 		c.declare(fmt.Sprintf("cur%d", i), fmt.Sprintf("s%d", i), fmt.Sprintf("out%d", i))
 	}
-	perm := poseidon2.NewPermutation(width, zkc.P2FullRounds, zkc.P2PartialRounds)
+	perm := poseidon2.NewPermutation(width, P2FullRounds, P2PartialRounds)
 	row := 0
 	var prevOut Cell
 	for _, p := range m.paths {

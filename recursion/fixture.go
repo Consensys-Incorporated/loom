@@ -11,12 +11,13 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package zkc
+package recursion
 
 import (
 	"fmt"
 	"math/rand/v2"
 
+	"github.com/consensys/gnark-crypto/field/koalabear"
 	ext "github.com/consensys/gnark-crypto/field/koalabear/extensions"
 	"github.com/consensys/loom/internal/constants"
 	fiatshamir "github.com/consensys/loom/internal/fiat-shamir"
@@ -107,7 +108,7 @@ func NewFixture(cfg FixtureConfig) (*Fixture, error) {
 			for range gc.NumExt {
 				p := make(poly.ExtPolynomial, n)
 				for i := range p {
-					p[i] = randE6(rng)
+					p[i] = fixtureRandE6(rng)
 				}
 				group.Ext = append(group.Ext, p)
 				gs.Ext = append(gs.Ext, append([]int(nil), gc.Shifts...))
@@ -168,4 +169,12 @@ func zetaTranscript(roots []hash.Digest) (*fiatshamir.Transcript, ext.E6, error)
 		return nil, ext.E6{}, err
 	}
 	return fs, hash.OutputToExt(d), nil
+}
+
+func fixtureRandE6(rng *rand.Rand) ext.E6 {
+	var x ext.E6
+	for _, c := range []*koalabear.Element{&x.B0.A0, &x.B0.A1, &x.B1.A0, &x.B1.A1, &x.B2.A0, &x.B2.A1} {
+		c.SetUint64(rng.Uint64())
+	}
+	return x
 }

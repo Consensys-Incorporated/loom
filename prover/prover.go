@@ -221,6 +221,9 @@ func newProverRuntime(t trace.Trace, provingKey setup.ProvingKey, publicInputs p
 	if err := res.fs.Bind(initialChallenge, hash.StringToElements(constants.HASH_BACKEND_DOMAIN_TAG, hashBackend.ID)); err != nil {
 		return res, err
 	}
+	if err := res.fs.Bind(initialChallenge, protocol.ModuleSizesTranscript(program)); err != nil {
+		return res, err
+	}
 
 	// Bind every setup tree's root to the first challenge (decreasing-N order,
 	// set by Setup) + public inputs.

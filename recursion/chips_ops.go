@@ -21,7 +21,6 @@ import (
 	"github.com/consensys/loom/board"
 	"github.com/consensys/loom/expr"
 	"github.com/consensys/loom/trace"
-	"github.com/consensys/loom/zkc"
 )
 
 // A chip whose instance list is empty adds no module.
@@ -282,8 +281,8 @@ func (m *Machine) e6Chip(b *board.Builder, bus *Bus, t trace.Trace) error {
 	n := newChipModule(b, e6Mod, len(m.e6Rows))
 	mm := b.Modules[e6Mod]
 	a, bb, o := e6Cols(e6Mod, "a", 0), e6Cols(e6Mod, "b", 0), e6Cols(e6Mod, "o", 0)
-	ab := zkc.E6MulExprs(a, bb)
-	prevA := zkc.E6MulExprs(e6Cols(e6Mod, "o", -1), a)
+	ab := e6MulExprs(a, bb)
+	prevA := e6MulExprs(e6Cols(e6Mod, "o", -1), a)
 	mul, add, bs, hor := setupCol(e6Mod, "mul"), setupCol(e6Mod, "add"), setupCol(e6Mod, "bs"), setupCol(e6Mod, "hor")
 	for i := range 6 {
 		rhs := mul.Mul(ab[i]).Add(add.Mul(a[i])).Add(bs.Mul(bb[i])).Add(hor.Mul(prevA[i]))
@@ -350,7 +349,7 @@ func (m *Machine) foldChip(b *board.Builder, bus *Bus, t trace.Trace) error {
 	for i := range diff {
 		diff[i] = p[i].Sub(q[i]).Mul(xi).Mul(constElem(half))
 	}
-	odd := zkc.E6MulExprs(al, diff)
+	odd := e6MulExprs(al, diff)
 	for i := range 6 {
 		lhs := p[i].Add(q[i]).Mul(constElem(half)).Add(odd[i]).Add(j[i])
 		rhs := pn[i].Add(bn.Mul(qn[i].Sub(pn[i])))

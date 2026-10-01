@@ -16,6 +16,8 @@ package protocol
 import (
 	"sort"
 
+	"github.com/consensys/gnark-crypto/field/koalabear"
+
 	"github.com/consensys/loom/board"
 	"github.com/consensys/loom/field"
 	"github.com/consensys/loom/internal/constants"
@@ -109,6 +111,21 @@ func ModuleOrder(program board.Program) []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// ModuleSizesTranscript returns the transcript encoding of the module sizes:
+// the domain tag, the number of modules, then the size N of every module in
+// ModuleOrder. Prover and verifier bind it to the initial challenge, so that
+// a proof is bound to the sizes it was produced for (a verifier whose sizes
+// are inputs, such as a recursion circuit, cannot otherwise rely on them).
+func ModuleSizesTranscript(program board.Program) []koalabear.Element {
+	order := ModuleOrder(program)
+	res := make([]koalabear.Element, 0, 2+len(order))
+	res = append(res, koalabear.NewElement(constants.MODULE_SIZES_DOMAIN_TAG), koalabear.NewElement(uint64(len(order))))
+	for _, m := range order {
+		res = append(res, koalabear.NewElement(uint64(program.Modules[m].N)))
+	}
+	return res
 }
 
 // SetupGroups returns the setup columns grouped by module, in ModuleOrder,

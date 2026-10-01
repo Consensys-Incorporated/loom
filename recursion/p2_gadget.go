@@ -11,7 +11,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-package zkc
+package recursion
 
 import (
 	"fmt"
@@ -20,11 +20,10 @@ import (
 	"github.com/consensys/gnark-crypto/field/koalabear/poseidon2"
 	"github.com/consensys/loom/board"
 	"github.com/consensys/loom/expr"
-	zkcv "github.com/consensys/loom/integration_test/zkc_verifier"
 	"github.com/consensys/loom/trace"
 )
 
-// Poseidon2Gadget is the AIR of p2_perm when declared #[native]: one
+// Poseidon2Gadget is the AIR of the P2 core: one
 // permutation per row, laid out as Plonky3's poseidon2-air with S-box degree 3
 // and no S-box registers. Its columns are
 //
@@ -37,13 +36,6 @@ import (
 // columns the state is tracked as linear forms, so the linear layers cost no
 // columns.
 type Poseidon2Gadget struct{}
-
-var _ zkcv.Gadget = Poseidon2Gadget{}
-
-// Gadgets returns the gadgets of the generated zkc code's #[native] functions.
-func Gadgets() zkcv.Gadgets {
-	return zkcv.Gadgets{"p2_perm": Poseidon2Gadget{}, "e6_mul": E6MulGadget{}}
-}
 
 // p2Matrices returns the external and internal matrices as dense 24×24
 // matrices, obtained by applying gnark-crypto's addition chains to unit vectors.
@@ -244,7 +236,7 @@ func (Poseidon2Gadget) Define(b *board.Builder, module string, inputs, outputs [
 }
 
 // Fill computes the internal columns and the outputs from the inputs, on every
-// row. Rows whose inputs and outputs are all zero are zkc padding rows: they
+// row. Rows whose inputs and outputs are all zero are padding rows: they
 // become the genuine instance P(0). On other rows, the traced outputs must
 // match.
 func (Poseidon2Gadget) Fill(t trace.Trace, module string, inputs, outputs []string) error {

@@ -22,16 +22,15 @@ import (
 	"github.com/consensys/loom/board"
 	"github.com/consensys/loom/expr"
 	"github.com/consensys/loom/trace"
-	"github.com/consensys/loom/zkc"
 )
 
 // Poseidon2 parameters (width 24, rate 16, digest 8) and the Merkle node
 // domain tag, as in internal/hash and internal/fri.
 const (
-	width   = zkc.P2Width
-	rate    = zkc.P2Rate
-	digest  = zkc.P2Digest
-	nodeTag = zkc.NodeDomainTag
+	width   = P2Width
+	rate    = P2Rate
+	digest  = P2Digest
+	nodeTag = NodeDomainTag
 )
 
 // Module names of the chips.
@@ -124,7 +123,7 @@ func (m *Machine) Sponge(data []int, length int) int {
 		panic(fmt.Sprintf("Sponge: %d cells for %d elements", len(data), length))
 	}
 	var state [width]koalabear.Element
-	perm := poseidon2.NewPermutation(width, zkc.P2FullRounds, zkc.P2PartialRounds)
+	perm := poseidon2.NewPermutation(width, P2FullRounds, P2PartialRounds)
 	for b := 0; b < len(data)/2; b++ {
 		lo, hi := m.read(data[2*b]), m.read(data[2*b+1])
 		for j := 0; j < rate; j++ {
@@ -268,11 +267,11 @@ func (m *Machine) Compile() (*Program, error) {
 	for i := range ins {
 		ins[i], outs[i] = fmt.Sprintf("%s.s%d", p2Mod, i), fmt.Sprintf("%s.r%d", p2Mod, i)
 	}
-	if err := (zkc.Poseidon2Gadget{}).Define(&b, p2Mod, ins, outs); err != nil {
+	if err := (Poseidon2Gadget{}).Define(&b, p2Mod, ins, outs); err != nil {
 		return nil, err
 	}
 	pc := newCols(np)
-	perm := poseidon2.NewPermutation(width, zkc.P2FullRounds, zkc.P2PartialRounds)
+	perm := poseidon2.NewPermutation(width, P2FullRounds, P2PartialRounds)
 	for row, in := range p2Inputs {
 		out := in
 		if err := perm.Permutation(out[:]); err != nil {
@@ -287,7 +286,7 @@ func (m *Machine) Compile() (*Program, error) {
 		pc.declare(fmt.Sprintf("s%d", i), fmt.Sprintf("r%d", i))
 	}
 	pc.store(t, p2Mod)
-	if err := (zkc.Poseidon2Gadget{}).Fill(t, p2Mod, ins, outs); err != nil {
+	if err := (Poseidon2Gadget{}).Fill(t, p2Mod, ins, outs); err != nil {
 		return nil, err
 	}
 

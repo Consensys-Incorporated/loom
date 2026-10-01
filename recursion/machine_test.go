@@ -6,18 +6,16 @@ import (
 
 	"github.com/consensys/gnark-crypto/field/koalabear"
 	"github.com/consensys/loom"
-	zkcv "github.com/consensys/loom/integration_test/zkc_verifier"
 	"github.com/consensys/loom/internal/hash"
 	"github.com/consensys/loom/public"
 	"github.com/consensys/loom/trace"
-	"github.com/consensys/loom/zkc"
 )
 
 // openingsMachine checks, for every query of a one-batch, one-group PCS
 // fixture, that the opened row pair hashes to a leaf of the batch root.
-func openingsMachine(t *testing.T, cfg zkc.FixtureConfig) *Machine {
+func openingsMachine(t *testing.T, cfg FixtureConfig) *Machine {
 	t.Helper()
-	f, err := zkc.NewFixture(cfg)
+	f, err := NewFixture(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,7 +29,7 @@ func openingsMachine(t *testing.T, cfg zkc.FixtureConfig) *Machine {
 			t.Fatal("openingsMachine wants a single-group batch")
 		}
 		rows := wp.TopRows
-		stream := []koalabear.Element{hash.NewElement(zkc.LeafDomainTag),
+		stream := []koalabear.Element{hash.NewElement(LeafDomainTag),
 			hash.NewElement(uint64(2 * len(rows.Lo.RawRowBase))), hash.NewElement(uint64(2 * len(rows.Lo.RawRowExt)))}
 		stream = append(stream, rows.Lo.RawRowBase...)
 		stream = append(stream, rows.Hi.RawRowBase...)
@@ -70,8 +68,8 @@ func prove(t *testing.T, p *Program) error {
 	return loom.Verify(st, prf)
 }
 
-var smallCfg = zkc.FixtureConfig{
-	Batches:    []zkc.BatchConfig{{{LogN: 6, NumBase: 5, NumExt: 1, Shifts: []int{0, 1}}}},
+var smallCfg = FixtureConfig{
+	Batches:    []BatchConfig{{{LogN: 6, NumBase: 5, NumExt: 1, Shifts: []int{0, 1}}}},
 	NumQueries: 4,
 	Seed:       3,
 }
@@ -93,12 +91,12 @@ func TestOpenings(t *testing.T) {
 func logBreakdown(t *testing.T, p *Program) {
 	t.Helper()
 	var sb []byte
-	for _, l := range zkcv.LeafBreakdownOf(p.Loom) {
+	for _, l := range LeafBreakdownOf(p.Loom) {
 		sb = fmt.Appendf(sb, "%-8s rows=%5d trace=%4d logup=%4d mult=%3d quotient=%3d  leaf elements=%4d\n",
 			l.Module, p.Loom.Modules[l.Module].N, l.Trace/2, l.Logup/12, l.Mult/2, l.Quotient/12,
 			l.Trace+l.Logup+l.Mult+l.Quotient)
 	}
-	leaf := zkcv.LeafCostOf(p.Loom)
+	leaf := LeafCostOf(p.Loom)
 	t.Logf("\n%sleaf elements/query %d, leaf perms/query %d", sb, leaf.Elements, leaf.Perms)
 }
 
