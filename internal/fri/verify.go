@@ -120,9 +120,9 @@ func (pcs *PCS) Verify(
 	}
 	alpha := hash.OutputToExt(alphaOut)
 
-	// 4- Verify the multi-degree FRI proof on the declared DEEP roots, one
-	//    level per class in level order.
-	if err := Verify(*pcs.params, proof.DeepQuotientRoots, plan.levelSizes(), proof.FRIProof, fs); err != nil {
+	// 4- Verify the multi-degree FRI proof, one level per class in level
+	//    order.
+	if err := Verify(*pcs.params, plan.levelSizes(), proof.FRIProof, fs); err != nil {
 		return fmt.Errorf("fri: PCS.Verify: FRI proof: %w", err)
 	}
 
@@ -186,8 +186,8 @@ func validateOpeningProofShape(
 		}
 	}
 
-	if len(proof.DeepQuotientRoots) != numClasses {
-		return fmt.Errorf("fri: PCS.Verify: DeepQuotientRoots has %d entries, expected %d (DEEP classes)", len(proof.DeepQuotientRoots), numClasses)
+	if len(proof.FRIProof.LevelQueries) != numClasses-1 {
+		return fmt.Errorf("fri: PCS.Verify: FRI proof has %d extra levels, expected %d (DEEP classes)", len(proof.FRIProof.LevelQueries), numClasses-1)
 	}
 
 	if len(proof.PointSamplings) != numQueries {

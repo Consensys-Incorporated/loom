@@ -149,7 +149,9 @@ type domainLight struct {
 // rail is populated, selected by Field. Row is the sampled full-domain row
 // projected to this level; LeafP is the value at row Row&^1 and LeafQ is the
 // value at row (Row&^1)+1. Path authenticates the adjacent pair leaf containing
-// both values, with Path.LeafIdx == (Row&^1)/2.
+// both values, with Path.LeafIdx == (Row&^1)/2. The openings of the levels
+// other than level 0 (Proof.LevelQueries) have no Path: they are injections
+// of the levels tree, authenticated by the round-0 path.
 type QueryLayer struct {
 	Field     field.Kind
 	Row       int
@@ -210,26 +212,31 @@ func (e LevelEvals) Len() int {
 }
 
 // Level holds one polynomial introduced at the folding round where the running
-// polynomial's degree matches Level.D. Tree is the pre-built pair-leaf Merkle
-// tree for Evals; build it with Params.BuildLevelTree or Params.BuildLevelTreeExt
-// so the leaf/node hashers match.
+// polynomial's degree matches Level.D.
 type Level struct {
 	D     int
 	Evals LevelEvals
-	Tree  *merkle.Tree
 }
 
-// Proof is the complete multi-degree FRI proof. Level polynomial Merkle roots
-// are NOT stored here — they are passed externally to Verify (the caller
-// commits to those polynomials before invoking FRI).
+// Proof is the complete multi-degree FRI proof.
+//
+// All levels are committed in one mixed-height Merkle tree, the levels tree:
+// level 0 forms the pair leaves and every other level is an injection at the
+// level of the tree whose width is its number of row pairs (merkle
+// LevelInjection), in level order. The levels tree is the round-0 FRI layer:
+// a round-0 query path authenticates level 0's pair and, through its
+// injections, the pair of every other level at the same query.
 type Proof struct {
+	// LevelsRoot is the root of the levels tree.
+	LevelsRoot hash.Digest
+
 	// LevelQueries[l-1][k] is the adjacent row opening for levels[l].Evals at
-	// outer query k. The stored Row is the full query row shifted to the round
-	// where that level is introduced.
+	// outer query k, without Path (see QueryLayer). The stored Row is the
+	// full query row shifted to the round where that level is introduced.
 	LevelQueries [][]QueryLayer
 
 	// Running-polynomial FRI path.
-	FRIRoots      []hash.Digest // Merkle roots for running poly T_1..T_{r-1}
+	FRIRoots      []hash.Digest // Merkle roots for running poly T_1..T_{r-1} (T_0 is the levels tree)
 	FinalField    field.Kind
 	FinalPolyBase []koalabear.Element               // populated when FinalField == field.Base
 	FinalPolyExt  []ext.E6                          // populated when FinalField == field.Ext
@@ -263,16 +270,42 @@ func (p Params) EncodeExt(poly []ext.E6) ([]ext.E6, error) {
 	return enc.EncodeExt(poly, domainD), nil
 }
 
-// BuildLevelTree builds the pair-leaf Merkle tree expected by FRI for a base
-// level polynomial: tree leaf k = LeafHasher(layer[2*k], layer[2*k+1]).
-func (p Params) BuildLevelTree(layer []koalabear.Element) (*merkle.Tree, error) {
-	return buildTreeBase(layer, p.LeafHasher, p.NodeHasher)
+// buildLevelsTree commits the levels (sorted by decreasing D) in one
+// mixed-height tree: levels[0]'s pair leaves are the leaves, and every other
+// level is an injection whose width is its number of pairs, in level order.
+func buildLevelsTree(p Params, levels []Level) (*merkle.Tree, error) {
+	leaves := make([][]hash.Digest, len(levels))
+	for l, lvl := range levels {
+		src := LeafSource{Base: []poly.Polynomial{lvl.Evals.Base}}
+		if lvl.Evals.Field() == field.Ext {
+			src = LeafSource{Ext: []poly.ExtPolynomial{lvl.Evals.Ext}}
+		}
+		n, err := pairLeafCount(lvl.Evals.Len())
+		if err != nil {
+			return nil, fmt.Errorf("level %d: %w", l, err)
+		}
+		leaves[l] = make([]hash.Digest, n)
+		HashLeafPairsParallel(p.LeafHasher, leaves[l], src)
+	}
+	injections := make([]merkle.LevelInjection, 0, len(levels)-1)
+	for _, lv := range leaves[1:] {
+		injections = append(injections, merkle.LevelInjection{LevelWidth: len(lv), LeafHashes: lv})
+	}
+	tree, err := merkle.NewWithInjections(len(leaves[0]), p.NodeHasher, injections)
+	if err != nil {
+		return nil, err
+	}
+	return tree, tree.Build(leaves[0])
 }
 
-// BuildLevelTreeExt builds the pair-leaf Merkle tree expected by FRI for an
-// extension-field level polynomial.
-func (p Params) BuildLevelTreeExt(layer []ext.E6) (*merkle.Tree, error) {
-	return buildTreeExt(layer, p.LeafHasher, p.NodeHasher)
+// levelsInjectionWidths returns the injection width of every level l ≥ 1 of
+// the levels tree: the number of row pairs of a level entering at round j_l.
+func levelsInjectionWidths(p Params, levelDs []int) []int {
+	res := make([]int, len(levelDs)-1)
+	for l := 1; l < len(levelDs); l++ {
+		res[l-1] = (p.N >> log2(p.D/levelDs[l])) / 2
+	}
+	return res
 }
 
 // ────────────────────────────────────────────────────────────────────────────────
@@ -286,9 +319,13 @@ func (p Params) BuildLevelTreeExt(layer []ext.E6) (*merkle.Tree, error) {
 //
 // Level l enters at round j_l = log2(p.D / D_l). Several levels may share a
 // round, round 0 included: the running polynomial at round j adds γ_l·level_l
-// for every level entering at j, in level order. At round 0 the committed
-// layer is levels[0].Tree itself; the levels entering at round 0 are only
-// mixed into the polynomial that is folded.
+// for every level entering at j, in level order. The levels are committed in
+// one tree (see Proof), which is the round-0 layer; the levels entering at
+// round 0 are only mixed into the polynomial that is folded.
+//
+// Transcript: the levels root is bound to the first γ (or to fri_fold_0 when
+// there is a single level), all the γs are derived first, in level order,
+// then fri_fold_0, fri_fold_1, ..., then the queries.
 // ts must already have been initialised with any prior-round context.
 func Prove(p Params, levels []Level, ts *fiatshamir.Transcript) (Proof, []int, error) {
 	sort.SliceStable(levels, func(i, j int) bool { return levels[i].D > levels[j].D })
@@ -297,7 +334,7 @@ func Prove(p Params, levels []Level, ts *fiatshamir.Transcript) (Proof, []int, e
 	if err != nil {
 		return Proof{}, nil, err
 	}
-	registerChallenges(p, plan.levelAtRound, ts)
+	registerChallenges(p, plan.numLevels, ts)
 
 	if plan.rail == field.Ext {
 		return proveExt(p, levels, plan, ts)
@@ -327,9 +364,6 @@ func buildProvePlan(p Params, levels []Level) (provePlan, error) {
 	if levels[0].Evals.Len() != p.N {
 		return plan, fmt.Errorf("fri: Prove: levels[0].Evals length %d != N=%d", levels[0].Evals.Len(), p.N)
 	}
-	if levels[0].Tree == nil {
-		return plan, fmt.Errorf("fri: Prove: levels[0].Tree is nil")
-	}
 
 	plan.numLevels = len(levels)
 
@@ -355,21 +389,18 @@ func buildProvePlan(p Params, levels []Level) (provePlan, error) {
 		if levels[l].Evals.Len() != Nl {
 			return plan, fmt.Errorf("fri: Prove: levels[%d].Evals length %d != N_l=%d", l, levels[l].Evals.Len(), Nl)
 		}
-		if levels[l].Tree == nil {
-			return plan, fmt.Errorf("fri: Prove: levels[%d].Tree is nil", l)
-		}
 	}
 
 	return plan, nil
 }
 
-// registerChallenges registers, for each round j, the γ of every level
-// entering at j, then the fold challenge of round j, then the queries.
-func registerChallenges(p Params, levelAtRound map[int][]int, ts *fiatshamir.Transcript) {
+// registerChallenges registers the γ of every level l ≥ 1, in level order,
+// then the fold challenges, then the queries.
+func registerChallenges(p Params, numLevels int, ts *fiatshamir.Transcript) {
+	for l := 1; l < numLevels; l++ {
+		ts.NewChallenge(levelGammaName(l))
+	}
 	for j := 0; j < p.numRounds; j++ {
-		for _, l := range levelAtRound[j] {
-			ts.NewChallenge(levelGammaName(l))
-		}
 		ts.NewChallenge(foldName(j))
 	}
 	for k := 0; k < p.NumQueries; k++ {
@@ -377,25 +408,26 @@ func registerChallenges(p Params, levelAtRound map[int][]int, ts *fiatshamir.Tra
 	}
 }
 
-// deriveLevelGamma binds the root of level l to its γ and computes it. The
-// first γ of round 0 also binds levelRoot0 first: a level entering at round 0
-// is combined with level 0, whose root is otherwise bound only at fri_fold_0,
-// after the γ.
-func deriveLevelGamma(ts *fiatshamir.Transcript, l int, root hash.Digest, bindRoot0 bool, levelRoot0 hash.Digest) ([8]koalabear.Element, error) {
-	gammaName := levelGammaName(l)
-	if bindRoot0 {
-		if err := ts.Bind(gammaName, levelRoot0[:]); err != nil {
-			return [8]koalabear.Element{}, fmt.Errorf("bind level 0 root for γ_%d: %w", l, err)
+// deriveLevelGammas derives γ_l for every level l ≥ 1, in order (res[0] is
+// unused). The levels root is bound to the first γ: every level is combined
+// with the others, so all the γs must come after the commitment to all the
+// levels.
+func deriveLevelGammas(ts *fiatshamir.Transcript, numLevels int, levelsRoot hash.Digest) ([][8]koalabear.Element, error) {
+	res := make([][8]koalabear.Element, numLevels)
+	for l := 1; l < numLevels; l++ {
+		gammaName := levelGammaName(l)
+		if l == 1 {
+			if err := ts.Bind(gammaName, levelsRoot[:]); err != nil {
+				return nil, fmt.Errorf("bind levels root: %w", err)
+			}
 		}
+		challenge, err := ts.ComputeChallenge(gammaName)
+		if err != nil {
+			return nil, fmt.Errorf("compute level gamma l=%d: %w", l, err)
+		}
+		res[l] = challenge
 	}
-	if err := ts.Bind(gammaName, root[:]); err != nil {
-		return [8]koalabear.Element{}, fmt.Errorf("bind level l=%d: %w", l, err)
-	}
-	challenge, err := ts.ComputeChallenge(gammaName)
-	if err != nil {
-		return [8]koalabear.Element{}, fmt.Errorf("compute level gamma l=%d: %w", l, err)
-	}
-	return challenge, nil
+	return res, nil
 }
 
 func proveBase(p Params, levels []Level, plan provePlan, ts *fiatshamir.Transcript) (Proof, []int, error) {
@@ -405,30 +437,37 @@ func proveBase(p Params, levels []Level, plan provePlan, ts *fiatshamir.Transcri
 	running := make([]koalabear.Element, p.N)
 	copy(running, levels[0].Evals.Base)
 
+	levelsTree, err := buildLevelsTree(p, levels)
+	if err != nil {
+		return Proof{}, nil, fmt.Errorf("fri: Prove: levels tree: %w", err)
+	}
+	gammaOut, err := deriveLevelGammas(ts, plan.numLevels, levelsTree.Root())
+	if err != nil {
+		return Proof{}, nil, fmt.Errorf("fri: Prove: %w", err)
+	}
+
 	layers := make([][]koalabear.Element, p.numRounds+1)
 	friTrees := make([]*merkle.Tree, p.numRounds)
 	alphas := make([]koalabear.Element, p.numRounds)
 
 	var prf Proof
+	prf.LevelsRoot = levelsTree.Root()
 	if p.numRounds > 1 {
 		prf.FRIRoots = make([]hash.Digest, p.numRounds-1)
 	}
 
 	for j := 0; j < p.numRounds; j++ {
 		// layers[j] = running after batching, before folding (= what T_j
-		// commits to). At round 0 the committed layer is levels[0] alone.
+		// commits to). At round 0 the committed layer is the levels tree,
+		// opened at levels[0].
 		if j == 0 {
 			layers[0] = levels[0].Evals.Base
 		}
 		// Level batching step: mix γ_l·levels[l].Evals into running, for every
 		// level entering at round j.
-		for i, l := range plan.levelAtRound[j] {
-			challenge, err := deriveLevelGamma(ts, l, levels[l].Tree.Root(), j == 0 && i == 0, levels[0].Tree.Root())
-			if err != nil {
-				return Proof{}, nil, fmt.Errorf("fri: Prove: %w", err)
-			}
+		for _, l := range plan.levelAtRound[j] {
 			var gamma koalabear.Element
-			gamma.Set(&challenge[0])
+			gamma.Set(&gammaOut[l][0])
 			for k, v := range levels[l].Evals.Base {
 				var term koalabear.Element
 				term.Mul(&v, &gamma)
@@ -441,7 +480,7 @@ func proveBase(p Params, levels []Level, plan provePlan, ts *fiatshamir.Transcri
 
 		var tree *merkle.Tree
 		if j == 0 {
-			tree = levels[0].Tree // caller-supplied, root must match running pre-fold
+			tree = levelsTree
 		} else {
 			var err error
 			tree, err = buildTreeBase(running, p.LeafHasher, p.NodeHasher)
@@ -510,24 +549,19 @@ func proveBase(p Params, levels []Level, plan provePlan, ts *fiatshamir.Transcri
 		if err != nil {
 			return Proof{}, nil, fmt.Errorf("fri: Prove: open FRI query %d: %w", k, err)
 		}
+		// The verifier recomputes the injection leaves from LevelQueries.
+		q.Layers[0].Path.InjectionLeaves = nil
 		prf.FRIQueries[k] = q
 
 		for l := 1; l < plan.numLevels; l++ {
 			jl := log2(p.D / levels[l].D)
 			row := s >> jl
 			lo, hi := siblingRows(row)
-			pairIdx := lo / 2
-
-			path, err := levels[l].Tree.OpenProof(pairIdx)
-			if err != nil {
-				return Proof{}, nil, fmt.Errorf("fri: Prove: open level query l=%d k=%d pair=%d: %w", l, k, pairIdx, err)
-			}
 			prf.LevelQueries[l-1][k] = QueryLayer{
 				Field:     field.Base,
 				Row:       row,
 				LeafPBase: levels[l].Evals.Base[lo],
 				LeafQBase: levels[l].Evals.Base[hi],
-				Path:      path,
 			}
 		}
 	}
@@ -539,11 +573,21 @@ func proveExt(p Params, levels []Level, plan provePlan, ts *fiatshamir.Transcrip
 	running := make([]ext.E6, p.N)
 	copy(running, levels[0].Evals.Ext)
 
+	levelsTree, err := buildLevelsTree(p, levels)
+	if err != nil {
+		return Proof{}, nil, fmt.Errorf("fri: Prove: levels tree: %w", err)
+	}
+	gammaOut, err := deriveLevelGammas(ts, plan.numLevels, levelsTree.Root())
+	if err != nil {
+		return Proof{}, nil, fmt.Errorf("fri: Prove: %w", err)
+	}
+
 	layers := make([][]ext.E6, p.numRounds+1)
 	friTrees := make([]*merkle.Tree, p.numRounds)
 	alphas := make([]ext.E6, p.numRounds)
 
 	var prf Proof
+	prf.LevelsRoot = levelsTree.Root()
 	if p.numRounds > 1 {
 		prf.FRIRoots = make([]hash.Digest, p.numRounds-1)
 	}
@@ -552,12 +596,8 @@ func proveExt(p Params, levels []Level, plan provePlan, ts *fiatshamir.Transcrip
 		if j == 0 {
 			layers[0] = levels[0].Evals.Ext
 		}
-		for i, l := range plan.levelAtRound[j] {
-			challenge, err := deriveLevelGamma(ts, l, levels[l].Tree.Root(), j == 0 && i == 0, levels[0].Tree.Root())
-			if err != nil {
-				return Proof{}, nil, fmt.Errorf("fri: Prove: %w", err)
-			}
-			gamma := hash.OutputToExt(challenge)
+		for _, l := range plan.levelAtRound[j] {
+			gamma := hash.OutputToExt(gammaOut[l])
 			for k, v := range levels[l].Evals.Ext {
 				var term ext.E6
 				term.Mul(&v, &gamma)
@@ -570,7 +610,7 @@ func proveExt(p Params, levels []Level, plan provePlan, ts *fiatshamir.Transcrip
 
 		var tree *merkle.Tree
 		if j == 0 {
-			tree = levels[0].Tree
+			tree = levelsTree
 		} else {
 			var err error
 			tree, err = buildTreeExt(running, p.LeafHasher, p.NodeHasher)
@@ -635,24 +675,19 @@ func proveExt(p Params, levels []Level, plan provePlan, ts *fiatshamir.Transcrip
 		if err != nil {
 			return Proof{}, nil, fmt.Errorf("fri: Prove: open FRI query %d: %w", k, err)
 		}
+		// The verifier recomputes the injection leaves from LevelQueries.
+		q.Layers[0].Path.InjectionLeaves = nil
 		prf.FRIQueries[k] = q
 
 		for l := 1; l < plan.numLevels; l++ {
 			jl := log2(p.D / levels[l].D)
 			row := s >> jl
 			lo, hi := siblingRows(row)
-			pairIdx := lo / 2
-
-			path, err := levels[l].Tree.OpenProof(pairIdx)
-			if err != nil {
-				return Proof{}, nil, fmt.Errorf("fri: Prove: open level query l=%d k=%d pair=%d: %w", l, k, pairIdx, err)
-			}
 			prf.LevelQueries[l-1][k] = QueryLayer{
 				Field:    field.Ext,
 				Row:      row,
 				LeafPExt: levels[l].Evals.Ext[lo],
 				LeafQExt: levels[l].Evals.Ext[hi],
-				Path:     path,
 			}
 		}
 	}
@@ -664,23 +699,17 @@ func proveExt(p Params, levels []Level, plan provePlan, ts *fiatshamir.Transcrip
 // Verify — multi-degree FRI verifier
 // ────────────────────────────────────────────────────────────────────────────────
 
-// Verify checks a multi-degree FRI proof.
-//
-// levelRoots[l] is the Merkle root of levels[l].Evals (committed by the caller
-// before invoking FRI). levelRoots[0] plays the role of "root0" in
-// single-degree FRI.
+// Verify checks a multi-degree FRI proof, whose levels are committed in the
+// levels tree of root prf.LevelsRoot (see Proof).
 //
 // levelDs[l] is the polynomial-size parameter D for level l; levelDs[0] must
-// equal p.D and the slice must be ordered consistently with how Prove was
-// called (i.e. decreasing D).
+// equal p.D and the slice must be ordered as the levels Prove sorted
+// (decreasing D, stably).
 //
 // ts must be in the same state as when Prove was called.
-func Verify(p Params, levelRoots []hash.Digest, levelDs []int, prf Proof, ts *fiatshamir.Transcript) error {
+func Verify(p Params, levelDs []int, prf Proof, ts *fiatshamir.Transcript) error {
 	if len(levelDs) == 0 {
 		return fmt.Errorf("fri: Verify: at least one level required")
-	}
-	if len(levelRoots) != len(levelDs) {
-		return fmt.Errorf("fri: Verify: levelRoots has %d entries, levelDs has %d", len(levelRoots), len(levelDs))
 	}
 	if levelDs[0] != p.D {
 		return fmt.Errorf("fri: Verify: levelDs[0]=%d must equal p.D=%d", levelDs[0], p.D)
@@ -737,43 +766,87 @@ func Verify(p Params, levelRoots []hash.Digest, levelDs []int, prf Proof, ts *fi
 		levelAtRound[jl] = append(levelAtRound[jl], l)
 	}
 
-	registerChallenges(p, levelAtRound, ts)
+	registerChallenges(p, numLevels, ts)
 
-	// Assemble FRI running-polynomial roots: roots[0] is the level-0 root;
+	// Assemble FRI running-polynomial roots: roots[0] is the levels tree;
 	// roots[1..r-1] come from prf.FRIRoots.
 	roots := make([]hash.Digest, p.numRounds)
-	roots[0] = levelRoots[0]
+	roots[0] = prf.LevelsRoot
 	for j := 1; j < p.numRounds; j++ {
 		roots[j] = prf.FRIRoots[j-1]
 	}
 
-	var levelRootsExtra []hash.Digest
-	if numExtraLevels > 0 {
-		levelRootsExtra = levelRoots[1:]
+	lv := levelsCheck{
+		levelAtRound: levelAtRound,
+		intro:        make([]int, numLevels),
+		widths:       levelsInjectionWidths(p, levelDs),
 	}
-
+	for j, ls := range levelAtRound {
+		for _, l := range ls {
+			lv.intro[l] = j
+		}
+	}
 	if prf.FinalField == field.Ext {
-		return verifyExt(p, levelRoots, levelRootsExtra, levelAtRound, roots, prf, ts)
+		return verifyExt(p, numLevels, lv, roots, prf, ts)
 	}
-	return verifyBase(p, levelRoots, levelRootsExtra, levelAtRound, roots, prf, ts)
+	return verifyBase(p, numLevels, lv, roots, prf, ts)
 }
 
-func verifyBase(p Params, levelRoots, levelRootsExtra []hash.Digest, levelAtRound map[int][]int, roots []hash.Digest, prf Proof, ts *fiatshamir.Transcript) error {
-	numLevels := len(levelRoots)
+// levelsCheck is the level structure a query check needs: the levels
+// entering at each round, the intro round and the levels-tree injection width
+// of every level (widths[l-1] for level l ≥ 1).
+type levelsCheck struct {
+	levelAtRound map[int][]int
+	intro        []int
+	widths       []int
+}
+
+// verifyLevelsPath checks the round-0 path of a query: it authenticates
+// level 0's pair (layer) and, as injections, the pair of every other level,
+// whose rows must be the query row shifted to their intro round.
+func verifyLevelsPath(root hash.Digest, s int, layer QueryLayer, levelQueries []QueryLayer, lv levelsCheck, p Params) error {
+	lo, hi := siblingRows(layer.Row)
+	if layer.Path.LeafIdx != lo/2 {
+		return fmt.Errorf("round 0: proof pair = %d, want %d", layer.Path.LeafIdx, lo/2)
+	}
+	pairLeaf := func(q QueryLayer) hash.Digest {
+		if q.Field == field.Ext {
+			return p.LeafHasher.HashLeafPair(RawRow{RawRowExt: []ext.E6{q.LeafPExt}}, RawRow{RawRowExt: []ext.E6{q.LeafQExt}})
+		}
+		return p.LeafHasher.HashLeafPair(RawRow{RawRowBase: []koalabear.Element{q.LeafPBase}}, RawRow{RawRowBase: []koalabear.Element{q.LeafQBase}})
+	}
+	path := layer.Path
+	path.InjectionLeaves = make([]hash.Digest, len(levelQueries))
+	for i, q := range levelQueries {
+		if q.Field != layer.Field {
+			return fmt.Errorf("level %d: query layer is %s, level 0 is %s", i+1, q.Field, layer.Field)
+		}
+		if want := s >> lv.intro[i+1]; q.Row != want {
+			return fmt.Errorf("level %d: query row = %d, want %d", i+1, q.Row, want)
+		}
+		path.InjectionLeaves[i] = pairLeaf(q)
+	}
+	if !merkle.VerifyWithInjections(root, path, pairLeaf(layer), lv.widths, p.NodeHasher) {
+		return fmt.Errorf("round 0: levels tree path invalid for row pair (%d,%d)", lo, hi)
+	}
+	return nil
+}
+
+func verifyBase(p Params, numLevels int, lv levelsCheck, roots []hash.Digest, prf Proof, ts *fiatshamir.Transcript) error {
 	numExtraLevels := numLevels - 1
+	gammaOut, err := deriveLevelGammas(ts, numLevels, prf.LevelsRoot)
+	if err != nil {
+		return fmt.Errorf("fri: Verify: %w", err)
+	}
 
 	// ── Replay commit phase (interleaved, same order as Prove) ───────────────
 	gammas := make([]koalabear.Element, numLevels) // gammas[l] for levels[l], l = 1..numLevels-1
 	alphas := make([]koalabear.Element, p.numRounds)
 
+	for l := 1; l < numLevels; l++ {
+		gammas[l].Set(&gammaOut[l][0])
+	}
 	for j := 0; j < p.numRounds; j++ {
-		for i, l := range levelAtRound[j] {
-			challenge, err := deriveLevelGamma(ts, l, levelRoots[l], j == 0 && i == 0, levelRoots[0])
-			if err != nil {
-				return fmt.Errorf("fri: Verify: %w", err)
-			}
-			gammas[l].Set(&challenge[0])
-		}
 
 		name := foldName(j)
 		root := roots[j]
@@ -813,8 +886,8 @@ func verifyBase(p Params, levelRoots, levelRootsExtra []hash.Digest, levelAtRoun
 			}
 		}
 
-		if err := checkQuery(s, prf.FRIQueries[k], levelQueriesForQuery, levelRootsExtra,
-			levelAtRound, gammas, roots, prf.FinalPolyBase, alphas, p); err != nil {
+		if err := checkQuery(s, prf.FRIQueries[k], levelQueriesForQuery, lv,
+			gammas, roots, prf.FinalPolyBase, alphas, p); err != nil {
 			return fmt.Errorf("fri: Verify: query %d failed: %w", k, err)
 		}
 	}
@@ -822,21 +895,20 @@ func verifyBase(p Params, levelRoots, levelRootsExtra []hash.Digest, levelAtRoun
 	return nil
 }
 
-func verifyExt(p Params, levelRoots, levelRootsExtra []hash.Digest, levelAtRound map[int][]int, roots []hash.Digest, prf Proof, ts *fiatshamir.Transcript) error {
-	numLevels := len(levelRoots)
+func verifyExt(p Params, numLevels int, lv levelsCheck, roots []hash.Digest, prf Proof, ts *fiatshamir.Transcript) error {
 	numExtraLevels := numLevels - 1
+	gammaOut, err := deriveLevelGammas(ts, numLevels, prf.LevelsRoot)
+	if err != nil {
+		return fmt.Errorf("fri: Verify: %w", err)
+	}
 
 	gammas := make([]ext.E6, numLevels)
 	alphas := make([]ext.E6, p.numRounds)
 
+	for l := 1; l < numLevels; l++ {
+		gammas[l] = hash.OutputToExt(gammaOut[l])
+	}
 	for j := 0; j < p.numRounds; j++ {
-		for i, l := range levelAtRound[j] {
-			challenge, err := deriveLevelGamma(ts, l, levelRoots[l], j == 0 && i == 0, levelRoots[0])
-			if err != nil {
-				return fmt.Errorf("fri: Verify: %w", err)
-			}
-			gammas[l] = hash.OutputToExt(challenge)
-		}
 
 		name := foldName(j)
 		root := roots[j]
@@ -875,8 +947,8 @@ func verifyExt(p Params, levelRoots, levelRootsExtra []hash.Digest, levelAtRound
 			}
 		}
 
-		if err := checkQueryExt(s, prf.FRIQueries[k], levelQueriesForQuery, levelRootsExtra,
-			levelAtRound, gammas, roots, prf.FinalPolyExt, alphas, p); err != nil {
+		if err := checkQueryExt(s, prf.FRIQueries[k], levelQueriesForQuery, lv,
+			gammas, roots, prf.FinalPolyExt, alphas, p); err != nil {
 			return fmt.Errorf("fri: Verify: query %d failed: %w", k, err)
 		}
 	}
@@ -1152,29 +1224,22 @@ func verifyAdjacentExtOpening(root hash.Digest, layer QueryLayer, context string
 }
 
 // checkQuery verifies one base-field multi-degree FRI query:
-//   - Merkle proofs for all level polynomial openings
+//   - the levels-tree path, authenticating every level's opening (round 0)
 //   - Merkle proofs and fold consistency for the running-polynomial path
 //   - Batching consistency at each level introduction round
 //
 // levelQueriesForQuery[l-1] holds the opening for levels[l] (l 0-based index offset by 1).
-// levelRoots[l-1] is the Merkle root of levels[l].Evals (l 0-based offset by 1).
 // gammas[l] is the batching challenge for levels[l] (1-based; gammas[0] unused).
 func checkQuery(s int, fq Query,
 	levelQueriesForQuery []QueryLayer,
-	levelRoots []hash.Digest,
-	levelAtRound map[int][]int,
+	lv levelsCheck,
 	gammas []koalabear.Element,
 	roots []hash.Digest,
 	finalPoly []koalabear.Element,
 	alphas []koalabear.Element,
 	p Params) error {
 
-	// Verify Merkle proofs for all level polynomial openings.
-	for lIdx, ld := range levelQueriesForQuery {
-		if err := verifyAdjacentBaseOpening(levelRoots[lIdx], ld, fmt.Sprintf("level %d", lIdx+1), p); err != nil {
-			return err
-		}
-	}
+	levelAtRound := lv.levelAtRound
 
 	// Verify running-polynomial fold path with batching consistency checks.
 	for j := 0; j < p.numRounds; j++ {
@@ -1188,7 +1253,11 @@ func checkQuery(s int, fq Query,
 		if layer.Row != row {
 			return fmt.Errorf("round %d: query row = %d, want %d", j, layer.Row, row)
 		}
-		if err := verifyAdjacentBaseOpening(roots[j], layer, fmt.Sprintf("round %d", j), p); err != nil {
+		if j == 0 {
+			if err := verifyLevelsPath(roots[0], s, layer, levelQueriesForQuery, lv, p); err != nil {
+				return err
+			}
+		} else if err := verifyAdjacentBaseOpening(roots[j], layer, fmt.Sprintf("round %d", j), p); err != nil {
 			return err
 		}
 
@@ -1271,19 +1340,14 @@ func checkQuery(s int, fq Query,
 
 func checkQueryExt(s int, fq Query,
 	levelQueriesForQuery []QueryLayer,
-	levelRoots []hash.Digest,
-	levelAtRound map[int][]int,
+	lv levelsCheck,
 	gammas []ext.E6,
 	roots []hash.Digest,
 	finalPoly []ext.E6,
 	alphas []ext.E6,
 	p Params) error {
 
-	for lIdx, ld := range levelQueriesForQuery {
-		if err := verifyAdjacentExtOpening(levelRoots[lIdx], ld, fmt.Sprintf("level %d", lIdx+1), p); err != nil {
-			return err
-		}
-	}
+	levelAtRound := lv.levelAtRound
 
 	for j := 0; j < p.numRounds; j++ {
 		Nj := int(p.domainsLight[j].cardinality)
@@ -1296,7 +1360,11 @@ func checkQueryExt(s int, fq Query,
 		if layer.Row != row {
 			return fmt.Errorf("round %d: query row = %d, want %d", j, layer.Row, row)
 		}
-		if err := verifyAdjacentExtOpening(roots[j], layer, fmt.Sprintf("round %d", j), p); err != nil {
+		if j == 0 {
+			if err := verifyLevelsPath(roots[0], s, layer, levelQueriesForQuery, lv, p); err != nil {
+				return err
+			}
+		} else if err := verifyAdjacentExtOpening(roots[j], layer, fmt.Sprintf("round %d", j), p); err != nil {
 			return err
 		}
 

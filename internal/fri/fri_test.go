@@ -22,7 +22,6 @@ import (
 	fiatshamir "github.com/consensys/loom/internal/fiat-shamir"
 	"github.com/consensys/loom/internal/fri"
 	"github.com/consensys/loom/internal/hash"
-	"github.com/consensys/loom/internal/merkle"
 )
 
 func freshTS() *fiatshamir.Transcript {
@@ -44,26 +43,6 @@ func randomExtPoly(n int) []ext.E6 {
 		elems[i].MustSetRandom()
 	}
 	return elems
-}
-
-// buildLevelTree builds the pair-leaf Merkle tree expected by FRI for a
-// single-poly level (helper around p.BuildLevelTree).
-func buildLevelTree(t *testing.T, p fri.Params, layer []koalabear.Element) *merkle.Tree {
-	t.Helper()
-	tree, err := p.BuildLevelTree(layer)
-	if err != nil {
-		t.Fatalf("BuildLevelTree: %v", err)
-	}
-	return tree
-}
-
-func buildLevelTreeExt(t *testing.T, p fri.Params, layer []ext.E6) *merkle.Tree {
-	t.Helper()
-	tree, err := p.BuildLevelTreeExt(layer)
-	if err != nil {
-		t.Fatalf("BuildLevelTreeExt: %v", err)
-	}
-	return tree
 }
 
 func testParams(t *testing.T, N, D, queries int) fri.Params {
@@ -100,19 +79,17 @@ func TestProveVerify(t *testing.T) {
 				t.Fatalf("Encode: %v", err)
 			}
 
-			tree := buildLevelTree(t, p, evals)
 			tsP := freshTS()
 			prf, _, err := fri.Prove(p, []fri.Level{{
 				D:     p.D,
 				Evals: fri.LevelEvals{Base: evals},
-				Tree:  tree,
 			}}, tsP)
 			if err != nil {
 				t.Fatalf("Prove: %v", err)
 			}
 
 			tsV := freshTS()
-			if err := fri.Verify(p, []hash.Digest{tree.Root()}, []int{p.D}, prf, tsV); err != nil {
+			if err := fri.Verify(p, []int{p.D}, prf, tsV); err != nil {
 				t.Fatalf("Verify: %v", err)
 			}
 		})
@@ -128,19 +105,17 @@ func TestProveVerifyExtRail(t *testing.T) {
 		t.Fatalf("EncodeExt: %v", err)
 	}
 
-	tree := buildLevelTreeExt(t, p, evals)
 	tsP := freshTS()
 	prf, _, err := fri.Prove(p, []fri.Level{{
 		D:     p.D,
 		Evals: fri.LevelEvals{Ext: evals},
-		Tree:  tree,
 	}}, tsP)
 	if err != nil {
 		t.Fatalf("Prove: %v", err)
 	}
 
 	tsV := freshTS()
-	if err := fri.Verify(p, []hash.Digest{tree.Root()}, []int{p.D}, prf, tsV); err != nil {
+	if err := fri.Verify(p, []int{p.D}, prf, tsV); err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
 }
@@ -160,20 +135,15 @@ func TestProveVerifyExtRailWithExtraLevel(t *testing.T) {
 		t.Fatalf("EncodeExt extra level: %v", err)
 	}
 
-	tree0 := buildLevelTreeExt(t, p, evals0)
-	tree1 := buildLevelTreeExt(t, p, evals1)
-
 	tsP := freshTS()
 	prf, _, err := fri.Prove(p, []fri.Level{
 		{
 			D:     p.D,
 			Evals: fri.LevelEvals{Ext: evals0},
-			Tree:  tree0,
 		},
 		{
 			D:     pSmall.D,
 			Evals: fri.LevelEvals{Ext: evals1},
-			Tree:  tree1,
 		},
 	}, tsP)
 	if err != nil {
@@ -184,7 +154,7 @@ func TestProveVerifyExtRailWithExtraLevel(t *testing.T) {
 	}
 
 	tsV := freshTS()
-	if err := fri.Verify(p, []hash.Digest{tree0.Root(), tree1.Root()}, []int{p.D, pSmall.D}, prf, tsV); err != nil {
+	if err := fri.Verify(p, []int{p.D, pSmall.D}, prf, tsV); err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
 }
@@ -197,13 +167,11 @@ func TestProveVerifyWithGrinding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Encode: %v", err)
 	}
-	tree := buildLevelTree(t, p, evals)
 
 	tsP := freshTS()
 	prf, _, err := fri.Prove(p, []fri.Level{{
 		D:     p.D,
 		Evals: fri.LevelEvals{Base: evals},
-		Tree:  tree,
 	}}, tsP)
 	if err != nil {
 		t.Fatalf("Prove: %v", err)
@@ -213,14 +181,14 @@ func TestProveVerifyWithGrinding(t *testing.T) {
 	}
 
 	tsV := freshTS()
-	if err := fri.Verify(p, []hash.Digest{tree.Root()}, []int{p.D}, prf, tsV); err != nil {
+	if err := fri.Verify(p, []int{p.D}, prf, tsV); err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
 
 	missingPoW := prf
 	missingPoW.PoW = nil
 	tsMissing := freshTS()
-	if err := fri.Verify(p, []hash.Digest{tree.Root()}, []int{p.D}, missingPoW, tsMissing); err == nil {
+	if err := fri.Verify(p, []int{p.D}, missingPoW, tsMissing); err == nil {
 		t.Fatalf("Verify accepted a proof missing FRI proof of work")
 	}
 
@@ -232,7 +200,7 @@ func TestProveVerifyWithGrinding(t *testing.T) {
 		break
 	}
 	tsBad := freshTS()
-	if err := fri.Verify(p, []hash.Digest{tree.Root()}, []int{p.D}, badPoW, tsBad); err == nil {
+	if err := fri.Verify(p, []int{p.D}, badPoW, tsBad); err == nil {
 		t.Fatalf("Verify accepted a proof with mismatched FRI proof of work")
 	}
 }
@@ -245,13 +213,11 @@ func TestProveVerifyExtRailWithGrinding(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EncodeExt: %v", err)
 	}
-	tree := buildLevelTreeExt(t, p, evals)
 
 	tsP := freshTS()
 	prf, _, err := fri.Prove(p, []fri.Level{{
 		D:     p.D,
 		Evals: fri.LevelEvals{Ext: evals},
-		Tree:  tree,
 	}}, tsP)
 	if err != nil {
 		t.Fatalf("Prove: %v", err)
@@ -261,7 +227,7 @@ func TestProveVerifyExtRailWithGrinding(t *testing.T) {
 	}
 
 	tsV := freshTS()
-	if err := fri.Verify(p, []hash.Digest{tree.Root()}, []int{p.D}, prf, tsV); err != nil {
+	if err := fri.Verify(p, []int{p.D}, prf, tsV); err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
 }
@@ -271,21 +237,18 @@ func TestVerifyRejectsWrongRoot(t *testing.T) {
 	p := testParams(t, 64, 4, 4)
 	evals, _ := p.Encode(randomPoly(p.D))
 
-	tree := buildLevelTree(t, p, evals)
 	tsP := freshTS()
 	prf, _, _ := fri.Prove(p, []fri.Level{{
 		D:     p.D,
 		Evals: fri.LevelEvals{Base: evals},
-		Tree:  tree,
 	}}, tsP)
 
-	var badRoot hash.Digest
-	for i := range badRoot {
-		badRoot[i].SetRandom()
+	for i := range prf.LevelsRoot {
+		prf.LevelsRoot[i].SetRandom()
 	}
 
 	tsV := freshTS()
-	if err := fri.Verify(p, []hash.Digest{badRoot}, []int{p.D}, prf, tsV); err == nil {
+	if err := fri.Verify(p, []int{p.D}, prf, tsV); err == nil {
 		t.Fatal("Verify accepted a proof with a wrong root0")
 	}
 }
@@ -294,13 +257,11 @@ func TestVerifyRejectsWrongRoot(t *testing.T) {
 func TestVerifyRejectsFlippedLeaf(t *testing.T) {
 	p := testParams(t, 64, 4, 4)
 	evals, _ := p.Encode(randomPoly(p.D))
-	tree := buildLevelTree(t, p, evals)
 
 	tsP := freshTS()
 	prf, _, err := fri.Prove(p, []fri.Level{{
 		D:     p.D,
 		Evals: fri.LevelEvals{Base: evals},
-		Tree:  tree,
 	}}, tsP)
 	if err != nil {
 		t.Fatalf("Prove: %v", err)
@@ -310,7 +271,7 @@ func TestVerifyRejectsFlippedLeaf(t *testing.T) {
 	prf.FRIQueries[0].Layers[0].LeafPBase.SetRandom()
 
 	tsV := freshTS()
-	if err := fri.Verify(p, []hash.Digest{tree.Root()}, []int{p.D}, prf, tsV); err == nil {
+	if err := fri.Verify(p, []int{p.D}, prf, tsV); err == nil {
 		t.Fatal("Verify accepted a proof with a corrupted leaf")
 	}
 }
@@ -318,13 +279,11 @@ func TestVerifyRejectsFlippedLeaf(t *testing.T) {
 func TestVerifyRejectsFlippedLeafQ(t *testing.T) {
 	p := testParams(t, 64, 4, 4)
 	evals, _ := p.Encode(randomPoly(p.D))
-	tree := buildLevelTree(t, p, evals)
 
 	tsP := freshTS()
 	prf, _, err := fri.Prove(p, []fri.Level{{
 		D:     p.D,
 		Evals: fri.LevelEvals{Base: evals},
-		Tree:  tree,
 	}}, tsP)
 	if err != nil {
 		t.Fatalf("Prove: %v", err)
@@ -333,7 +292,7 @@ func TestVerifyRejectsFlippedLeafQ(t *testing.T) {
 	prf.FRIQueries[0].Layers[0].LeafQBase.SetRandom()
 
 	tsV := freshTS()
-	if err := fri.Verify(p, []hash.Digest{tree.Root()}, []int{p.D}, prf, tsV); err == nil {
+	if err := fri.Verify(p, []int{p.D}, prf, tsV); err == nil {
 		t.Fatal("Verify accepted a proof with a corrupted second leaf")
 	}
 }
@@ -341,13 +300,11 @@ func TestVerifyRejectsFlippedLeafQ(t *testing.T) {
 func TestVerifyRejectsFlippedExtLeaf(t *testing.T) {
 	p := testParams(t, 64, 4, 4)
 	evals, _ := p.EncodeExt(randomExtPoly(p.D))
-	tree := buildLevelTreeExt(t, p, evals)
 
 	tsP := freshTS()
 	prf, _, err := fri.Prove(p, []fri.Level{{
 		D:     p.D,
 		Evals: fri.LevelEvals{Ext: evals},
-		Tree:  tree,
 	}}, tsP)
 	if err != nil {
 		t.Fatalf("Prove: %v", err)
@@ -356,7 +313,7 @@ func TestVerifyRejectsFlippedExtLeaf(t *testing.T) {
 	prf.FRIQueries[0].Layers[0].LeafPExt.MustSetRandom()
 
 	tsV := freshTS()
-	if err := fri.Verify(p, []hash.Digest{tree.Root()}, []int{p.D}, prf, tsV); err == nil {
+	if err := fri.Verify(p, []int{p.D}, prf, tsV); err == nil {
 		t.Fatal("Verify accepted a proof with a corrupted ext leaf")
 	}
 }
@@ -364,13 +321,11 @@ func TestVerifyRejectsFlippedExtLeaf(t *testing.T) {
 func TestVerifyRejectsFlippedExtLeafQ(t *testing.T) {
 	p := testParams(t, 64, 4, 4)
 	evals, _ := p.EncodeExt(randomExtPoly(p.D))
-	tree := buildLevelTreeExt(t, p, evals)
 
 	tsP := freshTS()
 	prf, _, err := fri.Prove(p, []fri.Level{{
 		D:     p.D,
 		Evals: fri.LevelEvals{Ext: evals},
-		Tree:  tree,
 	}}, tsP)
 	if err != nil {
 		t.Fatalf("Prove: %v", err)
@@ -379,7 +334,7 @@ func TestVerifyRejectsFlippedExtLeafQ(t *testing.T) {
 	prf.FRIQueries[0].Layers[0].LeafQExt.MustSetRandom()
 
 	tsV := freshTS()
-	if err := fri.Verify(p, []hash.Digest{tree.Root()}, []int{p.D}, prf, tsV); err == nil {
+	if err := fri.Verify(p, []int{p.D}, prf, tsV); err == nil {
 		t.Fatal("Verify accepted a proof with a corrupted second ext leaf")
 	}
 }
@@ -403,74 +358,91 @@ func log2ForTest(n int) int {
 
 // sharedLevels builds levels of the given sizes D (decreasing), encoded at the
 // rate of p, on the extension or the base rail.
-func sharedLevels(t *testing.T, p fri.Params, ds []int, extRail bool) ([]fri.Level, []hash.Digest) {
+func sharedLevels(t *testing.T, p fri.Params, ds []int, extRail bool) []fri.Level {
 	t.Helper()
 	rate := p.N / p.D
 	var levels []fri.Level
-	var roots []hash.Digest
 	for _, d := range ds {
 		pl := testParams(t, rate*d, d, p.NumQueries)
-		var lvl fri.Level
-		lvl.D = d
+		lvl := fri.Level{D: d}
 		if extRail {
 			evals, err := pl.EncodeExt(randomExtPoly(d))
 			if err != nil {
 				t.Fatal(err)
 			}
-			lvl.Evals, lvl.Tree = fri.LevelEvals{Ext: evals}, buildLevelTreeExt(t, p, evals)
+			lvl.Evals = fri.LevelEvals{Ext: evals}
 		} else {
 			evals, err := pl.Encode(randomPoly(d))
 			if err != nil {
 				t.Fatal(err)
 			}
-			lvl.Evals, lvl.Tree = fri.LevelEvals{Base: evals}, buildLevelTree(t, p, evals)
+			lvl.Evals = fri.LevelEvals{Base: evals}
 		}
 		levels = append(levels, lvl)
-		roots = append(roots, lvl.Tree.Root())
 	}
-	return levels, roots
+	return levels
 }
 
 // TestProveVerifySharedIntroRounds has three levels entering at round 0 and
-// two entering at round 2.
+// two entering at round 2, all committed in the levels tree.
 func TestProveVerifySharedIntroRounds(t *testing.T) {
 	ds := []int{16, 16, 16, 4, 4}
 	for _, extRail := range []bool{true, false} {
 		t.Run(fmt.Sprintf("ext=%v", extRail), func(t *testing.T) {
 			p := testParams(t, 64, 16, 4)
-			levels, roots := sharedLevels(t, p, ds, extRail)
-			prf, _, err := fri.Prove(p, levels, freshTS())
+			prf, _, err := fri.Prove(p, sharedLevels(t, p, ds, extRail), freshTS())
 			if err != nil {
 				t.Fatalf("Prove: %v", err)
 			}
-			if err := fri.Verify(p, roots, ds, prf, freshTS()); err != nil {
+			if err := fri.Verify(p, ds, prf, freshTS()); err != nil {
 				t.Fatalf("Verify: %v", err)
 			}
+			for k, q := range prf.FRIQueries {
+				if n := len(q.Layers[0].Path.InjectionLeaves); n != 0 {
+					t.Fatalf("query %d: round-0 path carries %d injection leaves, want 0", k, n)
+				}
+				for l := range prf.LevelQueries {
+					if n := len(prf.LevelQueries[l][k].Path.Siblings); n != 0 {
+						t.Fatalf("query %d level %d: opening carries a path", k, l+1)
+					}
+				}
+			}
 
-			tamperLevel := func(l int) fri.Proof {
+			clone := func() fri.Proof {
 				bad := prf
 				bad.LevelQueries = make([][]fri.QueryLayer, len(prf.LevelQueries))
 				for i := range prf.LevelQueries {
 					bad.LevelQueries[i] = append([]fri.QueryLayer(nil), prf.LevelQueries[i]...)
 				}
-				q := &bad.LevelQueries[l-1][0]
-				q.LeafPExt.B0.A0.SetUint64(7)
-				q.LeafPBase.SetUint64(7)
+				bad.FRIQueries = append([]fri.Query(nil), prf.FRIQueries...)
+				bad.FRIQueries[0].Layers = append([]fri.QueryLayer(nil), prf.FRIQueries[0].Layers...)
 				return bad
 			}
 			// level 2 enters at round 0, level 4 is the second level of round 2
 			for _, l := range []int{2, 4} {
-				if err := fri.Verify(p, roots, ds, tamperLevel(l), freshTS()); err == nil {
+				bad := clone()
+				q := &bad.LevelQueries[l-1][0]
+				q.LeafQExt.B0.A0.SetUint64(7)
+				q.LeafQBase.SetUint64(7)
+				if err := fri.Verify(p, ds, bad, freshTS()); err == nil {
 					t.Fatalf("tampered level %d opening accepted", l)
 				}
 			}
-			// the round-0 levels in another order: their γs differ
-			swapped := append([]hash.Digest(nil), roots...)
-			swapped[0], swapped[1] = swapped[1], swapped[0]
-			if err := fri.Verify(p, swapped, ds, prf, freshTS()); err == nil {
-				t.Fatal("swapped round-0 roots accepted")
+			bad := clone()
+			bad.FRIQueries[0].Layers[0].LeafPExt.B1.A1.SetUint64(7)
+			bad.FRIQueries[0].Layers[0].LeafPBase.SetUint64(7)
+			if err := fri.Verify(p, ds, bad, freshTS()); err == nil {
+				t.Fatal("tampered level 0 opening accepted")
 			}
-			if err := fri.Verify(p, roots, []int{16, 4, 16, 4, 16}, prf, freshTS()); err == nil {
+			bad = clone()
+			bad.LevelsRoot[3].SetUint64(7)
+			if err := fri.Verify(p, ds, bad, freshTS()); err == nil {
+				t.Fatal("tampered levels root accepted")
+			}
+			if err := fri.Verify(p, []int{16, 16, 4, 4, 4}, prf, freshTS()); err == nil {
+				t.Fatal("other level sizes accepted")
+			}
+			if err := fri.Verify(p, []int{16, 4, 16, 4, 16}, prf, freshTS()); err == nil {
 				t.Fatal("increasing level sizes accepted")
 			}
 		})

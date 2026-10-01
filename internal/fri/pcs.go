@@ -17,7 +17,6 @@ import (
 	"fmt"
 
 	ext "github.com/consensys/gnark-crypto/field/koalabear/extensions"
-	"github.com/consensys/loom/internal/hash"
 )
 
 // PCS is a batch polynomial commitment scheme built on top of RSCommit and
@@ -121,20 +120,18 @@ type BatchClaimedValues = []GroupClaimedValues
 //
 //   - ClaimedValues[b] is the GroupClaimedValues slice for batches[b], in
 //     the same order Open / Verify received batches and shifts.
-//   - DeepQuotientRoots is one Merkle root per DEEP class (one per distinct
-//     native size by default, see WithDeepClasses), in FRI level order:
-//     decreasing size, equal sizes in class order.
 //   - FRIProof is the multi-degree FRI proof on the DEEP-quotient
-//     codewords.
+//     codewords, one level per DEEP class (one per distinct native size by
+//     default, see WithDeepClasses), in level order: decreasing size, equal
+//     sizes in class order. FRIProof.LevelsRoot commits all of them.
 //   - PointSamplings[q][b] is the WMerkleProof opening batches[b] at the
 //     q-th FRI query position. Each WMerkleProof carries one top lo/hi
 //     RawRowPair, one top Merkle path, and one compact injected row pair
 //     per smaller Group in decreasing-size order.
 type OpeningProof struct {
-	ClaimedValues     []BatchClaimedValues
-	DeepQuotientRoots []hash.Digest
-	FRIProof          Proof
-	PointSamplings    [][]WMerkleProof
+	ClaimedValues  []BatchClaimedValues
+	FRIProof       Proof
+	PointSamplings [][]WMerkleProof
 }
 
 // Commit commits to one Batch of polynomials and returns the per-batch

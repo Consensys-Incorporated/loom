@@ -203,7 +203,7 @@ func main() {
 	fmt.Printf("verify wall: %s\n", fmtDur(verifyWall))
 	fmt.Printf("proof size : %d B (gob)\n", buf.Len())
 	fmt.Printf("proof      : %d commitments, %d FRI levels, %d query samplings\n",
-		len(prf.Commitments), len(prf.Opening.DeepQuotientRoots), len(prf.Opening.PointSamplings))
+		len(prf.Commitments), len(prf.Opening.FRIProof.LevelQueries)+1, len(prf.Opening.PointSamplings))
 }
 
 func resolveHashBackend(name string) loom.HashBackend {

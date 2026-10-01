@@ -117,8 +117,8 @@ func main() {
 
 	fmt.Println()
 	printSummary(phases, runtime.GOMAXPROCS(0))
-	fmt.Printf("\nproof: %d DEEP roots, %d FRI roots, %d query samplings\n",
-		len(proof.DeepQuotientRoots), len(proof.FRIProof.FRIRoots), len(proof.PointSamplings))
+	fmt.Printf("\nproof: %d DEEP levels, %d FRI roots, %d query samplings\n",
+		len(proof.FRIProof.LevelQueries)+1, len(proof.FRIProof.FRIRoots), len(proof.PointSamplings))
 }
 
 func mustCreate(path string) *os.File {

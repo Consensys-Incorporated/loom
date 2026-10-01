@@ -80,8 +80,8 @@ func TestPCSVerifyRoundtripSingleSizeBaseExtMultiShift(t *testing.T) {
 	if err := pcs.Verify(roots, shapes, shifts, zeta, openProof, verifierFS); err != nil {
 		t.Fatalf("PCS.Verify rejected a valid single-size OpeningProof: %v", err)
 	}
-	if got, want := len(openProof.DeepQuotientRoots), 1; got != want {
-		t.Fatalf("DeepQuotientRoots = %d, want %d", got, want)
+	if got, want := len(openProof.FRIProof.LevelQueries)+1, 1; got != want {
+		t.Fatalf("DEEP levels = %d, want %d", got, want)
 	}
 	if got, want := len(openProof.FRIProof.LevelQueries), 0; got != want {
 		t.Fatalf("FRIProof.LevelQueries = %d, want %d", got, want)
@@ -100,8 +100,8 @@ func TestPCSVerifyRoundtripMultiSizeBatch(t *testing.T) {
 	if err := pcs.Verify(roots, shapes, shifts, zeta, openProof, verifierFS); err != nil {
 		t.Fatalf("PCS.Verify rejected a valid multi-size OpeningProof: %v", err)
 	}
-	if got, want := len(openProof.DeepQuotientRoots), 2; got != want {
-		t.Fatalf("DeepQuotientRoots = %d, want %d", got, want)
+	if got, want := len(openProof.FRIProof.LevelQueries)+1, 2; got != want {
+		t.Fatalf("DEEP levels = %d, want %d", got, want)
 	}
 	if got, want := len(openProof.FRIProof.LevelQueries), 1; got != want {
 		t.Fatalf("FRIProof.LevelQueries = %d, want %d", got, want)
@@ -540,12 +540,13 @@ func TestPCSVerifyShapeMismatch(t *testing.T) {
 		}
 	})
 
-	t.Run("DeepQuotientRoots length mismatch", func(t *testing.T) {
+	t.Run("DEEP level count mismatch", func(t *testing.T) {
 		fs := buildVerifierTranscript(t, committed)
 		tampered := openProof
-		tampered.DeepQuotientRoots = append([]hash.Digest{}, openProof.DeepQuotientRoots[:len(openProof.DeepQuotientRoots)-1]...)
+		tampered.FRIProof.LevelQueries = append(append([][]QueryLayer{}, openProof.FRIProof.LevelQueries...), openProof.FRIProof.LevelQueries...)
+		tampered.FRIProof.LevelQueries = append(tampered.FRIProof.LevelQueries, nil)
 		if err := pcs.Verify(roots, shapes, shifts, zeta, tampered, fs); err == nil {
-			t.Fatal("expected DeepQuotientRoots-length mismatch error")
+			t.Fatal("expected DEEP level count mismatch error")
 		}
 	})
 }
@@ -732,8 +733,8 @@ func TestPCSVerifyDeepClasses(t *testing.T) {
 	committed, openProof, params, zeta := runOpenFixture(t, batches, shifts, rate, numQueries, WithDeepClasses(classes))
 	roots, shapes := rootsAndShapes(committed)
 	pcs := NewPCSWithParams(params)
-	if got := len(openProof.DeepQuotientRoots); got != 3 {
-		t.Fatalf("DeepQuotientRoots = %d, want 3", got)
+	if got := len(openProof.FRIProof.LevelQueries) + 1; got != 3 {
+		t.Fatalf("DEEP levels = %d, want 3", got)
 	}
 	if err := pcs.Verify(roots, shapes, shifts, zeta, openProof, buildVerifierTranscript(t, committed), WithDeepClasses(classes)); err != nil {
 		t.Fatalf("PCS.Verify rejected valid DEEP classes: %v", err)

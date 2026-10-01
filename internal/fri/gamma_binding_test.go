@@ -19,34 +19,36 @@ import (
 	"github.com/consensys/loom/internal/hash"
 )
 
-// A level entering at round 0 is combined with level 0, whose root is
-// otherwise bound only at fri_fold_0, after the level's γ. The γ must depend
-// on level 0's root, or the prover could choose level 0 after seeing γ.
-func TestRound0GammaBindsLevel0Root(t *testing.T) {
-	gammaOf := func(root0 hash.Digest) [8]uint64 {
+// Every level is combined with the others, so every γ must come after the
+// commitment to all the levels: the first γ binds the levels root, and the
+// next ones chain on it.
+func TestLevelGammasBindLevelsRoot(t *testing.T) {
+	gammasOf := func(root hash.Digest) [][8]uint64 {
 		p, err := NewParams(64, 16, 2, DefaultLeafHasher, DefaultNodeHasher, WoFullDomainAllocation())
 		if err != nil {
 			t.Fatal(err)
 		}
 		ts := freshTranscriptForTest()
-		levelAtRound := map[int][]int{0: {1}}
-		registerChallenges(p, levelAtRound, ts)
-		var root1 hash.Digest
-		root1[0].SetUint64(11)
-		c, err := deriveLevelGamma(ts, 1, root1, true, root0)
+		registerChallenges(p, 3, ts)
+		cs, err := deriveLevelGammas(ts, 3, root)
 		if err != nil {
 			t.Fatal(err)
 		}
-		var res [8]uint64
-		for i := range c {
-			res[i] = c[i].Uint64()
+		res := make([][8]uint64, len(cs))
+		for l, c := range cs {
+			for i := range c {
+				res[l][i] = c[i].Uint64()
+			}
 		}
 		return res
 	}
 	var a, b hash.Digest
 	a[0].SetUint64(1)
 	b[0].SetUint64(2)
-	if gammaOf(a) == gammaOf(b) {
-		t.Fatal("the round-0 γ does not depend on level 0's root")
+	ga, gb := gammasOf(a), gammasOf(b)
+	for l := 1; l < 3; l++ {
+		if ga[l] == gb[l] {
+			t.Fatalf("γ_%d does not depend on the levels root", l)
+		}
 	}
 }

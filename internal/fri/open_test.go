@@ -29,7 +29,7 @@ import (
 //
 // What we check:
 //   - ClaimedValues mirrors `shifts` shape exactly.
-//   - DeepQuotientRoots length == number of distinct native sizes.
+//   - number of DEEP levels == number of distinct native sizes.
 //   - FRIProof is structurally populated (non-nil FinalPoly, query count
 //     matches Params.NumQueries).
 //   - PointSamplings has shape [NumQueries][len(batches)] and each
@@ -99,9 +99,9 @@ func TestOpenShape(t *testing.T) {
 		}
 	}
 
-	// 2- One DEEP root per distinct native size {8, 4}.
-	if got, want := len(openProof.DeepQuotientRoots), 2; got != want {
-		t.Fatalf("DeepQuotientRoots length = %d, want %d", got, want)
+	// 2- One DEEP level per distinct native size {8, 4}.
+	if got, want := len(openProof.FRIProof.LevelQueries)+1, 2; got != want {
+		t.Fatalf("DEEP levels = %d, want %d", got, want)
 	}
 
 	// 3- FRIProof is populated. The DEEP-quotient rail is extension, so
@@ -294,11 +294,11 @@ func TestOpenFRIVerifyRoundtrip(t *testing.T) {
 	// sizesDesc is just the set of distinct group sizes in descending
 	// order -- the same enumeration Open used to build FRI levels.
 	sizesDesc := sizesDescFromSizes(sizes)
-	if got := len(openProof.DeepQuotientRoots); got != len(sizesDesc) {
-		t.Fatalf("DeepQuotientRoots = %d, sizesDesc = %d", got, len(sizesDesc))
+	if got := len(openProof.FRIProof.LevelQueries) + 1; got != len(sizesDesc) {
+		t.Fatalf("DEEP levels = %d, sizesDesc = %d", got, len(sizesDesc))
 	}
 
-	if err := Verify(params, openProof.DeepQuotientRoots, sizesDesc, openProof.FRIProof, verifierFS); err != nil {
+	if err := Verify(params, sizesDesc, openProof.FRIProof, verifierFS); err != nil {
 		t.Fatalf("fri.Verify: %v", err)
 	}
 

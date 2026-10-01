@@ -92,7 +92,7 @@ func (pcs *PCS) ClaimedValuesOnly(
 // itself; the caller MUST NOT pre-register any of those names. Open is
 // responsible for binding claimed values in per-polynomial DEEP order,
 // sampling alpha_DEEP, building per-size DEEP-quotient codewords,
-// committing them as multi-degree FRI levels, running fri.Prove, and
+// handing them to fri.Prove as multi-degree FRI levels, and
 // packaging per-query / per-batch Merkle openings.
 func (pcs *PCS) Open(
 	batches []Batch,
@@ -174,25 +174,19 @@ func (pcs *PCS) Open(
 		return OpeningProof{}, err
 	}
 
-	// 7- Commit each class's DQ as a fresh FRI level, in level order
-	//    (decreasing size, equal sizes in class order). Each level enters at
-	//    the round whose running polynomial bound matches its D.
+	// 7- One FRI level per class, in level order (decreasing size, equal
+	//    sizes in class order). Each level enters at the round whose running
+	//    polynomial bound matches its D.
 	levels := make([]Level, plan.numClasses())
-	deepRoots := make([]hash.Digest, plan.numClasses())
 	for l, c := range plan.classAt {
-		tree, err := pcs.params.BuildLevelTreeExt(deepByClass[c])
-		if err != nil {
-			return OpeningProof{}, fmt.Errorf("fri: PCS.Open: BuildLevelTreeExt class %d: %w", c, err)
-		}
 		levels[l] = Level{
 			D:     plan.sizes[c],
 			Evals: LevelEvals{Ext: deepByClass[c]},
-			Tree:  tree,
 		}
-		deepRoots[l] = tree.Root()
 	}
 
-	// 8- Run multi-degree FRI on the level set.
+	// 8- Run multi-degree FRI on the level set. FRI commits the levels in one
+	//    tree, which is its round-0 layer.
 	friProof, queryPositions, err := Prove(*pcs.params, levels, fs)
 	if err != nil {
 		return OpeningProof{}, fmt.Errorf("fri: PCS.Open: fri.Prove: %w", err)
@@ -213,10 +207,9 @@ func (pcs *PCS) Open(
 	}
 
 	return OpeningProof{
-		ClaimedValues:     claimedValues,
-		DeepQuotientRoots: deepRoots,
-		FRIProof:          friProof,
-		PointSamplings:    pointSamplings,
+		ClaimedValues:  claimedValues,
+		FRIProof:       friProof,
+		PointSamplings: pointSamplings,
 	}, nil
 }
 

@@ -161,7 +161,7 @@ func main() {
 	// Touch the proof so the compiler doesn't get clever; also give a sense of
 	// output size.
 	fmt.Printf("\nproof: %d commitments, %d FRI levels, %d query samplings\n",
-		len(prf.Commitments), len(prf.Opening.DeepQuotientRoots), len(prf.Opening.PointSamplings))
+		len(prf.Commitments), len(prf.Opening.FRIProof.LevelQueries)+1, len(prf.Opening.PointSamplings))
 }
 
 // -----------------------------------------------------------------------------
