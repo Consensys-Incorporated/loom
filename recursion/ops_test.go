@@ -18,96 +18,84 @@ func randE6(r *rand.Rand) ext.E6 {
 	return x
 }
 
-// compileAndProve compiles m, applies tamper to its trace (if any) and proves.
-func compileAndProve(t *testing.T, m *Machine, tamper func(trace.Trace)) error {
-	t.Helper()
-	p, err := m.Compile()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if tamper != nil {
-		tamper(p.Trace)
-	}
-	return prove(t, p)
+// witnessOnly adapts a tamper of the witness columns.
+func witnessOnly(f func(trace.Trace)) func(_, w trace.Trace) {
+	return func(_, w trace.Trace) { f(w) }
 }
 
-func wantE6(t *testing.T, m *Machine, addr int, want ext.E6, what string) {
-	t.Helper()
-	if got := m.e6(addr); !got.Equal(&want) {
-		t.Fatalf("%s: got %s, want %s", what, got.String(), want.String())
-	}
-}
-
-// e6Machine runs every E6 operation on witness inputs and checks the results
-// against constants.
-func e6Machine(t *testing.T) *Machine {
+// e6Machine runs every E6 operation on inputs and checks the results against
+// constants computed in Go.
+func e6Machine() *builder {
 	r := rand.New(rand.NewPCG(1, 2))
-	var m Machine
+	m := &builder{}
 	x, y, z := randE6(r), randE6(r), randE6(r)
-	a, b, c := m.Witness(E6Cell(x)), m.Witness(E6Cell(y)), m.Witness(E6Cell(z))
+	a, b, c := m.input(E6Cell(x)), m.input(E6Cell(y)), m.input(E6Cell(z))
 
 	var want ext.E6
 	want.Mul(&x, &y)
-	prod := m.Mul(a, b)
-	wantE6(t, &m, prod, want, "mul")
-	m.AssertEq(prod, m.Const(E6Cell(want)))
-
+	m.AssertEq(m.Mul(a, b), m.Const(E6Cell(want)))
 	want.Add(&x, &y)
 	m.AssertEq(m.Add(a, b), m.Const(E6Cell(want)))
 	want.Sub(&x, &y)
 	m.AssertEq(m.Sub(a, b), m.Const(E6Cell(want)))
-
 	want.Div(&x, &y)
-	q := m.Div(a, b)
-	wantE6(t, &m, q, want, "div")
-	m.AssertEq(q, m.Const(E6Cell(want)))
+	m.AssertEq(m.Div(a, b), m.Const(E6Cell(want)))
 
 	// x·z² + y·z + z, and a one-coefficient Horner
-	var t1 ext.E6
 	want.Mul(&x, &z)
 	want.Add(&want, &y)
 	want.Mul(&want, &z)
 	want.Add(&want, &z)
-	h := m.Horner(c, []int{a, b, c})
-	wantE6(t, &m, h, want, "horner")
-	m.AssertEq(h, m.Const(E6Cell(want)))
-	t1 = x
-	m.AssertEq(m.Horner(c, []int{a}), m.Const(E6Cell(t1)))
+	m.AssertEq(m.Horner(c, []int{a, b, c}), m.Const(E6Cell(want)))
+	m.AssertEq(m.Horner(c, []int{a}), m.Const(E6Cell(x)))
 
 	// a base scalar is its E6 embedding
 	var s koalabear.Element
 	s.SetUint64(7)
-	sc := m.Witness(ScalarCell(s))
+	sc := m.input(ScalarCell(s))
 	want.MulByElement(&x, &s)
 	m.AssertEq(m.Mul(a, sc), m.Const(E6Cell(want)))
-	return &m
+	return m
 }
 
 func TestE6Chip(t *testing.T) {
-	if err := compileAndProve(t, e6Machine(t), nil); err != nil {
+	if err := compileAndProve(t, e6Machine(), nil); err != nil {
 		t.Fatalf("valid E6 operations rejected: %v", err)
 	}
-	for name, tamper := range map[string]func(trace.Trace){
-		"product":  func(tr trace.Trace) { tr.Base["e6.o2"][0].SetUint64(5) },
-		"operand":  func(tr trace.Trace) { tr.Base["e6.a0"][0].SetUint64(5) },
-		"quotient": func(tr trace.Trace) { tr.Base["e6.b3"][6].SetUint64(5) },
-		"horner":   func(tr trace.Trace) { tr.Base["e6.o1"][9].SetUint64(5) },
-		"constant": func(tr trace.Trace) { tr.Base["const.v1"][0].SetUint64(5) },
+	for name, tamper := range map[string]func(_, w trace.Trace){
+		"product":  witnessOnly(func(tr trace.Trace) { tr.Base["e6.o2"][0].SetUint64(5) }),
+		"operand":  witnessOnly(func(tr trace.Trace) { tr.Base["e6.a0"][0].SetUint64(5) }),
+		"quotient": witnessOnly(func(tr trace.Trace) { tr.Base["e6.b3"][6].SetUint64(5) }),
+		"horner":   witnessOnly(func(tr trace.Trace) { tr.Base["e6.o1"][9].SetUint64(5) }),
+		// a constant is setup: the proof is then for another program, whose
+		// constant disagrees with the computed value
+		"constant": func(s, _ trace.Trace) { s.Base["const.v1"][0].SetUint64(5) },
 	} {
 		t.Run(name, func(t *testing.T) {
-			if err := compileAndProve(t, e6Machine(t), tamper); err == nil {
+			if err := compileAndProve(t, e6Machine(), tamper); err == nil {
 				t.Fatal("tampered trace accepted")
 			}
 		})
 	}
 
 	t.Run("wrong claim", func(t *testing.T) {
-		m := e6Machine(t)
+		m := e6Machine()
 		r := rand.New(rand.NewPCG(3, 4))
 		x, y := randE6(r), randE6(r)
-		m.AssertEq(m.Witness(E6Cell(x)), m.Witness(E6Cell(y)))
+		m.AssertEq(m.input(E6Cell(x)), m.input(E6Cell(y)))
 		if err := compileAndProve(t, m, nil); err == nil {
 			t.Fatal("x = y accepted")
+		}
+	})
+	t.Run("zero divisor", func(t *testing.T) {
+		m := &builder{}
+		m.Div(m.input(Cell{}), m.input(Cell{}))
+		p, err := m.Compile()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := p.Execute(m.in); err == nil {
+			t.Fatal("division by zero executed")
 		}
 	})
 }
@@ -116,32 +104,41 @@ var bitsValues = []uint64{0, 1, 5, 1<<24 - 1, 1 << 24, 0x7f000000 /* p − 1 */,
 
 const bitsN = 10
 
-func bitsMachine() (*Machine, []Bits) {
-	var m Machine
+// bitsMachine decomposes bitsValues; with check, it also reads two outputs
+// of each decomposition against their expected values, so that they are
+// bound by the bus.
+func bitsMachine(check bool) (*builder, []Bits) {
+	m := &builder{}
 	var outs []Bits
 	for _, v := range bitsValues {
-		outs = append(outs, m.Bits(m.Witness(ScalarCell(koalabear.NewElement(v))), bitsN))
+		out := m.Bits(m.input(ScalarCell(koalabear.NewElement(v))), bitsN)
+		if check {
+			low := v & (1<<bitsN - 1)
+			m.AssertEq(out.Shr[3], m.Const(ScalarCell(koalabear.NewElement(low>>3))))
+			m.AssertEq(out.Bit[2], m.Const(ScalarCell(koalabear.NewElement(v>>2&1))))
+		}
+		outs = append(outs, out)
 	}
-	return &m, outs
+	return m, outs
 }
 
 func TestBitsChip(t *testing.T) {
-	m, outs := bitsMachine()
+	m, outs := bitsMachine(true)
+	p, r := m.run(t)
 	for k, v := range bitsValues {
 		low := v & (1<<bitsN - 1)
 		for i := range bitsN {
-			if got := m.cells[outs[k].Shr[i]][0].Uint64(); got != low>>i {
+			if c := r.Value(outs[k].Shr[i]); c[0].Uint64() != low>>i {
+				got := c[0].Uint64()
 				t.Fatalf("value %d: Shr[%d] = %d, want %d", v, i, got, low>>i)
 			}
-			if got := m.cells[outs[k].Bit[i]][0].Uint64(); got != v>>i&1 {
+			if c := r.Value(outs[k].Bit[i]); c[0].Uint64() != v>>i&1 {
+				got := c[0].Uint64()
 				t.Fatalf("value %d: Bit[%d] = %d, want %d", v, i, got, v>>i&1)
 			}
 		}
-		// read the outputs, so that they are bound by the bus
-		m.AssertEq(outs[k].Shr[3], m.Const(ScalarCell(koalabear.NewElement(low>>3))))
-		m.AssertEq(outs[k].Bit[2], m.Const(ScalarCell(koalabear.NewElement(v>>2&1))))
 	}
-	if err := compileAndProve(t, m, nil); err != nil {
+	if err := prove(t, p, r); err != nil {
 		t.Fatalf("valid decompositions rejected: %v", err)
 	}
 
@@ -163,8 +160,8 @@ func TestBitsChip(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			m, _ := bitsMachine()
-			if err := compileAndProve(t, m, tamper); err == nil {
+			m, _ := bitsMachine(false)
+			if err := compileAndProve(t, m, witnessOnly(tamper)); err == nil {
 				t.Fatal("tampered trace accepted")
 			}
 		})
@@ -181,33 +178,28 @@ func flip(e *koalabear.Element) {
 
 // packMachine packs items of every kind, at offsets that do and do not cross
 // a cell, and hashes the stream.
-func packMachine() (*Machine, []int) {
+func packMachine() *builder {
 	r := rand.New(rand.NewPCG(5, 6))
-	var m Machine
+	m := &builder{}
 	var d Cell
 	for i := range d {
 		d[i].SetUint64(r.Uint64())
 	}
 	items := []int{
-		m.Witness(ScalarCell(koalabear.NewElement(9))),
-		m.Witness(E6Cell(randE6(r))),
-		m.Witness(d),
-		m.Witness(E6Cell(randE6(r))),
+		m.input(ScalarCell(koalabear.NewElement(9))),
+		m.input(E6Cell(randE6(r))),
+		m.input(d),
+		m.input(E6Cell(randE6(r))),
 		m.Const(ScalarCell(koalabear.NewElement(3))),
 	}
 	kinds := []int{KindScalar, KindE6, KindDigest, KindE6, KindScalar}
 	stream, n := m.Pack(items, kinds)
 	m.Sponge(stream, n)
-	return &m, items
+	return m
 }
 
 func TestWindowChip(t *testing.T) {
-	m, items := packMachine()
-	var want []koalabear.Element
-	for _, it := range items[:2] {
-		want = append(want, m.cells[it][:]...)
-	}
-	if err := compileAndProve(t, m, nil); err != nil {
+	if err := compileAndProve(t, packMachine(), nil); err != nil {
 		t.Fatalf("valid windows rejected: %v", err)
 	}
 	for name, tamper := range map[string]func(trace.Trace){
@@ -215,10 +207,11 @@ func TestWindowChip(t *testing.T) {
 		"item lane": func(tr trace.Trace) { tr.Base["window.i3"][1].SetUint64(5) },
 		// the digest crosses from the first cell into the second
 		"crossing lane": func(tr trace.Trace) { tr.Base["window.q0"][2].SetUint64(5) },
+		// a stream cell, which the prover writes: the window no longer matches
+		"stream cell": func(tr trace.Trace) { tr.Base["witness.v2"][len(tr.Base["witness.v2"])-4].SetUint64(5) },
 	} {
 		t.Run(name, func(t *testing.T) {
-			m, _ := packMachine()
-			if err := compileAndProve(t, m, tamper); err == nil {
+			if err := compileAndProve(t, packMachine(), witnessOnly(tamper)); err == nil {
 				t.Fatal("tampered trace accepted")
 			}
 		})
@@ -229,39 +222,36 @@ func bitrev(i, width int) int {
 	return int(bits.Reverse(uint(i)) >> (bits.UintSize - width))
 }
 
-// TestMerkleX checks the x⁻¹ accumulator against gInv^bitrev(index).
-func TestMerkleX(t *testing.T) {
+// merkleXMachine adds to the openings machine one MerklePathX per path, with
+// its [x⁻¹, b0] cell checked against gInv^bitrev(index) computed in Go.
+func merkleXMachine(t *testing.T, gInv koalabear.Element) (*builder, []pathInst) {
 	m := openingsMachine(t, smallCfg)
-	var gInv koalabear.Element
-	gInv.SetUint64(123456789)
-	var xbs []int
 	paths := append([]pathInst(nil), m.paths...)
 	for _, p := range paths {
 		xb := m.MerklePathX(p.leaf, p.siblings, p.index, p.root, gInv)
-		idx := int(m.cells[p.index][0].Uint64())
-		var want koalabear.Element
-		want.ExpInt64(gInv, int64(bitrev(idx, len(p.siblings))))
-		if got := m.cells[xb][0]; !got.Equal(&want) {
-			t.Fatalf("x⁻¹ = %s, want %s", got.String(), want.String())
-		}
-		if got := m.cells[xb][1].Uint64(); got != uint64(idx&1) {
-			t.Fatalf("b0 = %d, want %d", got, idx&1)
-		}
-		m.AssertEq(xb, m.Const(m.cells[xb]))
-		xbs = append(xbs, xb)
+		idxCell := m.inputValue(p.index)
+		idx := int(idxCell[0].Uint64())
+		var want Cell
+		want[0].ExpInt64(gInv, int64(bitrev(idx, len(p.siblings))))
+		want[1].SetUint64(uint64(idx & 1))
+		m.AssertEq(xb, m.Const(want))
 	}
+	return m, paths
+}
+
+// TestMerkleX checks the x⁻¹ accumulator against gInv^bitrev(index).
+func TestMerkleX(t *testing.T) {
+	var gInv koalabear.Element
+	gInv.SetUint64(123456789)
+	m, _ := merkleXMachine(t, gInv)
 	if err := compileAndProve(t, m, nil); err != nil {
 		t.Fatalf("valid paths rejected: %v", err)
 	}
 	t.Run("accumulator", func(t *testing.T) {
-		m := openingsMachine(t, smallCfg)
-		for _, p := range paths {
-			xb := m.MerklePathX(p.leaf, p.siblings, p.index, p.root, gInv)
-			m.AssertEq(xb, m.Const(m.cells[xb]))
-		}
+		m, paths := merkleXMachine(t, gInv)
 		// the paths added by MerklePathX start after the first ones
 		row := len(paths)*len(paths[0].siblings) + 1
-		if err := compileAndProve(t, m, func(tr trace.Trace) { tr.Base["merkle.x"][row].SetUint64(5) }); err == nil {
+		if err := compileAndProve(t, m, witnessOnly(func(tr trace.Trace) { tr.Base["merkle.x"][row].SetUint64(5) })); err == nil {
 			t.Fatal("tampered accumulator accepted")
 		}
 	})
@@ -270,9 +260,9 @@ func TestMerkleX(t *testing.T) {
 // foldMachine builds a FRI query of the given number of rounds with random
 // pairs, challenges and x⁻¹, and consistent next layers; round 1 has an
 // injected term.
-func foldMachine(rounds int, lie bool) *Machine {
+func foldMachine(rounds int, lie bool) *builder {
 	r := rand.New(rand.NewPCG(7, 8))
-	var m Machine
+	m := &builder{}
 	var half koalabear.Element
 	half.SetUint64(2)
 	half.Inverse(&half)
@@ -291,7 +281,7 @@ func foldMachine(rounds int, lie bool) *Machine {
 		var injV ext.E6
 		if j == 1 {
 			injV = randE6(r)
-			inj = m.Witness(E6Cell(injV))
+			inj = m.input(E6Cell(injV))
 		}
 		// (p + q)/2 + α·(p − q)·x⁻¹/2 + inj
 		var sum, diff, next ext.E6
@@ -304,8 +294,8 @@ func foldMachine(rounds int, lie bool) *Machine {
 		next.Add(&sum, &diff)
 		next.Add(&next, &injV)
 		chain = append(chain, FoldRound{
-			P: m.Witness(E6Cell(p)), Q: m.Witness(E6Cell(q)),
-			Alpha: m.Witness(E6Cell(alpha)), XB: m.Witness(xb), Inj: inj,
+			P: m.input(E6Cell(p)), Q: m.input(E6Cell(q)),
+			Alpha: m.input(E6Cell(alpha)), XB: m.input(xb), Inj: inj,
 		})
 		other := randE6(r)
 		if b == 0 {
@@ -320,8 +310,8 @@ func foldMachine(rounds int, lie bool) *Machine {
 	if lie {
 		p.B1.A0.SetUint64(5)
 	}
-	m.FoldChain(chain, m.Witness(E6Cell(p)))
-	return &m
+	m.FoldChain(chain, m.input(E6Cell(p)))
+	return m
 }
 
 func TestFoldChip(t *testing.T) {
@@ -337,7 +327,7 @@ func TestFoldChip(t *testing.T) {
 		"challenge":     func(tr trace.Trace) { tr.Base["fold.al4"][2].SetUint64(5) },
 	} {
 		t.Run(name, func(t *testing.T) {
-			if err := compileAndProve(t, foldMachine(4, false), tamper); err == nil {
+			if err := compileAndProve(t, foldMachine(4, false), witnessOnly(tamper)); err == nil {
 				t.Fatal("tampered trace accepted")
 			}
 		})
@@ -348,16 +338,16 @@ func TestFoldChip(t *testing.T) {
 // that uses them all.
 func TestChipWidths(t *testing.T) {
 	m := foldMachine(4, false)
-	m.Bits(m.Witness(ScalarCell(koalabear.NewElement(77))), bitsN)
+	m.Bits(m.input(ScalarCell(koalabear.NewElement(77))), bitsN)
 	r := rand.New(rand.NewPCG(9, 9))
-	a, b := m.Witness(E6Cell(randE6(r))), m.Witness(E6Cell(randE6(r)))
+	a, b := m.input(E6Cell(randE6(r))), m.input(E6Cell(randE6(r)))
 	stream, n := m.Pack([]int{a, b}, []int{KindE6, KindE6})
 	leaf := m.Sponge(stream, n)
 	var sibs []int
 	for range 3 {
-		sibs = append(sibs, m.Witness(Cell{}))
+		sibs = append(sibs, m.input(Cell{}))
 	}
-	m.MerklePathX(leaf, sibs, m.Witness(Cell{}), m.Witness(Cell{}), koalabear.One())
+	m.MerklePathX(leaf, sibs, m.input(Cell{}), m.input(Cell{}), koalabear.One())
 	m.Mul(a, b)
 	p, err := m.Compile()
 	if err != nil {

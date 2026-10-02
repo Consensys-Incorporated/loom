@@ -24,18 +24,17 @@ func TestDumpTrace(t *testing.T) {
 		NumQueries: 1,
 		Seed:       1,
 	}
-	p, err := openingsMachine(t, cfg).Compile()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := prove(t, p); err != nil {
+	p, r := openingsMachine(t, cfg).run(t)
+	if err := prove(t, p, r); err != nil {
 		t.Fatal(err)
 	}
 	for _, mod := range []string{witnessMod, spongeMod, merkleMod, p2Mod} {
 		sub := trace.New()
-		for name, v := range p.Trace.Base {
-			if strings.HasPrefix(name, mod+".") {
-				sub.SetBase(strings.TrimPrefix(name, mod+"."), v)
+		for _, tr := range []trace.Trace{p.Setup, r.Trace} {
+			for name, v := range tr.Base {
+				if strings.HasPrefix(name, mod+".") {
+					sub.SetBase(strings.TrimPrefix(name, mod+"."), v)
+				}
 			}
 		}
 		f := filepath.Join(dir, "trace_"+mod+".csv")

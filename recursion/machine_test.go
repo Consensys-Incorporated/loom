@@ -5,24 +5,24 @@ import (
 	"testing"
 
 	"github.com/consensys/gnark-crypto/field/koalabear"
-	"github.com/consensys/loom"
 	"github.com/consensys/loom/internal/hash"
-	"github.com/consensys/loom/public"
 	"github.com/consensys/loom/trace"
 )
 
 // openingsMachine checks, for every query of a one-batch, one-group PCS
-// fixture, that the opened row pair hashes to a leaf of the batch root.
-func openingsMachine(t *testing.T, cfg FixtureConfig) *Machine {
+// fixture, that the opened row pair hashes to a leaf of the batch root. The
+// program depends only on the fixture's shape; its inputs are the fixture's
+// values.
+func openingsMachine(t *testing.T, cfg FixtureConfig) *builder {
 	t.Helper()
 	f, err := NewFixture(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var m Machine
+	b := &builder{}
 	var root Cell
 	copy(root[:], f.Roots[0][:])
-	rootAddr := m.Witness(root)
+	rootAddr := b.input(root)
 	for k := range cfg.NumQueries {
 		wp := f.Proof.PointSamplings[k][0]
 		if len(wp.Injections) != 0 {
@@ -39,33 +39,19 @@ func openingsMachine(t *testing.T, cfg FixtureConfig) *Machine {
 		for _, v := range rows.Hi.RawRowExt {
 			stream = append(stream, hash.ExtToElements(v)...)
 		}
-		leaf := m.Sponge(m.WitnessStream(stream), len(stream))
+		leaf := b.Sponge(b.inputStream(stream), len(stream))
 
 		var sibs []int
 		for _, s := range wp.Path.Siblings {
 			var c Cell
 			copy(c[:], s[:])
-			sibs = append(sibs, m.Witness(c))
+			sibs = append(sibs, b.input(c))
 		}
 		var idx Cell
 		idx[0].SetUint64(uint64(wp.Path.LeafIdx))
-		m.MerklePath(leaf, sibs, m.Witness(idx), rootAddr)
+		b.MerklePath(leaf, sibs, b.input(idx), rootAddr)
 	}
-	return &m
-}
-
-func prove(t *testing.T, p *Program) error {
-	t.Helper()
-	pk, vk, err := loom.Setup(p.Trace, p.Loom)
-	if err != nil {
-		return err
-	}
-	st := loom.Statement{Program: p.Loom, VerificationKey: vk, PublicInputs: public.Inputs{}}
-	prf, err := loom.Prove(st, loom.Witness{Trace: p.Trace, ProvingKey: pk})
-	if err != nil {
-		return err
-	}
-	return loom.Verify(st, prf)
+	return b
 }
 
 var smallCfg = FixtureConfig{
@@ -75,15 +61,44 @@ var smallCfg = FixtureConfig{
 }
 
 func TestOpenings(t *testing.T) {
-	m := openingsMachine(t, smallCfg)
-	p, err := m.Compile()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := prove(t, p); err != nil {
+	p, r := openingsMachine(t, smallCfg).run(t)
+	if err := prove(t, p, r); err != nil {
 		t.Fatalf("valid openings rejected: %v", err)
 	}
 	logBreakdown(t, p)
+}
+
+// TestSetupOnce compiles and sets up the openings program once, then proves
+// its execution on two PCS proofs of the same shape: only the inputs change.
+func TestSetupOnce(t *testing.T) {
+	p, err := openingsMachine(t, smallCfg).Compile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pk, vk := keys(t, p)
+	for _, seed := range []uint64{3, 11} {
+		cfg := smallCfg
+		cfg.Seed = seed
+		r, err := p.Execute(openingsMachine(t, cfg).in)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := proveWith(p, pk, vk, r); err != nil {
+			t.Fatalf("seed %d: valid openings rejected: %v", seed, err)
+		}
+	}
+	// Inputs from one proof with the root of another: the paths fail.
+	in := openingsMachine(t, smallCfg).in
+	other := smallCfg
+	other.Seed = 11
+	in[0] = openingsMachine(t, other).in[0]
+	r, err := p.Execute(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := proveWith(p, pk, vk, r); err == nil {
+		t.Fatal("openings under another root accepted")
+	}
 }
 
 // logBreakdown logs, per chip, its rows and its columns by kind (base trace,
@@ -109,14 +124,7 @@ func TestOpeningsRejects(t *testing.T) {
 		// the chained state
 		"sponge output": func(tr trace.Trace) { tr.Base["sponge.out20"][0].SetUint64(7) },
 		// a direction bit, flipped on a real level
-		"merkle bit": func(tr trace.Trace) {
-			b := &tr.Base["merkle.b"][1]
-			if b.IsZero() {
-				b.SetOne()
-			} else {
-				b.SetZero()
-			}
-		},
+		"merkle bit": func(tr trace.Trace) { flip(&tr.Base["merkle.b"][1]) },
 		// the index recomposition
 		"merkle index": func(tr trace.Trace) { tr.Base["merkle.idx"][2].SetUint64(1000) },
 		// a sibling that differs from the proof
@@ -124,13 +132,8 @@ func TestOpeningsRejects(t *testing.T) {
 	}
 	for name, tamper := range cases {
 		t.Run(name, func(t *testing.T) {
-			m := openingsMachine(t, smallCfg)
-			p, err := m.Compile()
-			if err != nil {
-				t.Fatal(err)
-			}
-			tamper(p.Trace)
-			if err := prove(t, p); err == nil {
+			err := compileAndProve(t, openingsMachine(t, smallCfg), func(_, w trace.Trace) { tamper(w) })
+			if err == nil {
 				t.Fatal("tampered trace accepted")
 			}
 		})

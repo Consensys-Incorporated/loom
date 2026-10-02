@@ -15,10 +15,8 @@ package recursion
 
 import (
 	"fmt"
-	"math/big"
 
 	"github.com/consensys/gnark-crypto/field/koalabear"
-	"github.com/consensys/gnark-crypto/field/koalabear/poseidon2"
 	"github.com/consensys/loom/board"
 	"github.com/consensys/loom/expr"
 	"github.com/consensys/loom/trace"
@@ -49,21 +47,48 @@ const (
 // Cell is the value of a memory cell.
 type Cell [CellWidth]koalabear.Element
 
-// Machine is a program for the prototype chips, together with its witness:
-// the compiler assigns addresses, counts reads, and runs the computation to
-// fill the trace.
+// Machine builds a program for the chips: it allocates addresses, counts the
+// reads of every cell and records the instructions, without values. A cell
+// holds an input (supplied per execution), a constant (known when building),
+// or the output of an instruction. Compile turns the program into a loom AIR
+// and its setup; Program.Execute runs it on inputs and traces the witness.
 type Machine struct {
-	cells     []Cell // value of every address
-	reads     []int  // read count of every address
-	witness   []int  // addresses written by the witness chip
+	nCells int
+	reads  []int // read count of every address
+
+	inputs    []int // input cells, in input order
 	consts    map[Cell]int
-	constList []int // addresses written by the const chip
-	sponges   []spongeInst
-	paths     []pathInst
-	windows   []windowInst
-	bits      []bitsInst
-	e6Rows    []e6Row
-	folds     [][]foldRow
+	constList []int        // addresses written by the const chip
+	constVal  map[int]Cell // value of every constant
+
+	instrs  []instr // every instruction, in execution order
+	packs   []packInst
+	sponges []spongeInst
+	paths   []pathInst
+	windows []windowInst
+	bits    []bitsInst
+	e6Ops   []e6Op
+	e6Rows  []e6Row
+	folds   [][]foldRow
+}
+
+// instr is one instruction in execution order: its kind and its index in the
+// kind's list.
+type instr struct {
+	kind, idx int
+}
+
+const (
+	instrPack = iota
+	instrSponge
+	instrPath
+	instrBits
+	instrE6
+)
+
+type packInst struct {
+	items, kinds []int
+	stream       []int // the stream cells, written by the witness chip
 }
 
 type spongeInst struct {
@@ -79,70 +104,65 @@ type pathInst struct {
 	xb                int                 // address of [x⁻¹, b0], if gens != nil
 }
 
-func (m *Machine) alloc(v Cell) int {
-	m.cells = append(m.cells, v)
+func (m *Machine) alloc() int {
 	m.reads = append(m.reads, 0)
-	return len(m.cells) - 1
+	m.nCells++
+	return m.nCells - 1
 }
 
-func (m *Machine) read(addr int) Cell {
-	m.reads[addr]++
-	return m.cells[addr]
-}
+func (m *Machine) read(addr int) { m.reads[addr]++ }
 
-// Witness writes a cell of prover data (proof values, indices) and returns
-// its address.
-func (m *Machine) Witness(v Cell) int {
-	a := m.alloc(v)
-	m.witness = append(m.witness, a)
+func (m *Machine) record(kind, idx int) { m.instrs = append(m.instrs, instr{kind, idx}) }
+
+// Input allocates a cell whose value is the next input of every execution
+// (proof values, indices) and returns its address.
+func (m *Machine) Input() int {
+	a := m.alloc()
+	m.inputs = append(m.inputs, a)
 	return a
 }
 
-// WitnessStream writes xs, packed CellWidth per cell and zero padded to a
-// whole number of sponge blocks, and returns the cell addresses.
-func (m *Machine) WitnessStream(xs []koalabear.Element) []int {
-	blocks := (len(xs) + rate - 1) / rate
-	var res []int
-	for c := 0; c < 2*blocks; c++ {
-		var v Cell
-		for j := range v {
+// InputStream allocates the input cells of a stream of length elements,
+// packed CellWidth per cell and zero padded to a whole number of sponge
+// blocks (see PackElements for their values), and returns their addresses.
+func (m *Machine) InputStream(length int) []int {
+	res := make([]int, streamCells(length))
+	for i := range res {
+		res[i] = m.Input()
+	}
+	return res
+}
+
+// streamCells is the number of cells of a stream of length elements: two per
+// sponge block.
+func streamCells(length int) int { return 2 * ((length + rate - 1) / rate) }
+
+// PackElements returns the cells of a stream (InputStream's layout).
+func PackElements(xs []koalabear.Element) []Cell {
+	res := make([]Cell, streamCells(len(xs)))
+	for c := range res {
+		for j := range CellWidth {
 			if p := c*CellWidth + j; p < len(xs) {
-				v[j] = xs[p]
+				res[c][j] = xs[p]
 			}
 		}
-		res = append(res, m.Witness(v))
 	}
 	return res
 }
 
 // Sponge hashes the first length elements of the data cells (2 per block,
-// as written by WitnessStream) with loom's Poseidon2 sponge, and returns the
-// address of the digest.
+// as laid out by InputStream or Pack) with loom's Poseidon2 sponge, and
+// returns the address of the digest.
 func (m *Machine) Sponge(data []int, length int) int {
-	if len(data) != 2*((length+rate-1)/rate) || length == 0 {
+	if len(data) != streamCells(length) || length == 0 {
 		panic(fmt.Sprintf("Sponge: %d cells for %d elements", len(data), length))
 	}
-	var state [width]koalabear.Element
-	perm := poseidon2.NewPermutation(width, P2FullRounds, P2PartialRounds)
-	for b := 0; b < len(data)/2; b++ {
-		lo, hi := m.read(data[2*b]), m.read(data[2*b+1])
-		for j := 0; j < rate; j++ {
-			if p := b*rate + j; p < length {
-				if j < CellWidth {
-					state[j] = lo[j]
-				} else {
-					state[j] = hi[j-CellWidth]
-				}
-			}
-		}
-		if err := perm.Permutation(state[:]); err != nil {
-			panic(err)
-		}
+	for _, d := range data {
+		m.read(d)
 	}
-	var d Cell
-	copy(d[:], state[:digest])
-	out := m.alloc(d)
+	out := m.alloc()
 	m.sponges = append(m.sponges, spongeInst{data: data, length: length, out: out})
+	m.record(instrSponge, len(m.sponges)-1)
 	return out
 }
 
@@ -155,7 +175,8 @@ func (m *Machine) MerklePath(leaf int, siblings []int, index int, root int) {
 	for _, s := range siblings {
 		m.read(s)
 	}
-	m.paths = append(m.paths, pathInst{leaf: leaf, index: index, root: root, siblings: siblings})
+	m.paths = append(m.paths, pathInst{leaf: leaf, index: index, root: root, siblings: siblings, xb: -1})
+	m.record(instrPath, len(m.paths)-1)
 }
 
 // MerklePathX is MerklePath for the Merkle tree of a FRI layer over a domain
@@ -164,30 +185,176 @@ func (m *Machine) MerklePath(leaf int, siblings []int, index int, root int) {
 // fold point of the queried pair, and b0 is the index's low bit.
 func (m *Machine) MerklePathX(leaf int, siblings []int, index int, root int, gInv koalabear.Element) int {
 	m.MerklePath(leaf, siblings, index, root)
-	d := len(siblings)
 	p := &m.paths[len(m.paths)-1]
-	idx := m.cells[index][0].Uint64()
-	var x koalabear.Element
-	x.SetOne()
+	d := len(siblings)
 	for lvl := range d {
-		var g koalabear.Element
-		g.Exp(gInv, new(big.Int).Lsh(big.NewInt(1), uint(d-1-lvl)))
-		p.gens = append(p.gens, g)
-		if idx>>lvl&1 == 1 {
-			x.Mul(&x, &g)
+		g := gInv
+		for range d - 1 - lvl {
+			g.Square(&g)
 		}
+		p.gens = append(p.gens, g)
 	}
-	var xb Cell
-	xb[0] = x
-	xb[1].SetUint64(idx & 1)
-	p.xb = m.alloc(xb)
+	p.xb = m.alloc()
 	return p.xb
 }
 
-// Program is a compiled machine: the loom program and its trace.
+// Compile builds the chips, their constraints and the memory bus, and the
+// setup columns: everything that depends on the program and not on its
+// inputs. The machine must not be modified afterwards.
+func (m *Machine) Compile() (*Program, error) {
+	b := board.NewBuilder()
+	bus := &Bus{}
+	setup := trace.New()
+	p := &Program{m: m}
+
+	// The P2 core exists first: the other chips look up into it. Its height
+	// is set once every permutation is known.
+	b.AddModule(board.NewModule(p2Mod))
+	for _, c := range m.chips() {
+		if c.rows() == 0 {
+			continue
+		}
+		n := newChipModule(&b, c.name(), c.rows())
+		p.heights = append(p.heights, chipHeight{c.name(), n})
+		if err := c.define(&b, bus); err != nil {
+			return nil, fmt.Errorf("chip %s: %w", c.name(), err)
+		}
+		cols := newCols(n)
+		c.setup(cols)
+		cols.store(setup, c.name())
+	}
+	np := height(m.numPerms())
+	b.Modules[p2Mod].N = np
+	p.p2Height = np
+	if err := (Poseidon2Gadget{}).Define(&b, p2Mod, p2Ins(), p2Outs()); err != nil {
+		return nil, err
+	}
+	if err := bus.Build(&b); err != nil {
+		return nil, err
+	}
+	pg, err := board.Compile(&b)
+	if err != nil {
+		return nil, err
+	}
+	p.Loom, p.Setup = pg, setup
+	return p, nil
+}
+
+// chip is one module of the machine: define adds its AIR and bus accesses,
+// setup fills its setup columns (from the program), trace its witness columns
+// (from an execution).
+type chip interface {
+	name() string
+	rows() int
+	define(b *board.Builder, bus *Bus) error
+	setup(c *cols)
+	trace(c *cols, r *Run) error
+}
+
+func (m *Machine) chips() []chip {
+	return []chip{witnessChip{m}, constChip{m}, spongeChip{m}, merkleChip{m},
+		windowChip{m}, bitsChip{m}, e6Chip{m}, foldChip{m}}
+}
+
+// numPerms is the number of Poseidon2 permutations: one per sponge block and
+// one per Merkle level.
+func (m *Machine) numPerms() int {
+	n := 0
+	for _, s := range m.sponges {
+		n += len(s.data) / 2
+	}
+	for _, p := range m.paths {
+		n += len(p.siblings)
+	}
+	return n
+}
+
+type chipHeight struct {
+	module string
+	n      int
+}
+
+// Program is a compiled machine: its loom program and setup columns, built
+// once, and executed on any number of inputs.
 type Program struct {
-	Loom  board.Program
-	Trace trace.Trace
+	Loom     board.Program
+	Setup    trace.Trace // the setup columns, for loom.Setup
+	m        *Machine
+	heights  []chipHeight // the chips with rows, in compile order
+	p2Height int
+}
+
+// NumInputs returns the number of input cells of an execution.
+func (p *Program) NumInputs() int { return len(p.m.inputs) }
+
+// Run is one execution of a program: every cell's value and the witness
+// columns.
+type Run struct {
+	Trace  trace.Trace // the witness columns (loom merges the setup ones)
+	values []Cell
+	p2     [][width]koalabear.Element // the permutation inputs, in P2 row order
+}
+
+// Value returns the value of the cell at addr.
+func (r *Run) Value(addr int) Cell { return r.values[addr] }
+
+// Execute runs the program on inputs (one cell per Input, in order) and
+// traces the witness.
+func (p *Program) Execute(inputs []Cell) (*Run, error) {
+	m := p.m
+	if len(inputs) != len(m.inputs) {
+		return nil, fmt.Errorf("Execute: %d inputs, want %d", len(inputs), len(m.inputs))
+	}
+	r := &Run{Trace: trace.New(), values: make([]Cell, m.nCells)}
+	for i, a := range m.inputs {
+		r.values[a] = inputs[i]
+	}
+	for a, v := range m.constVal {
+		r.values[a] = v
+	}
+	for _, in := range m.instrs {
+		if err := m.exec(in, r); err != nil {
+			return nil, err
+		}
+	}
+
+	byName := map[string]chip{}
+	for _, c := range m.chips() {
+		byName[c.name()] = c
+	}
+	for _, h := range p.heights {
+		cols := newCols(h.n)
+		if err := byName[h.module].trace(cols, r); err != nil {
+			return nil, fmt.Errorf("chip %s: %w", h.module, err)
+		}
+		cols.store(r.Trace, h.module)
+	}
+	if err := p2Trace(r, p.p2Height); err != nil {
+		return nil, err
+	}
+	return r, nil
+}
+
+// exec computes the cells an instruction writes.
+func (m *Machine) exec(in instr, r *Run) error {
+	switch in.kind {
+	case instrPack:
+		m.execPack(m.packs[in.idx], r)
+	case instrSponge:
+		s := m.sponges[in.idx]
+		d, err := spongeDigest(r, s)
+		if err != nil {
+			return err
+		}
+		r.values[s.out] = d
+	case instrPath:
+		m.execPath(m.paths[in.idx], r)
+	case instrBits:
+		m.execBits(m.bits[in.idx], r)
+	case instrE6:
+		return m.execE6(m.e6Ops[in.idx], r)
+	}
+	return nil
 }
 
 func setupCol(module, name string) expr.Expr { return expr.Setup(module + "." + name) }
@@ -214,68 +381,33 @@ func height(n int) int {
 	return h
 }
 
-// Compile builds the chips, their constraints and the memory bus, and fills
-// the trace.
-func (m *Machine) Compile() (*Program, error) {
-	b := board.NewBuilder()
-	bus := &Bus{}
-	t := trace.New()
-	var p2Inputs [][width]koalabear.Element
-	// The P2 core exists first: the other chips look up into it. Its height
-	// is set once every permutation is known.
-	b.AddModule(board.NewModule(p2Mod))
+// ── P2 core ──────────────────────────────────────────────────────────────────
 
-	// Witness chip: one row per written cell.
-	nw := height(len(m.witness))
-	wm := board.NewModule(witnessMod)
-	wm.N = nw
-	b.AddModule(wm)
-	bus.Write(witnessMod, setupCol(witnessMod, "addr"), cellCols(witnessMod, "v", 0), setupCol(witnessMod, "mult"))
-	wc := newCols(nw)
-	for row, a := range m.witness {
-		wc.set("addr", row, uint64(a))
-		wc.set("mult", row, uint64(m.reads[a]))
-		for j := range CellWidth {
-			wc.setElem(fmt.Sprintf("v%d", j), row, m.cells[a][j])
-		}
+func p2Ins() []string {
+	res := make([]string, width)
+	for i := range res {
+		res[i] = fmt.Sprintf("%s.s%d", p2Mod, i)
 	}
-	wc.declare("addr", "mult")
-	for j := range CellWidth {
-		wc.declare(fmt.Sprintf("v%d", j))
-	}
-	wc.store(t, witnessMod)
+	return res
+}
 
-	// Sponge and Merkle chips.
-	if err := m.spongeChip(&b, bus, t, &p2Inputs); err != nil {
-		return nil, err
+func p2Outs() []string {
+	res := make([]string, width)
+	for i := range res {
+		res[i] = fmt.Sprintf("%s.r%d", p2Mod, i)
 	}
-	if err := m.merkleChip(&b, bus, t, &p2Inputs); err != nil {
-		return nil, err
-	}
-	for _, chip := range []func(*board.Builder, *Bus, trace.Trace) error{
-		m.constChip, m.windowChip, m.bitsChip, m.e6Chip, m.foldChip,
-	} {
-		if err := chip(&b, bus, t); err != nil {
-			return nil, err
-		}
-	}
+	return res
+}
 
-	// P2 core: one row per permutation, the Poseidon2 gadget's constraints.
-	np := height(len(p2Inputs))
-	b.Modules[p2Mod].N = np
-	ins, outs := make([]string, width), make([]string, width)
-	for i := range ins {
-		ins[i], outs[i] = fmt.Sprintf("%s.s%d", p2Mod, i), fmt.Sprintf("%s.r%d", p2Mod, i)
-	}
-	if err := (Poseidon2Gadget{}).Define(&b, p2Mod, ins, outs); err != nil {
-		return nil, err
-	}
-	pc := newCols(np)
-	perm := poseidon2.NewPermutation(width, P2FullRounds, P2PartialRounds)
-	for row, in := range p2Inputs {
+// p2Trace fills the P2 core: one row per permutation recorded by the sponge
+// and Merkle traces, then the gadget's round columns.
+func p2Trace(r *Run, n int) error {
+	pc := newCols(n)
+	perm := newPerm()
+	for row, in := range r.p2 {
 		out := in
 		if err := perm.Permutation(out[:]); err != nil {
-			return nil, err
+			return err
 		}
 		for i := range width {
 			pc.setElem(fmt.Sprintf("s%d", i), row, in[i])
@@ -285,19 +417,8 @@ func (m *Machine) Compile() (*Program, error) {
 	for i := range width {
 		pc.declare(fmt.Sprintf("s%d", i), fmt.Sprintf("r%d", i))
 	}
-	pc.store(t, p2Mod)
-	if err := (Poseidon2Gadget{}).Fill(t, p2Mod, ins, outs); err != nil {
-		return nil, err
-	}
-
-	if err := bus.Build(&b); err != nil {
-		return nil, err
-	}
-	pg, err := board.Compile(&b)
-	if err != nil {
-		return nil, err
-	}
-	return &Program{Loom: pg, Trace: t}, nil
+	pc.store(r.Trace, p2Mod)
+	return (Poseidon2Gadget{}).Fill(r.Trace, p2Mod, p2Ins(), p2Outs())
 }
 
 // p2Table returns the P2 core's lookup target (inputs, then the first nOut

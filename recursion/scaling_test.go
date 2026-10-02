@@ -14,13 +14,10 @@ func TestOpeningsWidthIsFixed(t *testing.T) {
 		Seed:       4,
 	})
 	var leaf [2]LeafCost
-	for i, m := range []*Machine{small, big} {
-		p, err := m.Compile()
-		if err != nil {
-			t.Fatal(err)
-		}
+	for i, b := range []*builder{small, big} {
+		p, r := b.run(t)
 		if i == 1 {
-			if err := prove(t, p); err != nil {
+			if err := prove(t, p, r); err != nil {
 				t.Fatalf("valid openings rejected: %v", err)
 			}
 		}

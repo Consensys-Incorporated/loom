@@ -78,7 +78,7 @@ func NewPCSWithParams(params Params) PCS {
 type Committed struct {
 	Tree    WMerkleTree
 	Sources []LeafSource
-	Shapes  BatchShapes
+	Shapes  BatchShapes // TODO is not redundant with Tree.groups ?
 }
 
 // GroupShifts assigns a list of rotation shifts to each polynomial of a

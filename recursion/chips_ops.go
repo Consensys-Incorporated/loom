@@ -20,10 +20,9 @@ import (
 	ext "github.com/consensys/gnark-crypto/field/koalabear/extensions"
 	"github.com/consensys/loom/board"
 	"github.com/consensys/loom/expr"
-	"github.com/consensys/loom/trace"
 )
 
-// A chip whose instance list is empty adds no module.
+// A chip whose instruction list is empty adds no module.
 
 func zero() expr.Expr { return expr.Const(koalabear.Element{}) }
 
@@ -87,23 +86,27 @@ func (c *cols) declareLanes(prefix string, n int) {
 }
 
 // constChip: one row per constant cell, all setup: addr, mult, v0..v7.
-func (m *Machine) constChip(b *board.Builder, bus *Bus, t trace.Trace) error {
-	if len(m.constList) == 0 {
-		return nil
-	}
-	n := newChipModule(b, constMod, len(m.constList))
+type constChip struct{ m *Machine }
+
+func (c constChip) name() string { return constMod }
+func (c constChip) rows() int    { return len(c.m.constList) }
+
+func (c constChip) define(b *board.Builder, bus *Bus) error {
 	bus.Write(constMod, setupCol(constMod, "addr"), setupCellCols(constMod, "v"), setupCol(constMod, "mult"))
-	c := newCols(n)
-	c.declare("addr", "mult")
-	c.declareLanes("v", CellWidth)
-	for row, a := range m.constList {
-		c.set("addr", row, uint64(a))
-		c.set("mult", row, uint64(m.reads[a]))
-		c.setCell("v", row, m.cells[a])
-	}
-	c.store(t, constMod)
 	return nil
 }
+
+func (c constChip) setup(cs *cols) {
+	cs.declare("addr", "mult")
+	cs.declareLanes("v", CellWidth)
+	for row, a := range c.m.constList {
+		cs.set("addr", row, uint64(a))
+		cs.set("mult", row, uint64(c.m.reads[a]))
+		cs.setCell("v", row, c.m.constVal[a])
+	}
+}
+
+func (c constChip) trace(*cols, *Run) error { return nil }
 
 // windowChip: one row per item of a packed stream.
 //
@@ -116,11 +119,12 @@ func (m *Machine) constChip(b *board.Builder, bus *Bus, t trace.Trace) error {
 //
 // with mask_0 = 1, mask_1..5 = k6, mask_6,7 = k8. The item's other lanes are
 // left to its readers, whose tuples fix them to zero.
-func (m *Machine) windowChip(b *board.Builder, bus *Bus, t trace.Trace) error {
-	if len(m.windows) == 0 {
-		return nil
-	}
-	n := newChipModule(b, windowMod, len(m.windows))
+type windowChip struct{ m *Machine }
+
+func (c windowChip) name() string { return windowMod }
+func (c windowChip) rows() int    { return len(c.m.windows) }
+
+func (c windowChip) define(b *board.Builder, bus *Bus) error {
 	mm := b.Modules[windowMod]
 	active := setupCol(windowMod, "active")
 	bus.Read(windowMod, setupCol(windowMod, "addr_p"), cellCols(windowMod, "p", 0), active)
@@ -149,33 +153,41 @@ func (m *Machine) windowChip(b *board.Builder, bus *Bus, t trace.Trace) error {
 		}
 		mm.AssertZero(mask.Mul(col(windowMod, fmt.Sprintf("i%d", k)).Sub(sum)))
 	}
+	return nil
+}
 
-	c := newCols(n)
-	c.declare("active", "addr_p", "addr_q", "sel_q", "addr_i", "k6", "k8")
-	c.declareLanes("off", CellWidth)
-	c.declareLanes("p", CellWidth)
-	c.declareLanes("q", CellWidth)
-	c.declareLanes("i", CellWidth)
-	for row, w := range m.windows {
-		c.set("active", row, 1)
-		c.set("addr_p", row, uint64(w.p))
-		c.setCell("p", row, m.cells[w.p])
+func (c windowChip) setup(cs *cols) {
+	cs.declare("active", "addr_p", "addr_q", "sel_q", "addr_i", "k6", "k8")
+	cs.declareLanes("off", CellWidth)
+	for row, w := range c.m.windows {
+		cs.set("active", row, 1)
+		cs.set("addr_p", row, uint64(w.p))
 		if w.q >= 0 {
-			c.set("addr_q", row, uint64(w.q))
-			c.set("sel_q", row, 1)
-			c.setCell("q", row, m.cells[w.q])
+			cs.set("addr_q", row, uint64(w.q))
+			cs.set("sel_q", row, 1)
 		}
-		c.set("addr_i", row, uint64(w.item))
-		c.setCell("i", row, m.cells[w.item])
-		c.set(fmt.Sprintf("off%d", w.off), row, 1)
+		cs.set("addr_i", row, uint64(w.item))
+		cs.set(fmt.Sprintf("off%d", w.off), row, 1)
 		if w.kind >= KindE6 {
-			c.set("k6", row, 1)
+			cs.set("k6", row, 1)
 		}
 		if w.kind == KindDigest {
-			c.set("k8", row, 1)
+			cs.set("k8", row, 1)
 		}
 	}
-	c.store(t, windowMod)
+}
+
+func (c windowChip) trace(cs *cols, r *Run) error {
+	cs.declareLanes("p", CellWidth)
+	cs.declareLanes("q", CellWidth)
+	cs.declareLanes("i", CellWidth)
+	for row, w := range c.m.windows {
+		cs.setCell("p", row, r.values[w.p])
+		if w.q >= 0 {
+			cs.setCell("q", row, r.values[w.q])
+		}
+		cs.setCell("i", row, r.values[w.item])
+	}
 	return nil
 }
 
@@ -198,11 +210,12 @@ const koalaHigh = 127
 //	v = w + b·pow                  on the last row
 //	r = inlow·(b + 2·r[+1])
 //	chk·w·(1 − z·inv) = 0,  z = 127 − (v − w)/2^24   (canonical: v < p)
-func (m *Machine) bitsChip(b *board.Builder, bus *Bus, t trace.Trace) error {
-	if len(m.bits) == 0 {
-		return nil
-	}
-	n := newChipModule(b, bitsMod, BitsWidth*len(m.bits))
+type bitsChip struct{ m *Machine }
+
+func (c bitsChip) name() string { return bitsMod }
+func (c bitsChip) rows() int    { return BitsWidth * len(c.m.bits) }
+
+func (c bitsChip) define(b *board.Builder, bus *Bus) error {
 	mm := b.Modules[bitsMod]
 	first, last, active := setupCol(bitsMod, "first"), setupCol(bitsMod, "last"), setupCol(bitsMod, "active")
 	bit, w, r, v, inv := col(bitsMod, "b"), col(bitsMod, "w"), col(bitsMod, "r"), col(bitsMod, "v"), col(bitsMod, "inv")
@@ -224,46 +237,59 @@ func (m *Machine) bitsChip(b *board.Builder, bus *Bus, t trace.Trace) error {
 	bus.Read(bitsMod, setupCol(bitsMod, "addr_v"), cellOf(v), first)
 	bus.Write(bitsMod, setupCol(bitsMod, "r_addr"), cellOf(r), setupCol(bitsMod, "r_mult"))
 	bus.Write(bitsMod, setupCol(bitsMod, "b_addr"), cellOf(bit), setupCol(bitsMod, "b_mult"))
+	return nil
+}
 
-	c := newCols(n)
-	c.declare("b", "w", "r", "v", "inv", "first", "last", "active", "pow", "inlow", "chk",
-		"addr_v", "r_addr", "r_mult", "b_addr", "b_mult")
-	for k, inst := range m.bits {
-		x := m.cells[inst.v][0].Uint64()
+func (c bitsChip) setup(cs *cols) {
+	cs.declare("first", "last", "active", "pow", "inlow", "chk", "addr_v", "r_addr", "r_mult", "b_addr", "b_mult")
+	for k, inst := range c.m.bits {
+		for i := range BitsWidth {
+			row := k*BitsWidth + i
+			cs.set("active", row, 1)
+			cs.set("pow", row, 1<<i)
+			switch i {
+			case 0:
+				cs.set("first", row, 1)
+				cs.set("addr_v", row, uint64(inst.v))
+			case 24:
+				cs.set("chk", row, 1)
+			case BitsWidth - 1:
+				cs.set("last", row, 1)
+			}
+			if i < inst.n {
+				cs.set("inlow", row, 1)
+				cs.set("r_addr", row, uint64(inst.out.Shr[i]))
+				cs.set("r_mult", row, uint64(c.m.reads[inst.out.Shr[i]]))
+				cs.set("b_addr", row, uint64(inst.out.Bit[i]))
+				cs.set("b_mult", row, uint64(c.m.reads[inst.out.Bit[i]]))
+			}
+		}
+	}
+}
+
+func (c bitsChip) trace(cs *cols, r *Run) error {
+	cs.declare("b", "w", "r", "v", "inv")
+	for k, inst := range c.m.bits {
+		x := r.values[inst.v][0].Uint64()
 		low := x & (1<<inst.n - 1)
 		for i := range BitsWidth {
 			row := k*BitsWidth + i
-			c.set("active", row, 1)
-			c.set("pow", row, 1<<i)
-			c.set("b", row, x>>i&1)
-			c.set("w", row, x&(1<<i-1))
-			c.set("v", row, x)
-			switch i {
-			case 0:
-				c.set("first", row, 1)
-				c.set("addr_v", row, uint64(inst.v))
-			case 24:
-				c.set("chk", row, 1)
+			cs.set("b", row, x>>i&1)
+			cs.set("w", row, x&(1<<i-1))
+			cs.set("v", row, x)
+			if i == 24 {
 				var zv koalabear.Element
 				zv.SetUint64(koalaHigh - x>>24)
 				if !zv.IsZero() {
 					zv.Inverse(&zv)
 				}
-				c.setElem("inv", row, zv)
-			case BitsWidth - 1:
-				c.set("last", row, 1)
+				cs.setElem("inv", row, zv)
 			}
 			if i < inst.n {
-				c.set("inlow", row, 1)
-				c.set("r", row, low>>i)
-				c.set("r_addr", row, uint64(inst.out.Shr[i]))
-				c.set("r_mult", row, uint64(m.reads[inst.out.Shr[i]]))
-				c.set("b_addr", row, uint64(inst.out.Bit[i]))
-				c.set("b_mult", row, uint64(m.reads[inst.out.Bit[i]]))
+				cs.set("r", row, low>>i)
 			}
 		}
 	}
-	c.store(t, bitsMod)
 	return nil
 }
 
@@ -274,11 +300,12 @@ func (m *Machine) bitsChip(b *board.Builder, bus *Bus, t trace.Trace) error {
 // over the columns a0..5, b0..5, o0..5. Setup: mul, add, bs (−1, 0 or 1), hor,
 // and per operand x ∈ {a, b, o} addr_x and the signed multiplicity m_x (−1
 // read, the read count for a write, 0 unused).
-func (m *Machine) e6Chip(b *board.Builder, bus *Bus, t trace.Trace) error {
-	if len(m.e6Rows) == 0 {
-		return nil
-	}
-	n := newChipModule(b, e6Mod, len(m.e6Rows))
+type e6Chip struct{ m *Machine }
+
+func (c e6Chip) name() string { return e6Mod }
+func (c e6Chip) rows() int    { return len(c.m.e6Rows) }
+
+func (c e6Chip) define(b *board.Builder, bus *Bus) error {
 	mm := b.Modules[e6Mod]
 	a, bb, o := e6Cols(e6Mod, "a", 0), e6Cols(e6Mod, "b", 0), e6Cols(e6Mod, "o", 0)
 	ab := e6MulExprs(a, bb)
@@ -291,30 +318,66 @@ func (m *Machine) e6Chip(b *board.Builder, bus *Bus, t trace.Trace) error {
 	for _, x := range []string{"a", "b", "o"} {
 		bus.Write(e6Mod, setupCol(e6Mod, "addr_"+x), cellOf(e6Cols(e6Mod, x, 0)...), setupCol(e6Mod, "m_"+x))
 	}
+	return nil
+}
 
-	c := newCols(n)
-	c.declare("mul", "add", "bs", "hor", "addr_a", "m_a", "addr_b", "m_b", "addr_o", "m_o")
-	for _, x := range []string{"a", "b", "o"} {
-		c.declareLanes(x, 6)
-	}
-	for row, r := range m.e6Rows {
-		c.setInt("mul", row, r.mul)
-		c.setInt("add", row, r.add)
-		c.setInt("bs", row, r.bs)
-		c.setInt("hor", row, r.hor)
+func (c e6Chip) setup(cs *cols) {
+	cs.declare("mul", "add", "bs", "hor", "addr_a", "m_a", "addr_b", "m_b", "addr_o", "m_o")
+	for row, r := range c.m.e6Rows {
+		cs.setInt("mul", row, r.mul)
+		cs.setInt("add", row, r.add)
+		cs.setInt("bs", row, r.bs)
+		cs.setInt("hor", row, r.hor)
 		for _, op := range []struct {
 			name string
 			s    slot
-			v    ext.E6
-		}{{"a", r.a, r.va}, {"b", r.b, r.vb}, {"o", r.o, r.vo}} {
-			c.setE6(op.name, row, op.v)
+		}{{"a", r.a}, {"b", r.b}, {"o", r.o}} {
 			if op.s.role != roleNone {
-				c.set("addr_"+op.name, row, uint64(op.s.addr))
-				c.setInt("m_"+op.name, row, m.mult(op.s))
+				cs.set("addr_"+op.name, row, uint64(op.s.addr))
+				cs.setInt("m_"+op.name, row, c.m.mult(op.s))
 			}
 		}
 	}
-	c.store(t, e6Mod)
+}
+
+// trace reads a and b from their cells (zero when unused) and computes o by
+// the row's formula: on a row whose o is read, the bus checks it.
+func (c e6Chip) trace(cs *cols, r *Run) error {
+	for _, x := range []string{"a", "b", "o"} {
+		cs.declareLanes(x, 6)
+	}
+	var prev ext.E6
+	for row, er := range c.m.e6Rows {
+		var a, b, o ext.E6
+		if er.a.role != roleNone {
+			a = CellE6(r.values[er.a.addr])
+		}
+		if er.b.role != roleNone {
+			b = CellE6(r.values[er.b.addr])
+		}
+		var t ext.E6
+		if er.mul != 0 {
+			t.Mul(&a, &b)
+			o.Add(&o, &t)
+		}
+		if er.add != 0 {
+			o.Add(&o, &a)
+		}
+		switch er.bs {
+		case 1:
+			o.Add(&o, &b)
+		case -1:
+			o.Sub(&o, &b)
+		}
+		if er.hor != 0 {
+			t.Mul(&prev, &a)
+			o.Add(&o, &t)
+		}
+		cs.setE6("a", row, a)
+		cs.setE6("b", row, b)
+		cs.setE6("o", row, o)
+		prev = o
+	}
 	return nil
 }
 
@@ -327,15 +390,19 @@ func (m *Machine) e6Chip(b *board.Builder, bus *Bus, t trace.Trace) error {
 // the terminal one,
 //
 //	(p + q)/2 + α·(p − q)·xi/2 + j = p[+1] + bn·(q[+1] − p[+1]).
-func (m *Machine) foldChip(b *board.Builder, bus *Bus, t trace.Trace) error {
-	rows := 0
-	for _, ch := range m.folds {
-		rows += len(ch)
+type foldChip struct{ m *Machine }
+
+func (c foldChip) name() string { return foldMod }
+
+func (c foldChip) rows() int {
+	n := 0
+	for _, ch := range c.m.folds {
+		n += len(ch)
 	}
-	if rows == 0 {
-		return nil
-	}
-	n := newChipModule(b, foldMod, rows)
+	return n
+}
+
+func (c foldChip) define(b *board.Builder, bus *Bus) error {
 	mm := b.Modules[foldMod]
 	active, last := setupCol(foldMod, "active"), setupCol(foldMod, "last")
 	notLast := active.Sub(last)
@@ -360,35 +427,47 @@ func (m *Machine) foldChip(b *board.Builder, bus *Bus, t trace.Trace) error {
 	bus.Read(foldMod, setupCol(foldMod, "addr_al"), cellOf(al...), notLast)
 	bus.Read(foldMod, setupCol(foldMod, "addr_xb"), cellOf(xi, bn), notLast)
 	bus.Read(foldMod, setupCol(foldMod, "addr_j"), cellOf(j...), notLast)
+	return nil
+}
 
-	c := newCols(n)
-	c.declare("active", "last", "addr_p", "addr_q", "addr_al", "addr_xb", "addr_j", "xi", "bn")
-	for _, x := range []string{"p", "q", "al", "j"} {
-		c.declareLanes(x, 6)
-	}
+func (c foldChip) setup(cs *cols) {
+	cs.declare("active", "last", "addr_p", "addr_q", "addr_al", "addr_xb", "addr_j")
 	row := 0
-	for _, ch := range m.folds {
+	for _, ch := range c.m.folds {
 		for _, r := range ch {
-			c.set("active", row, 1)
-			c.set("addr_p", row, uint64(r.p))
-			c.set("addr_q", row, uint64(r.q))
-			c.setE6("p", row, m.e6(r.p))
-			c.setE6("q", row, m.e6(r.q))
+			cs.set("active", row, 1)
+			cs.set("addr_p", row, uint64(r.p))
+			cs.set("addr_q", row, uint64(r.q))
 			if r.alpha < 0 {
-				c.set("last", row, 1)
-				row++
-				continue
+				cs.set("last", row, 1)
+			} else {
+				cs.set("addr_al", row, uint64(r.alpha))
+				cs.set("addr_xb", row, uint64(r.xb))
+				cs.set("addr_j", row, uint64(r.inj))
 			}
-			c.set("addr_al", row, uint64(r.alpha))
-			c.set("addr_xb", row, uint64(r.xb))
-			c.set("addr_j", row, uint64(r.inj))
-			c.setE6("al", row, m.e6(r.alpha))
-			c.setE6("j", row, m.e6(r.inj))
-			c.setElem("xi", row, m.cells[r.xb][0])
-			c.setElem("bn", row, m.cells[r.xb][1])
 			row++
 		}
 	}
-	c.store(t, foldMod)
+}
+
+func (c foldChip) trace(cs *cols, r *Run) error {
+	cs.declare("xi", "bn")
+	for _, x := range []string{"p", "q", "al", "j"} {
+		cs.declareLanes(x, 6)
+	}
+	row := 0
+	for _, ch := range c.m.folds {
+		for _, fr := range ch {
+			cs.setE6("p", row, CellE6(r.values[fr.p]))
+			cs.setE6("q", row, CellE6(r.values[fr.q]))
+			if fr.alpha >= 0 {
+				cs.setE6("al", row, CellE6(r.values[fr.alpha]))
+				cs.setE6("j", row, CellE6(r.values[fr.inj]))
+				cs.setElem("xi", row, r.values[fr.xb][0])
+				cs.setElem("bn", row, r.values[fr.xb][1])
+			}
+			row++
+		}
+	}
 	return nil
 }
