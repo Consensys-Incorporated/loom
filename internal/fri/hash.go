@@ -40,7 +40,7 @@ func (Poseidon2LeafHasher) HashLeafPair(lo, hi RawRow) hash.Digest {
 	nBase := len(lo.RawRowBase)
 	nExt := len(lo.RawRowExt)
 	h := hash.NewPoseidon2SpongeHasher()
-	h.WriteElements(hash.NewElement(leafDomainTag), hash.NewElement(uint64(2*nBase)), hash.NewElement(uint64(2*nExt)))
+	h.WriteElements(hash.NewElement(LeafDomainTag), hash.NewElement(uint64(2*nBase)), hash.NewElement(uint64(2*nExt)))
 	for _, v := range lo.RawRowBase {
 		h.WriteElements(v)
 	}
@@ -78,7 +78,7 @@ func (lh Poseidon2LeafHasher) HashLeafPairs(dst []hash.Digest, src LeafSource, s
 
 func (lh Poseidon2LeafHasher) hashLeafPairsBatch16(dst []hash.Digest, src LeafSource, startPair int) {
 	sponge := hash.NewPoseidon2SpongeBatch16()
-	sponge.WriteSameElement(hash.NewElement(leafDomainTag))
+	sponge.WriteSameElement(hash.NewElement(LeafDomainTag))
 	sponge.WriteSameElement(hash.NewElement(uint64(2 * len(src.Base))))
 	sponge.WriteSameElement(hash.NewElement(uint64(2 * len(src.Ext))))
 
@@ -122,7 +122,7 @@ func (lh Poseidon2LeafHasher) hashLeafPairsBatch16(dst []hash.Digest, src LeafSo
 type Poseidon2NodeHasher struct{}
 
 func (Poseidon2NodeHasher) HashNode(left, right hash.Digest) hash.Digest {
-	return hash.Poseidon2NodeCompress(nodeDomainTag, left, right)
+	return hash.Poseidon2NodeCompress(NodeDomainTag, left, right)
 }
 
 // BatchSize is the lane width of the SIMD-batched Poseidon2 permutation.
@@ -138,7 +138,7 @@ func (Poseidon2NodeHasher) HashNodes(dst, left, right []hash.Digest) {
 	var l, r [n]hash.Digest
 	copy(l[:], left)
 	copy(r[:], right)
-	out := hash.Poseidon2NodeCompressBatch16(nodeDomainTag, &l, &r)
+	out := hash.Poseidon2NodeCompressBatch16(NodeDomainTag, &l, &r)
 	copy(dst, out[:])
 }
 
@@ -150,7 +150,7 @@ func (SHA256LeafHasher) HashLeafPair(lo, hi RawRow) hash.Digest {
 	nBase := len(lo.RawRowBase)
 	nExt := len(lo.RawRowExt)
 	h := hash.NewSHA256FieldHasher()
-	h.WriteElements(hash.NewElement(leafDomainTag), hash.NewElement(uint64(2*nBase)), hash.NewElement(uint64(2*nExt)))
+	h.WriteElements(hash.NewElement(LeafDomainTag), hash.NewElement(uint64(2*nBase)), hash.NewElement(uint64(2*nExt)))
 	for _, v := range lo.RawRowBase {
 		h.WriteElements(v)
 	}
@@ -174,7 +174,7 @@ type SHA256NodeHasher struct{}
 
 func (SHA256NodeHasher) HashNode(left, right hash.Digest) hash.Digest {
 	h := hash.NewSHA256FieldHasher()
-	h.WriteElements(hash.NewElement(nodeDomainTag))
+	h.WriteElements(hash.NewElement(NodeDomainTag))
 	h.WriteElements(left[:]...)
 	h.WriteElements(right[:]...)
 	return h.Sum()
@@ -188,7 +188,7 @@ func (Blake3LeafHasher) HashLeafPair(lo, hi RawRow) hash.Digest {
 	nBase := len(lo.RawRowBase)
 	nExt := len(lo.RawRowExt)
 	h := hash.NewBlake3FieldHasher()
-	h.WriteElements(hash.NewElement(leafDomainTag), hash.NewElement(uint64(2*nBase)), hash.NewElement(uint64(2*nExt)))
+	h.WriteElements(hash.NewElement(LeafDomainTag), hash.NewElement(uint64(2*nBase)), hash.NewElement(uint64(2*nExt)))
 	for _, v := range lo.RawRowBase {
 		h.WriteElements(v)
 	}
@@ -208,7 +208,7 @@ type Blake3NodeHasher struct{}
 
 func (Blake3NodeHasher) HashNode(left, right hash.Digest) hash.Digest {
 	h := hash.NewBlake3FieldHasher()
-	h.WriteElements(hash.NewElement(nodeDomainTag))
+	h.WriteElements(hash.NewElement(NodeDomainTag))
 	h.WriteElements(left[:]...)
 	h.WriteElements(right[:]...)
 	return h.Sum()

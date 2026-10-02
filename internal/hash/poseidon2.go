@@ -53,6 +53,10 @@ var (
 	defaultPoseidon2SpongePerm = poseidon2.NewPermutation(SPONGE_WIDTH, NB_FULL_ROUND, NB_PARTIAL_ROUNDS)
 )
 
+// Poseidon2SpongePermutation returns the width-SPONGE_WIDTH permutation of
+// the sponge hasher and of the Merkle node compression.
+func Poseidon2SpongePermutation() *poseidon2.Permutation { return defaultPoseidon2SpongePerm }
+
 func NewPoseidon2MDHasher() Poseidon2MDHasher {
 	return Poseidon2MDHasher{
 		Perm: defaultPoseidon2Perm,

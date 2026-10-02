@@ -13,10 +13,10 @@ import (
 	"github.com/consensys/loom/trace"
 )
 
-// proveGadget builds a program made of the Poseidon2 gadget alone, fills it
+// proveP2AIR builds a program made of the Poseidon2 AIR alone, fills it
 // from random inputs (row 0 is left as zkc padding), applies tamper, and
 // proves and verifies it.
-func proveGadget(t *testing.T, tamper func(tr trace.Trace)) error {
+func proveP2AIR(t *testing.T, tamper func(tr trace.Trace)) error {
 	t.Helper()
 	const n = 8
 	const module = "p2_perm"
@@ -29,7 +29,7 @@ func proveGadget(t *testing.T, tamper func(tr trace.Trace)) error {
 	m := board.NewModule(module)
 	m.N = n
 	b.AddModule(m)
-	if err := (Poseidon2Gadget{}).Define(&b, module, inputs, outputs); err != nil {
+	if err := (poseidon2AIR{}).Define(&b, module, inputs, outputs); err != nil {
 		t.Fatal(err)
 	}
 	pg, err := board.Compile(&b)
@@ -62,7 +62,7 @@ func proveGadget(t *testing.T, tamper func(tr trace.Trace)) error {
 		tr.SetBase(inputs[i], in[i])
 		tr.SetBase(outputs[i], out[i])
 	}
-	if err := (Poseidon2Gadget{}).Fill(tr, module, inputs, outputs); err != nil {
+	if err := (poseidon2AIR{}).Fill(tr, module, inputs, outputs); err != nil {
 		t.Fatal(err)
 	}
 	if tamper != nil {
@@ -81,8 +81,8 @@ func proveGadget(t *testing.T, tamper func(tr trace.Trace)) error {
 	return loom.Verify(st, prf)
 }
 
-func TestPoseidon2Gadget(t *testing.T) {
-	if err := proveGadget(t, nil); err != nil {
+func TestPoseidon2AIR(t *testing.T) {
+	if err := proveP2AIR(t, nil); err != nil {
 		t.Fatalf("valid trace rejected: %v", err)
 	}
 	cases := map[string]func(tr trace.Trace){
@@ -93,7 +93,7 @@ func TestPoseidon2Gadget(t *testing.T) {
 	}
 	for name, tamper := range cases {
 		t.Run(name, func(t *testing.T) {
-			if err := proveGadget(t, tamper); err == nil {
+			if err := proveP2AIR(t, tamper); err == nil {
 				t.Fatal("tampered trace accepted")
 			}
 		})

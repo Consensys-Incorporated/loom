@@ -27,9 +27,12 @@ import (
 	"github.com/consensys/loom/internal/reedsolomon"
 )
 
+// Domain tags of the Merkle leaves (a leaf hashes LeafDomainTag, the row
+// widths, then the row pair) and nodes (a node compresses NodeDomainTag with
+// its children).
 const (
-	leafDomainTag uint64 = 0x4c454146 // "LEAF"
-	nodeDomainTag uint64 = 0x4e4f4445 // "NODE"
+	LeafDomainTag uint64 = 0x4c454146 // "LEAF"
+	NodeDomainTag uint64 = 0x4e4f4445 // "NODE"
 )
 
 // LeafSource describes the encoded column-oriented data used to build Merkle

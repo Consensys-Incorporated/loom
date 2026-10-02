@@ -65,12 +65,12 @@ func TestComputeChallengeAbsorbsChallengeID(t *testing.T) {
 		t.Fatalf("expected 2 hash inputs, got %d", len(hasher.inputs))
 	}
 
-	expectedZetaInput := append(hash.StringToElements(challengeIDDomainTag, "zeta"), zetaBinding)
+	expectedZetaInput := append(hash.StringToElements(ChallengeIDDomainTag, "zeta"), zetaBinding)
 	if !reflect.DeepEqual(hasher.inputs[0], expectedZetaInput) {
 		t.Fatalf("unexpected zeta input:\nwant %#v\n got %#v", expectedZetaInput, hasher.inputs[0])
 	}
 
-	expectedAlphaInput := append(hash.StringToElements(challengeIDDomainTag, "alpha_DEEP"), zeta[:]...)
+	expectedAlphaInput := append(hash.StringToElements(ChallengeIDDomainTag, "alpha_DEEP"), zeta[:]...)
 	expectedAlphaInput = append(expectedAlphaInput, alphaBinding)
 	if !reflect.DeepEqual(hasher.inputs[1], expectedAlphaInput) {
 		t.Fatalf("unexpected alpha input:\nwant %#v\n got %#v", expectedAlphaInput, hasher.inputs[1])

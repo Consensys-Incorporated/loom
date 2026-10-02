@@ -23,7 +23,7 @@ import (
 	"github.com/consensys/loom/trace"
 )
 
-// Poseidon2Gadget is the AIR of the P2 core: one
+// poseidon2AIR is the AIR of the P2 core: one
 // permutation per row, laid out as Plonky3's poseidon2-air with S-box degree 3
 // and no S-box registers. Its columns are
 //
@@ -35,7 +35,7 @@ import (
 // i.e. 189 columns, and every constraint has degree 3. Between committed
 // columns the state is tracked as linear forms, so the linear layers cost no
 // columns.
-type Poseidon2Gadget struct{}
+type poseidon2AIR struct{}
 
 // p2Matrices returns the external and internal matrices as dense 24×24
 // matrices, obtained by applying gnark-crypto's addition chains to unit vectors.
@@ -112,7 +112,7 @@ func isFullRound(r int) bool {
 	return r < p2HalfFullRounds || r >= p2HalfFullRounds+P2PartialRounds
 }
 
-// p2Columns names the gadget's internal columns: post[r][i] for every full
+// p2Columns names the AIR's internal columns: post[r][i] for every full
 // round but the last, and sbox[r] for partial rounds.
 func p2Columns(module string) (post map[int][]string, sbox map[int]string) {
 	post, sbox = map[int][]string{}, map[int]string{}
@@ -178,13 +178,13 @@ func cube(l linForm, k koalabear.Element) expr.Expr {
 }
 
 // Define adds the constraints of Poseidon2 on every row of the module.
-func (Poseidon2Gadget) Define(b *board.Builder, module string, inputs, outputs []string) error {
+func (poseidon2AIR) Define(b *board.Builder, module string, inputs, outputs []string) error {
 	if len(inputs) != P2Width || len(outputs) != P2Width {
-		return fmt.Errorf("p2_perm gadget: want %d inputs and outputs, got %d and %d", P2Width, len(inputs), len(outputs))
+		return fmt.Errorf("poseidon2 AIR: want %d inputs and outputs, got %d and %d", P2Width, len(inputs), len(outputs))
 	}
 	m, ok := b.Modules[module]
 	if !ok {
-		return fmt.Errorf("p2_perm gadget: module %q not found", module)
+		return fmt.Errorf("poseidon2 AIR: module %q not found", module)
 	}
 	params := poseidon2.NewParameters(P2Width, P2FullRounds, P2PartialRounds)
 	post, sbox := p2Columns(module)
@@ -239,7 +239,7 @@ func (Poseidon2Gadget) Define(b *board.Builder, module string, inputs, outputs [
 // row. Rows whose inputs and outputs are all zero are padding rows: they
 // become the genuine instance P(0). On other rows, the traced outputs must
 // match.
-func (Poseidon2Gadget) Fill(t trace.Trace, module string, inputs, outputs []string) error {
+func (poseidon2AIR) Fill(t trace.Trace, module string, inputs, outputs []string) error {
 	params := poseidon2.NewParameters(P2Width, P2FullRounds, P2PartialRounds)
 	post, sbox := p2Columns(module)
 	n := len(t.Base[inputs[0]])
@@ -289,7 +289,7 @@ func (Poseidon2Gadget) Fill(t trace.Trace, module string, inputs, outputs []stri
 		for i := range state {
 			traced := t.Base[outputs[i]][row]
 			if !padding && !traced.Equal(&state[i]) {
-				return fmt.Errorf("p2_perm gadget: row %d output %d: traced %s, gadget %s", row, i, traced.String(), state[i].String())
+				return fmt.Errorf("poseidon2 AIR: row %d output %d: traced %s, AIR %s", row, i, traced.String(), state[i].String())
 			}
 			t.Base[outputs[i]][row] = state[i]
 		}

@@ -32,7 +32,7 @@ var (
 )
 
 const (
-	challengeIDDomainTag         uint64 = 0x46534944 // "FSID"
+	ChallengeIDDomainTag         uint64 = 0x46534944 // "FSID", before a challenge's name in its digest
 	proofOfWorkDomainTag         uint64 = 0x46535057 // "FSPW"
 	koalabearBits                       = 31
 	maxGrindingBits                     = koalabearBits // current proofs of work use a single Koalabear salt
@@ -285,7 +285,7 @@ func (t *Transcript) ComputeChallenge(challengeID string, opts ...ComputeChallen
 func (t *Transcript) computeChallengeDigest(challengeID string, pos int, challenge challenge, pow *ProofOfWork) (hash.Digest, error) {
 	t.h.Reset()
 
-	t.h.WriteElements(hash.StringToElements(challengeIDDomainTag, challengeID)...)
+	t.h.WriteElements(hash.StringToElements(ChallengeIDDomainTag, challengeID)...)
 
 	// write the previous challenge if it's not the first challenge
 	if pos != 0 {

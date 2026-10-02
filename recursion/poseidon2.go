@@ -13,25 +13,31 @@
 
 package recursion
 
-import "github.com/consensys/gnark-crypto/field/koalabear"
+import (
+	"github.com/consensys/gnark-crypto/field/koalabear"
+	"github.com/consensys/loom/internal/fri"
+	"github.com/consensys/loom/internal/hash"
+)
 
 // Poseidon2 parameters of loom's sponge and Merkle node hasher
-// (internal/hash/hash.go): width 24, 6 full rounds, 21 partial rounds, x^3.
+// (internal/hash): width 24, 6 full rounds, 21 partial rounds, x^3, rate 16,
+// digest 8; and the Merkle domain tags (internal/fri).
 const (
-	P2Width          = 24
-	P2FullRounds     = 6
-	P2PartialRounds  = 21
+	P2Width          = hash.SPONGE_WIDTH
+	P2FullRounds     = hash.NB_FULL_ROUND
+	P2PartialRounds  = hash.NB_PARTIAL_ROUNDS
 	p2HalfFullRounds = P2FullRounds / 2
+	P2Rate           = hash.SPONGE_RATE
+	P2Digest         = hash.DIGEST_NB_ELEMENTS
 
-	// P2Rate and P2Digest are the sponge rate and digest size of loom's
-	// Poseidon2 sponge (internal/hash/poseidon2.go).
-	P2Rate   = 16
-	P2Digest = 8
-
-	// Domain tags of loom's Merkle leaves and nodes (internal/fri/commitment.go).
-	LeafDomainTag uint64 = 0x4c454146 // "LEAF"
-	NodeDomainTag uint64 = 0x4e4f4445 // "NODE"
+	LeafDomainTag = fri.LeafDomainTag
+	NodeDomainTag = fri.NodeDomainTag
 )
+
+// The internal matrix diagonal and the linear layers below repeat
+// gnark-crypto's (field/koalabear/poseidon2), which does not export them; the
+// AIR needs them as constraint coefficients. TestPoseidon2AIR proves
+// the AIR against gnark-crypto's permutation, so a drift would fail it.
 
 // p2Diag24 is the diagonal of the width-24 internal matrix, M = 1·1ᵀ + diag,
 // as used by gnark-crypto's matMulInternalInPlace.

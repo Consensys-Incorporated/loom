@@ -226,7 +226,7 @@ func (m *Machine) Compile() (*Program, error) {
 	np := height(m.numPerms())
 	b.Modules[p2Mod].N = np
 	p.p2Height = np
-	if err := (Poseidon2Gadget{}).Define(&b, p2Mod, p2Ins(), p2Outs()); err != nil {
+	if err := (poseidon2AIR{}).Define(&b, p2Mod, p2Ins(), p2Outs()); err != nil {
 		return nil, err
 	}
 	if err := bus.Build(&b); err != nil {
@@ -400,7 +400,7 @@ func p2Outs() []string {
 }
 
 // p2Trace fills the P2 core: one row per permutation recorded by the sponge
-// and Merkle traces, then the gadget's round columns.
+// and Merkle traces, then the AIR's round columns.
 func p2Trace(r *Run, n int) error {
 	pc := newCols(n)
 	perm := newPerm()
@@ -418,7 +418,7 @@ func p2Trace(r *Run, n int) error {
 		pc.declare(fmt.Sprintf("s%d", i), fmt.Sprintf("r%d", i))
 	}
 	pc.store(r.Trace, p2Mod)
-	return (Poseidon2Gadget{}).Fill(r.Trace, p2Mod, p2Ins(), p2Outs())
+	return (poseidon2AIR{}).Fill(r.Trace, p2Mod, p2Ins(), p2Outs())
 }
 
 // p2Table returns the P2 core's lookup target (inputs, then the first nOut

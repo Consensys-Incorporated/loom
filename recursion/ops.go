@@ -19,6 +19,7 @@ import (
 	"github.com/consensys/gnark-crypto/field/koalabear"
 	ext "github.com/consensys/gnark-crypto/field/koalabear/extensions"
 	"github.com/consensys/gnark-crypto/field/koalabear/poseidon2"
+	"github.com/consensys/loom/internal/hash"
 )
 
 // Cell layouts: an E6 value in lanes 0..5 (B0.A0, B0.A1, B1.A0, B1.A1, B2.A0,
@@ -41,9 +42,7 @@ func CellE6(c Cell) ext.E6 {
 // ScalarCell returns the cell of v.
 func ScalarCell(v koalabear.Element) Cell { return Cell{v} }
 
-func newPerm() *poseidon2.Permutation {
-	return poseidon2.NewPermutation(width, P2FullRounds, P2PartialRounds)
-}
+func newPerm() *poseidon2.Permutation { return hash.Poseidon2SpongePermutation() }
 
 // Const returns the address of a constant cell of value v, written by the
 // const chip (its values are setup columns). Constants are shared.
