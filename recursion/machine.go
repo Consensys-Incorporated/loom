@@ -15,6 +15,7 @@ package recursion
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/consensys/gnark-crypto/field/koalabear"
 	"github.com/consensys/loom/board"
@@ -207,27 +208,23 @@ func (m *Machine) Compile() (*Program, error) {
 	setup := trace.New()
 	p := &Program{m: m}
 
-	// The P2 core exists first: the other chips look up into it. Its height
-	// is set once every permutation is known.
-	b.AddModule(board.NewModule(p2Mod))
+	// Every module exists before any chip is defined: a chip may look up into
+	// another one (the sponge and Merkle chips into the P2 core).
+	var used []chip
 	for _, c := range m.chips() {
 		if c.rows() == 0 {
 			continue
 		}
-		n := newChipModule(&b, c.name(), c.rows())
-		p.heights = append(p.heights, chipHeight{c.name(), n})
+		used = append(used, c)
+		p.heights = append(p.heights, chipHeight{c.name(), newChipModule(&b, c.name(), c.rows())})
+	}
+	for i, c := range used {
 		if err := c.define(&b, bus); err != nil {
 			return nil, fmt.Errorf("chip %s: %w", c.name(), err)
 		}
-		cols := newCols(n)
+		cols := newCols(p.heights[i].n)
 		c.setup(cols)
 		cols.store(setup, c.name())
-	}
-	np := height(m.numPerms())
-	b.Modules[p2Mod].N = np
-	p.p2Height = np
-	if err := (poseidon2AIR{}).Define(&b, p2Mod, p2Ins(), p2Outs()); err != nil {
-		return nil, err
 	}
 	if err := bus.Build(&b); err != nil {
 		return nil, err
@@ -242,7 +239,9 @@ func (m *Machine) Compile() (*Program, error) {
 
 // chip is one module of the machine: define adds its AIR and bus accesses,
 // setup fills its setup columns (from the program), trace its witness columns
-// (from an execution).
+// (from an execution). Chips are traced in the order of Machine.chips, so a
+// chip may use what an earlier one recorded in the Run (the P2 core, the
+// permutations of the sponge and Merkle chips).
 type chip interface {
 	name() string
 	rows() int
@@ -253,7 +252,7 @@ type chip interface {
 
 func (m *Machine) chips() []chip {
 	return []chip{witnessChip{m}, constChip{m}, spongeChip{m}, merkleChip{m},
-		windowChip{m}, bitsChip{m}, e6Chip{m}, foldChip{m}}
+		windowChip{m}, bitsChip{m}, e6Chip{m}, foldChip{m}, p2Chip{m}}
 }
 
 // numPerms is the number of Poseidon2 permutations: one per sponge block and
@@ -277,11 +276,10 @@ type chipHeight struct {
 // Program is a compiled machine: its loom program and setup columns, built
 // once, and executed on any number of inputs.
 type Program struct {
-	Loom     board.Program
-	Setup    trace.Trace // the setup columns, for loom.Setup
-	m        *Machine
-	heights  []chipHeight // the chips with rows, in compile order
-	p2Height int
+	Loom    board.Program
+	Setup   trace.Trace // the setup columns, for loom.Setup
+	m       *Machine
+	heights []chipHeight // the chips with rows, in Machine.chips order
 }
 
 // NumInputs returns the number of input cells of an execution.
@@ -328,9 +326,6 @@ func (p *Program) Execute(inputs []Cell) (*Run, error) {
 			return nil, fmt.Errorf("chip %s: %w", h.module, err)
 		}
 		cols.store(r.Trace, h.module)
-	}
-	if err := p2Trace(r, p.p2Height); err != nil {
-		return nil, err
 	}
 	return r, nil
 }
@@ -399,10 +394,29 @@ func p2Outs() []string {
 	return res
 }
 
-// p2Trace fills the P2 core: one row per permutation recorded by the sponge
-// and Merkle traces, then the AIR's round columns.
-func p2Trace(r *Run, n int) error {
-	pc := newCols(n)
+// p2Chip: the P2 core, one row per Poseidon2 permutation of the sponge and
+// Merkle chips (their lookup target), constrained by poseidon2AIR. Columns:
+// s0..23 (input), r0..23 (output), and the AIR's round columns. No setup, no
+// memory access.
+type p2Chip struct{ m *Machine }
+
+func (c p2Chip) name() string { return p2Mod }
+func (c p2Chip) rows() int    { return c.m.numPerms() }
+
+func (c p2Chip) define(b *board.Builder, bus *Bus) error {
+	return (poseidon2AIR{}).Define(b, p2Mod, p2Ins(), p2Outs())
+}
+
+func (c p2Chip) setup(*cols) {}
+
+// trace fills the permutations recorded by the sponge and Merkle traces, then
+// the AIR's round columns.
+func (c p2Chip) trace(cs *cols, r *Run) error {
+	if len(r.p2) != c.rows() {
+		return fmt.Errorf("%d permutations recorded, want %d", len(r.p2), c.rows())
+	}
+	cs.declareLanes("s", width)
+	cs.declareLanes("r", width)
 	perm := newPerm()
 	for row, in := range r.p2 {
 		out := in
@@ -410,15 +424,21 @@ func p2Trace(r *Run, n int) error {
 			return err
 		}
 		for i := range width {
-			pc.setElem(fmt.Sprintf("s%d", i), row, in[i])
-			pc.setElem(fmt.Sprintf("r%d", i), row, out[i])
+			cs.setElem(fmt.Sprintf("s%d", i), row, in[i])
+			cs.setElem(fmt.Sprintf("r%d", i), row, out[i])
 		}
 	}
-	for i := range width {
-		pc.declare(fmt.Sprintf("s%d", i), fmt.Sprintf("r%d", i))
+	// The AIR fills its columns from a trace: run it on these columns and
+	// take its own back.
+	tmp := trace.New()
+	cs.store(tmp, p2Mod)
+	if err := (poseidon2AIR{}).Fill(tmp, p2Mod, p2Ins(), p2Outs()); err != nil {
+		return err
 	}
-	pc.store(r.Trace, p2Mod)
-	return (poseidon2AIR{}).Fill(r.Trace, p2Mod, p2Ins(), p2Outs())
+	for name, v := range tmp.Base {
+		cs.vals[strings.TrimPrefix(name, p2Mod+".")] = v
+	}
+	return nil
 }
 
 // p2Table returns the P2 core's lookup target (inputs, then the first nOut
