@@ -56,12 +56,14 @@ type Machine struct {
 	reads  []int // read count of every address
 
 	inputs    []int // input cells, in input order
+	hints     []int // cells the witness chip writes with a computed value (Pack streams, Lanes)
 	consts    map[Cell]int
 	constList []int        // addresses written by the const chip
 	constVal  map[int]Cell // value of every constant
 
 	instrs  []instr // every instruction, in execution order
 	packs   []packInst
+	lanes   []lanesInst
 	sponges []spongeInst
 	paths   []pathInst
 	windows []windowInst
@@ -78,6 +80,7 @@ type instr struct {
 
 const (
 	instrPack = iota
+	instrLanes
 	instrSponge
 	instrPath
 	instrBits
@@ -253,6 +256,11 @@ func (m *Machine) exec(in instr, r *Run) error {
 	switch in.kind {
 	case instrPack:
 		m.execPack(m.packs[in.idx], r)
+	case instrLanes:
+		l := m.lanes[in.idx]
+		var c Cell
+		copy(c[:l.kind], r.values[l.src][l.off:l.off+l.kind])
+		r.values[l.out] = c
 	case instrSponge:
 		s := m.sponges[in.idx]
 		d, err := spongeDigest(r, s)

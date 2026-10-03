@@ -16,7 +16,8 @@ package recursion
 import "github.com/consensys/loom/board"
 
 // witnessChip: one row per cell the prover writes freely: the inputs, and the
-// streams of Pack (whose windows check them against their items).
+// hints, cells computed during execution whose windows check them (the
+// streams of Pack, the outputs of Lanes).
 //
 // Setup: addr, mult. Columns: v0..7.
 type witnessChip struct{ m *Machine }
@@ -24,11 +25,7 @@ type witnessChip struct{ m *Machine }
 func (c witnessChip) name() string { return witnessMod }
 
 func (c witnessChip) cells() []int {
-	res := append([]int(nil), c.m.inputs...)
-	for _, p := range c.m.packs {
-		res = append(res, p.stream...)
-	}
-	return res
+	return append(append([]int(nil), c.m.inputs...), c.m.hints...)
 }
 
 func (c witnessChip) rows() int { return len(c.cells()) }

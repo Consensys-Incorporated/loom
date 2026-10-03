@@ -9,7 +9,9 @@ import (
 	fieldhash "github.com/consensys/loom/internal/hash"
 )
 
-const publicInputDomainTag uint64 = 0x50554249 // "PUBI"
+// DomainTag starts the transcript encoding of the public inputs, and of each
+// name and module in it.
+const DomainTag uint64 = 0x50554249 // "PUBI"
 
 type Input struct {
 	Module  string
@@ -53,22 +55,13 @@ func (inputs Inputs) TranscriptElements() []koalabear.Element {
 	sort.Strings(names)
 
 	res := make([]koalabear.Element, 0)
-	res = append(res, fieldhash.NewElement(publicInputDomainTag), fieldhash.NewElement(uint64(len(names))))
+	res = append(res, fieldhash.NewElement(DomainTag), fieldhash.NewElement(uint64(len(names))))
 	for _, name := range names {
 		input := inputs[name]
-		res = append(res, fieldhash.StringToElements(publicInputDomainTag, name)...)
-		res = append(res, fieldhash.StringToElements(publicInputDomainTag, input.Module)...)
+		res = append(res, fieldhash.StringToElements(DomainTag, name)...)
+		res = append(res, fieldhash.StringToElements(DomainTag, input.Module)...)
 
-		entries := append([]Entry(nil), input.Entries...)
-		sort.Slice(entries, func(i, j int) bool {
-			if entries[i].Idx != entries[j].Idx {
-				return entries[i].Idx < entries[j].Idx
-			}
-			if entries[i].Field != entries[j].Field {
-				return entries[i].Field < entries[j].Field
-			}
-			return compareEntryValues(entries[i], entries[j]) < 0
-		})
+		entries := input.SortedEntries()
 
 		res = append(res, fieldhash.NewElement(uint64(len(entries))))
 		for _, entry := range entries {
@@ -78,6 +71,22 @@ func (inputs Inputs) TranscriptElements() []koalabear.Element {
 	}
 
 	return res
+}
+
+// SortedEntries returns the entries in their transcript order: by index, then
+// field, then value.
+func (input Input) SortedEntries() []Entry {
+	entries := append([]Entry(nil), input.Entries...)
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Idx != entries[j].Idx {
+			return entries[i].Idx < entries[j].Idx
+		}
+		if entries[i].Field != entries[j].Field {
+			return entries[i].Field < entries[j].Field
+		}
+		return compareEntryValues(entries[i], entries[j]) < 0
+	})
+	return entries
 }
 
 func appendEntryValueElements(dst []koalabear.Element, entry Entry) []koalabear.Element {

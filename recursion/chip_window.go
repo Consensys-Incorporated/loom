@@ -49,6 +49,7 @@ func (m *Machine) Pack(items, kinds []int) ([]int, int) {
 	for i := range stream {
 		stream[i] = m.alloc()
 	}
+	m.hints = append(m.hints, stream...)
 	m.packs = append(m.packs, packInst{items: items, kinds: kinds, stream: stream})
 	m.record(instrPack, len(m.packs)-1)
 	g := 0
@@ -67,6 +68,27 @@ func (m *Machine) execPack(p packInst, r *Run) {
 	for c, v := range PackElements(xs) {
 		r.values[p.stream[c]] = v
 	}
+}
+
+type lanesInst struct {
+	src, off, kind, out int
+}
+
+// Lanes returns a cell holding lanes off..off+kind−1 of the cell src, in its
+// lanes 0..kind−1 and zero elsewhere: for instance the E6 value of a
+// challenge digest (Lanes(d, 0, KindE6)), or one of its lanes as a scalar.
+// The witness chip writes it, and a window checks it against src.
+func (m *Machine) Lanes(src, off, kind int) int {
+	checkKind(kind)
+	if off < 0 || off+kind > CellWidth {
+		panic(fmt.Sprintf("Lanes: lanes %d..%d out of a cell", off, off+kind-1))
+	}
+	out := m.alloc()
+	m.hints = append(m.hints, out)
+	m.lanes = append(m.lanes, lanesInst{src, off, kind, out})
+	m.record(instrLanes, len(m.lanes)-1)
+	m.Window([]int{src}, off, kind, out)
+	return out
 }
 
 // Window checks that item is the kind elements of the stream starting at
