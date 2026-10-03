@@ -31,12 +31,13 @@ type e6Row struct {
 	a, b, o           slot
 }
 
-// e6Op is one E6 instruction: its kind, operands and rows.
-type e6Op struct {
-	kind       int
-	args       []int // operand addresses
-	out        int   // the written cell, or -1
-	rows, nrow int   // first row in e6Rows, number of rows
+// e6Inst is one E6 instruction: its kind, operands, written cell and rows
+// (one, or one per coefficient for Horner).
+type e6Inst struct {
+	kind int
+	args []int // operand addresses
+	out  int   // the written cell, or -1
+	rows []e6Row
 }
 
 const (
@@ -48,40 +49,39 @@ const (
 	opHorner // args = y, coeffs...
 )
 
-func (m *Machine) e6Op(kind int, args []int, out int, rows ...e6Row) int {
-	m.e6Ops = append(m.e6Ops, e6Op{kind: kind, args: args, out: out, rows: len(m.e6Rows), nrow: len(rows)})
-	m.e6Rows = append(m.e6Rows, rows...)
-	m.record(instrE6, len(m.e6Ops)-1)
+func (m *Machine) addE6(kind int, args []int, out int, rows ...e6Row) int {
+	m.e6Insts = append(m.e6Insts, e6Inst{kind: kind, args: args, out: out, rows: rows})
+	m.record(instrE6, len(m.e6Insts)-1)
 	return out
 }
 
 // Mul returns a·b.
 func (m *Machine) Mul(a, b int) int {
 	r := e6Row{mul: 1, a: m.rd(a), b: m.rd(b), o: m.wr()}
-	return m.e6Op(opMul, []int{a, b}, r.o.addr, r)
+	return m.addE6(opMul, []int{a, b}, r.o.addr, r)
 }
 
 // Add returns a + b.
 func (m *Machine) Add(a, b int) int {
 	r := e6Row{add: 1, bs: 1, a: m.rd(a), b: m.rd(b), o: m.wr()}
-	return m.e6Op(opAdd, []int{a, b}, r.o.addr, r)
+	return m.addE6(opAdd, []int{a, b}, r.o.addr, r)
 }
 
 // Sub returns a − b.
 func (m *Machine) Sub(a, b int) int {
 	r := e6Row{add: 1, bs: -1, a: m.rd(a), b: m.rd(b), o: m.wr()}
-	return m.e6Op(opSub, []int{a, b}, r.o.addr, r)
+	return m.addE6(opSub, []int{a, b}, r.o.addr, r)
 }
 
 // Div returns n/d, checked as d·q = n. Executing it fails if d is zero.
 func (m *Machine) Div(n, d int) int {
 	r := e6Row{mul: 1, a: m.rd(d), b: m.wr(), o: m.rd(n)}
-	return m.e6Op(opDiv, []int{n, d}, r.b.addr, r)
+	return m.addE6(opDiv, []int{n, d}, r.b.addr, r)
 }
 
 // AssertEq checks that the cells a and b hold the same E6 value.
 func (m *Machine) AssertEq(a, b int) {
-	m.e6Op(opEq, []int{a, b}, -1, e6Row{add: 1, a: m.rd(a), o: m.rd(b)})
+	m.addE6(opEq, []int{a, b}, -1, e6Row{add: 1, a: m.rd(a), o: m.rd(b)})
 }
 
 // Horner returns Σ_i coeffs[i]·y^(len−1−i), one row per coefficient: the
@@ -98,10 +98,10 @@ func (m *Machine) Horner(y int, coeffs []int) int {
 		}
 	}
 	rows[len(rows)-1].o = m.wr()
-	return m.e6Op(opHorner, append([]int{y}, coeffs...), rows[len(rows)-1].o.addr, rows...)
+	return m.addE6(opHorner, append([]int{y}, coeffs...), rows[len(rows)-1].o.addr, rows...)
 }
 
-func (m *Machine) execE6(op e6Op, r *Run) error {
+func (m *Machine) execE6(op e6Inst, r *Run) error {
 	v := func(i int) ext.E6 { return CellE6(r.values[op.args[i]]) }
 	var z ext.E6
 	switch op.kind {
@@ -146,7 +146,13 @@ type e6Chip struct{ m *Machine }
 
 func (c e6Chip) name() string { return e6Mod }
 
-func (c e6Chip) rows() int { return len(c.m.e6Rows) }
+func (c e6Chip) rows() int {
+	n := 0
+	for _, in := range c.m.e6Insts {
+		n += len(in.rows)
+	}
+	return n
+}
 
 func (c e6Chip) define(b *board.Builder, bus *Bus) error {
 	mm := b.Modules[e6Mod]
@@ -166,19 +172,27 @@ func (c e6Chip) define(b *board.Builder, bus *Bus) error {
 
 func (c e6Chip) setup(cs *cols) {
 	cs.declare("mul", "add", "bs", "hor", "addr_a", "m_a", "addr_b", "m_b", "addr_o", "m_o")
-	for row, r := range c.m.e6Rows {
-		cs.setInt("mul", row, r.mul)
-		cs.setInt("add", row, r.add)
-		cs.setInt("bs", row, r.bs)
-		cs.setInt("hor", row, r.hor)
-		for _, op := range []struct {
-			name string
-			s    slot
-		}{{"a", r.a}, {"b", r.b}, {"o", r.o}} {
-			if op.s.role != roleNone {
-				cs.set("addr_"+op.name, row, uint64(op.s.addr))
-				cs.setInt("m_"+op.name, row, c.m.mult(op.s))
-			}
+	row := -1
+	for _, in := range c.m.e6Insts {
+		for _, r := range in.rows {
+			row++
+			c.setupRow(cs, row, r)
+		}
+	}
+}
+
+func (c e6Chip) setupRow(cs *cols, row int, r e6Row) {
+	cs.setInt("mul", row, r.mul)
+	cs.setInt("add", row, r.add)
+	cs.setInt("bs", row, r.bs)
+	cs.setInt("hor", row, r.hor)
+	for _, op := range []struct {
+		name string
+		s    slot
+	}{{"a", r.a}, {"b", r.b}, {"o", r.o}} {
+		if op.s.role != roleNone {
+			cs.set("addr_"+op.name, row, uint64(op.s.addr))
+			cs.setInt("m_"+op.name, row, c.m.mult(op.s))
 		}
 	}
 }
@@ -190,36 +204,45 @@ func (c e6Chip) trace(cs *cols, r *Run) error {
 		cs.declareLanes(x, 6)
 	}
 	var prev ext.E6
-	for row, er := range c.m.e6Rows {
-		var a, b, o ext.E6
-		if er.a.role != roleNone {
-			a = CellE6(r.values[er.a.addr])
+	row := -1
+	for _, in := range c.m.e6Insts {
+		for _, er := range in.rows {
+			row++
+			prev = traceE6Row(cs, row, er, prev, r)
 		}
-		if er.b.role != roleNone {
-			b = CellE6(r.values[er.b.addr])
-		}
-		var t ext.E6
-		if er.mul != 0 {
-			t.Mul(&a, &b)
-			o.Add(&o, &t)
-		}
-		if er.add != 0 {
-			o.Add(&o, &a)
-		}
-		switch er.bs {
-		case 1:
-			o.Add(&o, &b)
-		case -1:
-			o.Sub(&o, &b)
-		}
-		if er.hor != 0 {
-			t.Mul(&prev, &a)
-			o.Add(&o, &t)
-		}
-		cs.setE6("a", row, a)
-		cs.setE6("b", row, b)
-		cs.setE6("o", row, o)
-		prev = o
 	}
 	return nil
+}
+
+// traceE6Row fills one row and returns its o, the next row's o[−1].
+func traceE6Row(cs *cols, row int, er e6Row, prev ext.E6, r *Run) ext.E6 {
+	var a, b, o ext.E6
+	if er.a.role != roleNone {
+		a = CellE6(r.values[er.a.addr])
+	}
+	if er.b.role != roleNone {
+		b = CellE6(r.values[er.b.addr])
+	}
+	var t ext.E6
+	if er.mul != 0 {
+		t.Mul(&a, &b)
+		o.Add(&o, &t)
+	}
+	if er.add != 0 {
+		o.Add(&o, &a)
+	}
+	switch er.bs {
+	case 1:
+		o.Add(&o, &b)
+	case -1:
+		o.Sub(&o, &b)
+	}
+	if er.hor != 0 {
+		t.Mul(&prev, &a)
+		o.Add(&o, &t)
+	}
+	cs.setE6("a", row, a)
+	cs.setE6("b", row, b)
+	cs.setE6("o", row, o)
+	return o
 }

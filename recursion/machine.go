@@ -66,8 +66,7 @@ type Machine struct {
 	paths   []pathInst
 	windows []windowInst
 	bits    []bitsInst
-	e6Ops   []e6Op
-	e6Rows  []e6Row
+	e6Insts []e6Inst
 	folds   [][]foldRow
 }
 
@@ -266,7 +265,7 @@ func (m *Machine) exec(in instr, r *Run) error {
 	case instrBits:
 		m.execBits(m.bits[in.idx], r)
 	case instrE6:
-		return m.execE6(m.e6Ops[in.idx], r)
+		return m.execE6(m.e6Insts[in.idx], r)
 	}
 	return nil
 }
