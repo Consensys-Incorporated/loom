@@ -15,11 +15,9 @@ package recursion
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/consensys/gnark-crypto/field/koalabear"
 	"github.com/consensys/loom/board"
-	"github.com/consensys/loom/expr"
 	"github.com/consensys/loom/trace"
 )
 
@@ -87,24 +85,6 @@ const (
 	instrE6
 )
 
-type packInst struct {
-	items, kinds []int
-	stream       []int // the stream cells, written by the witness chip
-}
-
-type spongeInst struct {
-	data   []int // data cells, 2 per block
-	length int   // number of input elements
-	out    int   // digest address
-}
-
-type pathInst struct {
-	leaf, index, root int
-	siblings          []int
-	gens              []koalabear.Element // x⁻¹ accumulator constants, nil if unused
-	xb                int                 // address of [x⁻¹, b0], if gens != nil
-}
-
 func (m *Machine) alloc() int {
 	m.reads = append(m.reads, 0)
 	m.nCells++
@@ -149,54 +129,6 @@ func PackElements(xs []koalabear.Element) []Cell {
 		}
 	}
 	return res
-}
-
-// Sponge hashes the first length elements of the data cells (2 per block,
-// as laid out by InputStream or Pack) with loom's Poseidon2 sponge, and
-// returns the address of the digest.
-func (m *Machine) Sponge(data []int, length int) int {
-	if len(data) != streamCells(length) || length == 0 {
-		panic(fmt.Sprintf("Sponge: %d cells for %d elements", len(data), length))
-	}
-	for _, d := range data {
-		m.read(d)
-	}
-	out := m.alloc()
-	m.sponges = append(m.sponges, spongeInst{data: data, length: length, out: out})
-	m.record(instrSponge, len(m.sponges)-1)
-	return out
-}
-
-// MerklePath checks that the digest at leaf is the leaf of index (lane 0 of
-// the index cell) under the root, with siblings leaf-level first.
-func (m *Machine) MerklePath(leaf int, siblings []int, index int, root int) {
-	m.read(leaf)
-	m.read(index)
-	m.read(root)
-	for _, s := range siblings {
-		m.read(s)
-	}
-	m.paths = append(m.paths, pathInst{leaf: leaf, index: index, root: root, siblings: siblings, xb: -1})
-	m.record(instrPath, len(m.paths)-1)
-}
-
-// MerklePathX is MerklePath for the Merkle tree of a FRI layer over a domain
-// of generator g⁻¹ = gInv: it also returns the cell [x⁻¹, b0], where x⁻¹ =
-// gInv^bitrev(index) (bit-reversed over the path depth) is the inverse of the
-// fold point of the queried pair, and b0 is the index's low bit.
-func (m *Machine) MerklePathX(leaf int, siblings []int, index int, root int, gInv koalabear.Element) int {
-	m.MerklePath(leaf, siblings, index, root)
-	p := &m.paths[len(m.paths)-1]
-	d := len(siblings)
-	for lvl := range d {
-		g := gInv
-		for range d - 1 - lvl {
-			g.Square(&g)
-		}
-		p.gens = append(p.gens, g)
-	}
-	p.xb = m.alloc()
-	return p.xb
 }
 
 // Compile builds the chips, their constraints and the memory bus, and the
@@ -253,19 +185,6 @@ type chip interface {
 func (m *Machine) chips() []chip {
 	return []chip{witnessChip{m}, constChip{m}, spongeChip{m}, merkleChip{m},
 		windowChip{m}, bitsChip{m}, e6Chip{m}, foldChip{m}, p2Chip{m}}
-}
-
-// numPerms is the number of Poseidon2 permutations: one per sponge block and
-// one per Merkle level.
-func (m *Machine) numPerms() int {
-	n := 0
-	for _, s := range m.sponges {
-		n += len(s.data) / 2
-	}
-	for _, p := range m.paths {
-		n += len(p.siblings)
-	}
-	return n
 }
 
 type chipHeight struct {
@@ -352,22 +271,6 @@ func (m *Machine) exec(in instr, r *Run) error {
 	return nil
 }
 
-func setupCol(module, name string) expr.Expr { return expr.Setup(module + "." + name) }
-func col(module, name string) expr.Expr      { return expr.Col(module + "." + name) }
-func colShift(module, name string, s int) expr.Expr {
-	return expr.Col(module+"."+name, expr.WithShift(s))
-}
-func constE(v uint64) expr.Expr { return expr.Const(koalabear.NewElement(v)) }
-func one() expr.Expr            { return constE(1) }
-
-func cellCols(module, prefix string, from int) [CellWidth]expr.Expr {
-	var res [CellWidth]expr.Expr
-	for i := range res {
-		res[i] = col(module, fmt.Sprintf("%s%d", prefix, from+i))
-	}
-	return res
-}
-
 func height(n int) int {
 	h := 4
 	for h < n {
@@ -376,80 +279,10 @@ func height(n int) int {
 	return h
 }
 
-// ── P2 core ──────────────────────────────────────────────────────────────────
-
-func p2Ins() []string {
-	res := make([]string, width)
-	for i := range res {
-		res[i] = fmt.Sprintf("%s.s%d", p2Mod, i)
-	}
-	return res
-}
-
-func p2Outs() []string {
-	res := make([]string, width)
-	for i := range res {
-		res[i] = fmt.Sprintf("%s.r%d", p2Mod, i)
-	}
-	return res
-}
-
-// p2Chip: the P2 core, one row per Poseidon2 permutation of the sponge and
-// Merkle chips (their lookup target), constrained by poseidon2AIR. Columns:
-// s0..23 (input), r0..23 (output), and the AIR's round columns. No setup, no
-// memory access.
-type p2Chip struct{ m *Machine }
-
-func (c p2Chip) name() string { return p2Mod }
-func (c p2Chip) rows() int    { return c.m.numPerms() }
-
-func (c p2Chip) define(b *board.Builder, bus *Bus) error {
-	return (poseidon2AIR{}).Define(b, p2Mod, p2Ins(), p2Outs())
-}
-
-func (c p2Chip) setup(*cols) {}
-
-// trace fills the permutations recorded by the sponge and Merkle traces, then
-// the AIR's round columns.
-func (c p2Chip) trace(cs *cols, r *Run) error {
-	if len(r.p2) != c.rows() {
-		return fmt.Errorf("%d permutations recorded, want %d", len(r.p2), c.rows())
-	}
-	cs.declareLanes("s", width)
-	cs.declareLanes("r", width)
-	perm := newPerm()
-	for row, in := range r.p2 {
-		out := in
-		if err := perm.Permutation(out[:]); err != nil {
-			return err
-		}
-		for i := range width {
-			cs.setElem(fmt.Sprintf("s%d", i), row, in[i])
-			cs.setElem(fmt.Sprintf("r%d", i), row, out[i])
-		}
-	}
-	// The AIR fills its columns from a trace: run it on these columns and
-	// take its own back.
-	tmp := trace.New()
-	cs.store(tmp, p2Mod)
-	if err := (poseidon2AIR{}).Fill(tmp, p2Mod, p2Ins(), p2Outs()); err != nil {
-		return err
-	}
-	for name, v := range tmp.Base {
-		cs.vals[strings.TrimPrefix(name, p2Mod+".")] = v
-	}
-	return nil
-}
-
-// p2Table returns the P2 core's lookup target (inputs, then the first nOut
-// outputs).
-func p2Table(nOut int) board.Table {
-	t := board.NewTable(p2Mod, width+nOut)
-	for i := range width {
-		t.In[i] = col(p2Mod, fmt.Sprintf("s%d", i))
-	}
-	for i := range nOut {
-		t.In[width+i] = col(p2Mod, fmt.Sprintf("r%d", i))
-	}
-	return t
+func newChipModule(b *board.Builder, name string, rows int) int {
+	n := height(rows)
+	mod := board.NewModule(name)
+	mod.N = n
+	b.AddModule(mod)
+	return n
 }

@@ -20,157 +20,62 @@ import (
 	"github.com/consensys/loom/arguments"
 	"github.com/consensys/loom/board"
 	"github.com/consensys/loom/expr"
-	"github.com/consensys/loom/trace"
 )
 
-// witnessChip: one row per cell the prover writes freely: the inputs, and the
-// streams of Pack (whose windows check them against their items).
-//
-// Setup: addr, mult. Columns: v0..7.
-type witnessChip struct{ m *Machine }
+type pathInst struct {
+	leaf, index, root int
+	siblings          []int
+	gens              []koalabear.Element // x⁻¹ accumulator constants, nil if unused
+	xb                int                 // address of [x⁻¹, b0], if gens != nil
+}
 
-func (c witnessChip) name() string { return witnessMod }
-
-func (c witnessChip) cells() []int {
-	res := append([]int(nil), c.m.inputs...)
-	for _, p := range c.m.packs {
-		res = append(res, p.stream...)
+// MerklePath checks that the digest at leaf is the leaf of index (lane 0 of
+// the index cell) under the root, with siblings leaf-level first.
+func (m *Machine) MerklePath(leaf int, siblings []int, index int, root int) {
+	m.read(leaf)
+	m.read(index)
+	m.read(root)
+	for _, s := range siblings {
+		m.read(s)
 	}
-	return res
+	m.paths = append(m.paths, pathInst{leaf: leaf, index: index, root: root, siblings: siblings, xb: -1})
+	m.record(instrPath, len(m.paths)-1)
 }
 
-func (c witnessChip) rows() int { return len(c.cells()) }
-
-func (c witnessChip) define(b *board.Builder, bus *Bus) error {
-	bus.Write(witnessMod, setupCol(witnessMod, "addr"), cellCols(witnessMod, "v", 0), setupCol(witnessMod, "mult"))
-	return nil
-}
-
-func (c witnessChip) setup(cs *cols) {
-	cs.declare("addr", "mult")
-	for row, a := range c.cells() {
-		cs.set("addr", row, uint64(a))
-		cs.set("mult", row, uint64(c.m.reads[a]))
-	}
-}
-
-func (c witnessChip) trace(cs *cols, r *Run) error {
-	cs.declareLanes("v", CellWidth)
-	for row, a := range c.cells() {
-		cs.setCell("v", row, r.values[a])
-	}
-	return nil
-}
-
-// spongeChip: one row per 16-element block of a sponge.
-//
-// Columns: x0..15 (the block, read from two cells), out0..23 (the permutation
-// output). Setup: first, last, active, data_j (lane j is input), keep_j =
-// (1 − data_j)·(1 − first), keep_cap = 1 − first, addr_a, addr_b (the two
-// data cells), out_addr and out_mult (the digest, written on the last row).
-//
-// The permutation input is data_j·x_j + keep_j·out_j[−1] on the rate lanes and
-// keep_cap·out_j[−1] on the capacity: the state chains from row to row, and a
-// trailing partial block keeps the previous state on its unused lanes, as
-// loom's overwrite-mode sponge does.
-type spongeChip struct{ m *Machine }
-
-func (c spongeChip) name() string { return spongeMod }
-
-func (c spongeChip) rows() int {
-	n := 0
-	for _, s := range c.m.sponges {
-		n += len(s.data) / 2
-	}
-	return n
-}
-
-func (c spongeChip) define(b *board.Builder, bus *Bus) error {
-	active := setupCol(spongeMod, "active")
-	bus.Read(spongeMod, setupCol(spongeMod, "addr_a"), cellCols(spongeMod, "x", 0), active)
-	bus.Read(spongeMod, setupCol(spongeMod, "addr_b"), cellCols(spongeMod, "x", CellWidth), active)
-	bus.Write(spongeMod, setupCol(spongeMod, "out_addr"), cellCols(spongeMod, "out", 0), setupCol(spongeMod, "out_mult"))
-
-	src := board.NewTable(spongeMod, 2*width)
-	for l := range width {
-		prev := colShift(spongeMod, fmt.Sprintf("out%d", l), -1)
-		if l < rate {
-			src.In[l] = setupCol(spongeMod, fmt.Sprintf("data%d", l)).Mul(col(spongeMod, fmt.Sprintf("x%d", l))).
-				Add(setupCol(spongeMod, fmt.Sprintf("keep%d", l)).Mul(prev))
-		} else {
-			src.In[l] = setupCol(spongeMod, "keep_cap").Mul(prev)
+// MerklePathX is MerklePath for the Merkle tree of a FRI layer over a domain
+// of generator g⁻¹ = gInv: it also returns the cell [x⁻¹, b0], where x⁻¹ =
+// gInv^bitrev(index) (bit-reversed over the path depth) is the inverse of the
+// fold point of the queried pair, and b0 is the index's low bit.
+func (m *Machine) MerklePathX(leaf int, siblings []int, index int, root int, gInv koalabear.Element) int {
+	m.MerklePath(leaf, siblings, index, root)
+	p := &m.paths[len(m.paths)-1]
+	d := len(siblings)
+	for lvl := range d {
+		g := gInv
+		for range d - 1 - lvl {
+			g.Square(&g)
 		}
-		src.In[width+l] = col(spongeMod, fmt.Sprintf("out%d", l))
+		p.gens = append(p.gens, g)
 	}
-	return arguments.CLookupTuple(b, src, p2Table(width), active, one())
+	p.xb = m.alloc()
+	return p.xb
 }
 
-func (c spongeChip) setup(cs *cols) {
-	cs.declare("first", "last", "active", "keep_cap", "addr_a", "addr_b", "out_addr", "out_mult")
-	for j := range rate {
-		cs.declare(fmt.Sprintf("data%d", j), fmt.Sprintf("keep%d", j))
+// execPath computes the [x⁻¹, b0] cell of a MerklePathX.
+func (m *Machine) execPath(p pathInst, r *Run) {
+	if p.gens == nil {
+		return
 	}
-	row := 0
-	for _, s := range c.m.sponges {
-		blocks := len(s.data) / 2
-		for blk := range blocks {
-			cs.set("active", row, 1)
-			cs.set("addr_a", row, uint64(s.data[2*blk]))
-			cs.set("addr_b", row, uint64(s.data[2*blk+1]))
-			if blk == 0 {
-				cs.set("first", row, 1)
-			} else {
-				cs.set("keep_cap", row, 1)
-			}
-			for j := range rate {
-				if blk*rate+j < s.length {
-					cs.set(fmt.Sprintf("data%d", j), row, 1)
-				} else if blk > 0 {
-					cs.set(fmt.Sprintf("keep%d", j), row, 1)
-				}
-			}
-			if blk == blocks-1 {
-				cs.set("last", row, 1)
-				cs.set("out_addr", row, uint64(s.out))
-				cs.set("out_mult", row, uint64(c.m.reads[s.out]))
-			}
-			row++
+	idx := r.values[p.index][0].Uint64()
+	var xb Cell
+	xb[0].SetOne()
+	for lvl, g := range p.gens {
+		if idx>>lvl&1 == 1 {
+			xb[0].Mul(&xb[0], &g)
 		}
 	}
-}
-
-// trace fills the blocks and the chained states, and records the
-// permutations for the P2 core.
-func (c spongeChip) trace(cs *cols, r *Run) error {
-	cs.declareLanes("x", rate)
-	cs.declareLanes("out", width)
-	perm := newPerm()
-	row := 0
-	for _, s := range c.m.sponges {
-		var state [width]koalabear.Element
-		for blk := range len(s.data) / 2 {
-			lo, hi := r.values[s.data[2*blk]], r.values[s.data[2*blk+1]]
-			for j := range rate {
-				x := lo[j%CellWidth]
-				if j >= CellWidth {
-					x = hi[j-CellWidth]
-				}
-				cs.setElem(fmt.Sprintf("x%d", j), row, x)
-				if blk*rate+j < s.length {
-					state[j] = x
-				}
-			}
-			r.p2 = append(r.p2, state)
-			if err := perm.Permutation(state[:]); err != nil {
-				return err
-			}
-			for l := range width {
-				cs.setElem(fmt.Sprintf("out%d", l), row, state[l])
-			}
-			row++
-		}
-	}
-	return nil
+	xb[1].SetUint64(idx & 1)
+	r.values[p.xb] = xb
 }
 
 // merkleChip: one row per level of a Merkle path, leaf level first.
@@ -339,40 +244,4 @@ func (c merkleChip) trace(cs *cols, r *Run) error {
 		prevOut = Cell{}
 	}
 	return nil
-}
-
-// TODO maybe put the cols code in trace/
-// cols accumulates the columns of a module.
-type cols struct {
-	n    int
-	vals map[string][]koalabear.Element
-}
-
-func newCols(n int) *cols { return &cols{n: n, vals: map[string][]koalabear.Element{}} }
-
-func (c *cols) declare(names ...string) {
-	for _, n := range names {
-		c.get(n)
-	}
-}
-
-func (c *cols) get(name string) []koalabear.Element {
-	v, ok := c.vals[name]
-	if !ok {
-		v = make([]koalabear.Element, c.n)
-		c.vals[name] = v
-	}
-	return v
-}
-
-func (c *cols) set(name string, row int, v uint64) { c.get(name)[row].SetUint64(v) }
-
-func (c *cols) setInt(name string, row int, v int64) { c.get(name)[row].SetInt64(v) }
-
-func (c *cols) setElem(name string, row int, v koalabear.Element) { c.get(name)[row] = v }
-
-func (c *cols) store(t trace.Trace, module string) {
-	for name, v := range c.vals {
-		t.SetBase(module+"."+name, v)
-	}
 }

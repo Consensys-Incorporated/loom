@@ -1,0 +1,165 @@
+// Copyright Consensys Software Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except in compliance with
+// the License. You may obtain a copy of the License at
+//
+// http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software distributed under the License is distributed on
+// an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the
+// specific language governing permissions and limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package recursion
+
+import (
+	"fmt"
+
+	"github.com/consensys/gnark-crypto/field/koalabear"
+	"github.com/consensys/loom/board"
+)
+
+// BitsWidth is the number of bits of a canonical KoalaBear element, and the
+// number of rows of a decomposition.
+const BitsWidth = 31
+
+// Bits is the decomposition of a scalar v: for i < n, Shr[i] is the scalar
+// cell (v mod 2^n) >> i and Bit[i] the scalar cell of bit i of v.
+type Bits struct {
+	Shr, Bit []int
+}
+
+type bitsInst struct {
+	v, n int
+	out  Bits
+}
+
+// Bits decomposes the scalar cell v canonically (the bits are those of the
+// representative in [0, p)) and returns its low n bits, n < BitsWidth.
+func (m *Machine) Bits(v int, n int) Bits {
+	if n < 1 || n >= BitsWidth {
+		panic(fmt.Sprintf("Bits: n = %d", n))
+	}
+	m.read(v)
+	var out Bits
+	for range n {
+		out.Shr = append(out.Shr, m.alloc())
+		out.Bit = append(out.Bit, m.alloc())
+	}
+	m.bits = append(m.bits, bitsInst{v: v, n: n, out: out})
+	m.record(instrBits, len(m.bits)-1)
+	return out
+}
+
+func (m *Machine) execBits(b bitsInst, r *Run) {
+	x := r.values[b.v][0].Uint64()
+	low := x & (1<<b.n - 1)
+	for i := range b.n {
+		r.values[b.out.Shr[i]] = ScalarCell(koalabear.NewElement(low >> i))
+		r.values[b.out.Bit[i]] = ScalarCell(koalabear.NewElement(x >> i & 1))
+	}
+}
+
+// koalaHigh is the value of the top 7 bits (24..30) of p − 1 = 127·2^24: a
+// 31-bit integer is below p iff its top 7 bits are not all set, or its low 24
+// bits are zero.
+const koalaHigh = 127
+
+// bitsChip: BitsWidth rows per decomposition, row i for bit i.
+//
+// Columns: b (bit i), w (the low bits, Σ_{k<i} b_k·2^k), r ((v mod 2^n) >> i,
+// zero for i ≥ n), v (the decomposed value), inv (at row 24, the inverse of
+// 127 − (v − w)/2^24 if nonzero). Setup: first, last, active, pow (2^i), inlow
+// (i < n), chk (i = 24), addr_v (read on the first row), r_addr, r_mult,
+// b_addr, b_mult (the writes of r and b).
+//
+//	b·(b − 1) = 0
+//	w = 0                          on the first row
+//	w[+1] = w + b·pow, v[+1] = v   on every row but the last
+//	v = w + b·pow                  on the last row
+//	r = inlow·(b + 2·r[+1])
+//	chk·w·(1 − z·inv) = 0,  z = 127 − (v − w)/2^24   (canonical: v < p)
+type bitsChip struct{ m *Machine }
+
+func (c bitsChip) name() string { return bitsMod }
+
+func (c bitsChip) rows() int { return BitsWidth * len(c.m.bits) }
+
+func (c bitsChip) define(b *board.Builder, bus *Bus) error {
+	mm := b.Modules[bitsMod]
+	first, last, active := setupCol(bitsMod, "first"), setupCol(bitsMod, "last"), setupCol(bitsMod, "active")
+	bit, w, r, v, inv := col(bitsMod, "b"), col(bitsMod, "w"), col(bitsMod, "r"), col(bitsMod, "v"), col(bitsMod, "inv")
+	pow := setupCol(bitsMod, "pow")
+	notLast := active.Sub(last)
+
+	mm.AssertZero(bit.Mul(bit.Sub(one())))
+	mm.AssertZero(first.Mul(w))
+	mm.AssertZero(notLast.Mul(colShift(bitsMod, "w", 1).Sub(w).Sub(bit.Mul(pow))))
+	mm.AssertZero(notLast.Mul(colShift(bitsMod, "v", 1).Sub(v)))
+	mm.AssertZero(last.Mul(v.Sub(w).Sub(bit.Mul(pow))))
+	mm.AssertZero(r.Sub(setupCol(bitsMod, "inlow").Mul(bit.Add(constE(2).Mul(colShift(bitsMod, "r", 1))))))
+	var inv24 koalabear.Element
+	inv24.SetUint64(1 << 24)
+	inv24.Inverse(&inv24)
+	z := constE(koalaHigh).Sub(v.Sub(w).Mul(constElem(inv24)))
+	mm.AssertZero(setupCol(bitsMod, "chk").Mul(w).Mul(one().Sub(z.Mul(inv))))
+
+	bus.Read(bitsMod, setupCol(bitsMod, "addr_v"), cellOf(v), first)
+	bus.Write(bitsMod, setupCol(bitsMod, "r_addr"), cellOf(r), setupCol(bitsMod, "r_mult"))
+	bus.Write(bitsMod, setupCol(bitsMod, "b_addr"), cellOf(bit), setupCol(bitsMod, "b_mult"))
+	return nil
+}
+
+func (c bitsChip) setup(cs *cols) {
+	cs.declare("first", "last", "active", "pow", "inlow", "chk", "addr_v", "r_addr", "r_mult", "b_addr", "b_mult")
+	for k, inst := range c.m.bits {
+		for i := range BitsWidth {
+			row := k*BitsWidth + i
+			cs.set("active", row, 1)
+			cs.set("pow", row, 1<<i)
+			switch i {
+			case 0:
+				cs.set("first", row, 1)
+				cs.set("addr_v", row, uint64(inst.v))
+			case 24:
+				cs.set("chk", row, 1)
+			case BitsWidth - 1:
+				cs.set("last", row, 1)
+			}
+			if i < inst.n {
+				cs.set("inlow", row, 1)
+				cs.set("r_addr", row, uint64(inst.out.Shr[i]))
+				cs.set("r_mult", row, uint64(c.m.reads[inst.out.Shr[i]]))
+				cs.set("b_addr", row, uint64(inst.out.Bit[i]))
+				cs.set("b_mult", row, uint64(c.m.reads[inst.out.Bit[i]]))
+			}
+		}
+	}
+}
+
+func (c bitsChip) trace(cs *cols, r *Run) error {
+	cs.declare("b", "w", "r", "v", "inv")
+	for k, inst := range c.m.bits {
+		x := r.values[inst.v][0].Uint64()
+		low := x & (1<<inst.n - 1)
+		for i := range BitsWidth {
+			row := k*BitsWidth + i
+			cs.set("b", row, x>>i&1)
+			cs.set("w", row, x&(1<<i-1))
+			cs.set("v", row, x)
+			if i == 24 {
+				var zv koalabear.Element
+				zv.SetUint64(koalaHigh - x>>24)
+				if !zv.IsZero() {
+					zv.Inverse(&zv)
+				}
+				cs.setElem("inv", row, zv)
+			}
+			if i < inst.n {
+				cs.set("r", row, low>>i)
+			}
+		}
+	}
+	return nil
+}
