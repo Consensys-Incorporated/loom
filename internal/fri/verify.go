@@ -108,13 +108,13 @@ func (pcs *PCS) Verify(
 
 	// 3- Replay the prover's alpha_DEEP derivation: register, bind values
 	//    in per-polynomial order, sample.
-	if err := fs.NewChallenge(deepAlphaName); err != nil {
+	if err := fs.NewChallenge(DeepAlphaName); err != nil {
 		return fmt.Errorf("fri: PCS.Verify: register alpha_DEEP: %w", err)
 	}
 	if err := bindClaimedValuesByPolynomialOrder(fs, proof.ClaimedValues, shifts, plan); err != nil {
 		return err
 	}
-	alphaOut, err := fs.ComputeChallenge(deepAlphaName)
+	alphaOut, err := fs.ComputeChallenge(DeepAlphaName)
 	if err != nil {
 		return fmt.Errorf("fri: PCS.Verify: sample alpha_DEEP: %w", err)
 	}

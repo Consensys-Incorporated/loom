@@ -1,7 +1,6 @@
 package recursion
 
 import (
-	"fmt"
 	"testing"
 
 	"github.com/consensys/gnark-crypto/field/koalabear"
@@ -126,6 +125,10 @@ func checkChallenges(t *testing.T, v *Verifier, p *Program, ip innerProof) *Run 
 		t.Fatal(err)
 	}
 	fs := ip.goTranscript(t)
+	// loom's verifier computes exactly the circuit's challenges.
+	if got, want := len(v.Challenges), len(v.tr.names); got != want {
+		t.Fatalf("%d challenges computed, %d registered", got, want)
+	}
 	for name, c := range v.Challenges {
 		want, err := fs.ComputeChallenge(name)
 		if err != nil {
@@ -136,6 +139,13 @@ func checkChallenges(t *testing.T, v *Verifier, p *Program, ip innerProof) *Run 
 			if !got[j].Equal(&want[j]) {
 				t.Fatalf("challenge %s: lane %d = %s, want %s", name, j, got[j].String(), want[j].String())
 			}
+		}
+	}
+	// The query rows, as FRI recorded them.
+	for k, q := range v.Queries {
+		got := r.Value(q.Shr[0])
+		if want := ip.prf.Opening.FRIProof.FRIQueries[k].Layers[0].Row; got[0].Uint64() != uint64(want) {
+			t.Fatalf("query %d: row %d, want %d", k, got[0].Uint64(), want)
 		}
 	}
 	return r
@@ -165,9 +175,6 @@ func TestVerifierTranscript(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if got := len(v.Challenges); got != len(ip.program.Rounds)+1 {
-				t.Fatalf("%d challenges, want %d", got, len(ip.program.Rounds)+1)
-			}
 			r := checkChallenges(t, v, p, ip)
 			want := hash.OutputToExt([8]koalabear.Element(r.Value(v.Challenges["__zeta"])))
 			if got := CellE6(r.Value(zeta)); !got.Equal(&want) {
@@ -178,7 +185,8 @@ func TestVerifierTranscript(t *testing.T) {
 			}
 			// The same circuit on another proof of the same program.
 			checkChallenges(t, v, p, ip2)
-			t.Log(fmt.Sprintf("%d rounds, %d inputs", len(ip.program.Rounds), p.NumInputs()))
+			t.Logf("%d rounds, %d challenges, %d FRI levels, %d FRI rounds, %d queries, %d inputs",
+				len(ip.program.Rounds), len(v.Challenges), v.fri.numLevels, v.fri.numRounds, len(v.Queries), p.NumInputs())
 		})
 	}
 }

@@ -37,6 +37,8 @@ type Shape struct {
 	PublicInputs []PublicInputShape
 	// ExposedEntries is the number of entries of every exposed value.
 	ExposedEntries map[string]int
+	// NumQueries is the number of FRI queries.
+	NumQueries int
 }
 
 // PublicInputShape is the structure of one public input: its name, module and
@@ -48,7 +50,7 @@ type PublicInputShape struct {
 
 // ShapeOf returns the shape of a proof and its public inputs.
 func ShapeOf(prf proof.Proof, pi public.Inputs) Shape {
-	s := Shape{ExposedEntries: map[string]int{}}
+	s := Shape{ExposedEntries: map[string]int{}, NumQueries: len(prf.Opening.FRIProof.FRIQueries)}
 	for name, v := range prf.ExposedValues {
 		s.ExposedEntries[name] = len(v.Entries)
 	}
@@ -77,6 +79,7 @@ type Verifier struct {
 	vk      setup.VerificationKey
 	shape   Shape
 	layout  protocol.Layout
+	sched   protocol.CanonicalSchedule
 
 	// extract[i] reads, from a proof and its public inputs, the value of the
 	// i-th input cell.
@@ -87,6 +90,30 @@ type Verifier struct {
 	Challenges map[string]int
 	// roots[t] is the root cell of tree t of the layout.
 	roots []int
+
+	// Claimed[t][g] holds the cells of the claimed values of group g of tree
+	// t: Base[i][k] is the E6 value of base polynomial i at its k-th shift,
+	// Ext[i][k] likewise (the shapes of the canonical schedule).
+	Claimed [][]ClaimedCells
+	// FRI: the levels root, the layer roots T_1..T_{r−1}, the final
+	// polynomial's coefficients, and the query indices (Queries[k].Shr[0] is
+	// the full-domain row s of query k).
+	LevelsRoot int
+	FRIRoots   []int
+	Final      []int
+	Queries    []Bits
+	fri        friShape
+}
+
+// ClaimedCells holds the claimed-value cells of one group.
+type ClaimedCells struct {
+	Base, Ext [][]int
+}
+
+// friShape is the FRI configuration of the verified proofs: domain size N =
+// RATE·max N_m, numRounds = log2(max N_m), one level per DEEP class.
+type friShape struct {
+	logN, numRounds, numLevels int
 }
 
 // NewVerifier builds the circuit verifying loom proofs of program under vk,
@@ -107,10 +134,14 @@ func NewVerifier(program board.Program, vk setup.VerificationKey, shape Shape) (
 		layout:     protocol.BuildLayout(program, len(vk.Roots)),
 		Challenges: map[string]int{},
 	}
+	v.sched = protocol.BuildCanonicalSchedule(program, v.layout)
 	if len(vk.Roots) != v.layout.SetupEnd-v.layout.SetupBegin {
 		return nil, fmt.Errorf("NewVerifier: %d setup roots, the layout has %d setup trees", len(vk.Roots), v.layout.SetupEnd-v.layout.SetupBegin)
 	}
 	if err := v.buildTranscript(backend.ID); err != nil {
+		return nil, err
+	}
+	if err := v.buildPCSTranscript(); err != nil {
 		return nil, err
 	}
 	return v, nil
@@ -289,4 +320,175 @@ func (v *Verifier) ChallengeE6(name string) int {
 		panic(fmt.Sprintf("ChallengeE6: challenge %q not computed", name))
 	}
 	return v.M.Lanes(d, 0, KindE6)
+}
+
+// buildPCSTranscript replays the PCS's transcript (fri.PCS.Verify then
+// fri.Verify): alpha_DEEP over the claimed values in DEEP class order, the
+// level γs (the first one binds the levels root), the fold challenges (each
+// binds its layer root), the final polynomial (bound to the first query),
+// the query chain; and decomposes each query challenge into its row.
+func (v *Verifier) buildPCSTranscript() error {
+	m, l := v.M, v.layout
+
+	// FRI's shape: the domain of the largest module, one level per class.
+	maxN := 0
+	for _, mod := range v.program.Modules {
+		maxN = max(maxN, mod.N)
+	}
+	classes := l.DeepClasses()
+	ids := map[int]bool{}
+	for _, tc := range classes {
+		for _, c := range tc {
+			ids[c] = true
+		}
+	}
+	order := make([]int, 0, len(ids))
+	for c := range ids {
+		order = append(order, c)
+	}
+	sort.Ints(order)
+	v.fri = friShape{logN: log2(constants.RATE * maxN), numRounds: log2(maxN), numLevels: len(order)}
+	if v.fri.logN >= BitsWidth {
+		return fmt.Errorf("NewVerifier: FRI domain 2^%d is too large for the query decomposition", v.fri.logN)
+	}
+
+	// alpha_DEEP: the claimed values, class by class, then by tree, group,
+	// base polynomials then extension ones, shifts in order.
+	v.tr.NewChallenge(fri.DeepAlphaName)
+	v.Claimed = make([][]ClaimedCells, l.NumTrees)
+	for t := range l.NumTrees {
+		v.Claimed[t] = make([]ClaimedCells, len(v.sched.Shifts[t]))
+		for g, gs := range v.sched.Shifts[t] {
+			v.Claimed[t][g] = ClaimedCells{Base: v.claimedInputs(t, g, false, gs.Base), Ext: v.claimedInputs(t, g, true, gs.Ext)}
+		}
+	}
+	for _, class := range order {
+		for t := range l.NumTrees {
+			for g := range v.Claimed[t] {
+				if classes[t][g] != class {
+					continue
+				}
+				for _, rail := range [][][]int{v.Claimed[t][g].Base, v.Claimed[t][g].Ext} {
+					for _, cells := range rail {
+						for _, c := range cells {
+							v.tr.Bind(fri.DeepAlphaName, E6(c))
+						}
+					}
+				}
+			}
+		}
+	}
+	v.Challenges[fri.DeepAlphaName] = v.tr.Compute(fri.DeepAlphaName)
+
+	// FRI's challenges, registered as fri.Verify does.
+	for lvl := 1; lvl < v.fri.numLevels; lvl++ {
+		v.tr.NewChallenge(fri.LevelGammaName(lvl))
+	}
+	for j := range v.fri.numRounds {
+		v.tr.NewChallenge(fri.FoldName(j))
+	}
+	for k := range v.shape.NumQueries {
+		v.tr.NewChallenge(fri.QueryName(k))
+	}
+
+	friProof := func(prf proof.Proof) (fri.Proof, error) {
+		fp := prf.Opening.FRIProof
+		if len(fp.PoW) > 0 {
+			return fp, fmt.Errorf("the FRI proof has proofs of work: grinding is not supported")
+		}
+		if len(fp.FRIRoots) != v.fri.numRounds-1 || len(fp.FinalPolyExt) != 1<<(v.fri.logN-v.fri.numRounds) {
+			return fp, fmt.Errorf("the FRI proof does not have the verifier's shape")
+		}
+		return fp, nil
+	}
+	v.LevelsRoot = v.input(func(prf proof.Proof, _ public.Inputs) (Cell, error) {
+		fp, err := friProof(prf)
+		return digestCell(fp.LevelsRoot), err
+	})
+	for lvl := 1; lvl < v.fri.numLevels; lvl++ {
+		name := fri.LevelGammaName(lvl)
+		if lvl == 1 {
+			v.tr.Bind(name, Digest(v.LevelsRoot))
+		}
+		v.Challenges[name] = v.tr.Compute(name)
+	}
+	for j := range v.fri.numRounds {
+		root := v.LevelsRoot
+		if j > 0 {
+			i := j - 1
+			root = v.input(func(prf proof.Proof, _ public.Inputs) (Cell, error) {
+				fp, err := friProof(prf)
+				if err != nil {
+					return Cell{}, err
+				}
+				return digestCell(fp.FRIRoots[i]), nil
+			})
+			v.FRIRoots = append(v.FRIRoots, root)
+		}
+		v.tr.Bind(fri.FoldName(j), Digest(root))
+		v.Challenges[fri.FoldName(j)] = v.tr.Compute(fri.FoldName(j))
+	}
+
+	// The final polynomial: the tag and its length, then its coefficients.
+	nFinal := 1 << (v.fri.logN - v.fri.numRounds)
+	v.tr.BindElements(fri.QueryName(0), []koalabear.Element{hash.NewElement(fri.ExtPolyDomainTag), hash.NewElement(uint64(nFinal))})
+	for i := range nFinal {
+		c := v.input(func(prf proof.Proof, _ public.Inputs) (Cell, error) {
+			fp, err := friProof(prf)
+			if err != nil {
+				return Cell{}, err
+			}
+			return E6Cell(fp.FinalPolyExt[i]), nil
+		})
+		v.Final = append(v.Final, c)
+		v.tr.Bind(fri.QueryName(0), E6(c))
+	}
+
+	// The queries: each binds the previous one's digest, and its row is
+	// queryIndex = ((c0 << 31) ^ c1) mod N, the low log2(N) bits of lane 1
+	// since N ≤ 2^31.
+	for k := range v.shape.NumQueries {
+		name := fri.QueryName(k)
+		if k > 0 {
+			v.tr.Bind(name, Digest(v.Challenges[fri.QueryName(k-1)]))
+		}
+		d := v.tr.Compute(name)
+		v.Challenges[name] = d
+		v.Queries = append(v.Queries, m.Bits(m.Lanes(d, 1, KindScalar), v.fri.logN))
+	}
+	return nil
+}
+
+// claimedInputs allocates the claimed-value inputs of one rail of group g of
+// tree t: one E6 cell per polynomial and shift.
+func (v *Verifier) claimedInputs(t, g int, extRail bool, shifts [][]int) [][]int {
+	res := make([][]int, len(shifts))
+	for i, ss := range shifts {
+		for k := range ss {
+			res[i] = append(res[i], v.input(func(prf proof.Proof, _ public.Inputs) (Cell, error) {
+				cv := prf.Opening.ClaimedValues
+				if t >= len(cv) || g >= len(cv[t]) {
+					return Cell{}, fmt.Errorf("claimed values do not have the verifier's shape")
+				}
+				rail := cv[t][g].Base
+				if extRail {
+					rail = cv[t][g].Ext
+				}
+				if i >= len(rail) || len(rail[i]) != len(ss) {
+					return Cell{}, fmt.Errorf("claimed values do not have the verifier's shape")
+				}
+				return E6Cell(rail[i][k]), nil
+			}))
+		}
+	}
+	return res
+}
+
+func log2(n int) int {
+	k := 0
+	for n > 1 {
+		n >>= 1
+		k++
+	}
+	return k
 }

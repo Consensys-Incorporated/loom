@@ -277,7 +277,7 @@ func TestOpenFRIVerifyRoundtrip(t *testing.T) {
 
 	// Replay Open's internal bindings: alpha_DEEP registration, claimed
 	// values bound in per-polynomial order, sample alpha_DEEP.
-	if err := verifierFS.NewChallenge(deepAlphaName); err != nil {
+	if err := verifierFS.NewChallenge(DeepAlphaName); err != nil {
 		t.Fatal(err)
 	}
 	sizes, err := groupNativeSizesFromBatches(batches)
@@ -287,7 +287,7 @@ func TestOpenFRIVerifyRoundtrip(t *testing.T) {
 	if err := bindClaimedValuesByPolynomialOrder(verifierFS, openProof.ClaimedValues, shifts, mustDeepPlan(t, sizes)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := verifierFS.ComputeChallenge(deepAlphaName); err != nil {
+	if _, err := verifierFS.ComputeChallenge(DeepAlphaName); err != nil {
 		t.Fatal(err)
 	}
 

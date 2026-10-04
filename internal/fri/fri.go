@@ -398,13 +398,13 @@ func buildProvePlan(p Params, levels []Level) (provePlan, error) {
 // then the fold challenges, then the queries.
 func registerChallenges(p Params, numLevels int, ts *fiatshamir.Transcript) {
 	for l := 1; l < numLevels; l++ {
-		ts.NewChallenge(levelGammaName(l))
+		ts.NewChallenge(LevelGammaName(l))
 	}
 	for j := 0; j < p.numRounds; j++ {
-		ts.NewChallenge(foldName(j))
+		ts.NewChallenge(FoldName(j))
 	}
 	for k := 0; k < p.NumQueries; k++ {
-		ts.NewChallenge(queryName(k))
+		ts.NewChallenge(QueryName(k))
 	}
 }
 
@@ -415,7 +415,7 @@ func registerChallenges(p Params, numLevels int, ts *fiatshamir.Transcript) {
 func deriveLevelGammas(ts *fiatshamir.Transcript, numLevels int, levelsRoot hash.Digest) ([][8]koalabear.Element, error) {
 	res := make([][8]koalabear.Element, numLevels)
 	for l := 1; l < numLevels; l++ {
-		gammaName := levelGammaName(l)
+		gammaName := LevelGammaName(l)
 		if l == 1 {
 			if err := ts.Bind(gammaName, levelsRoot[:]); err != nil {
 				return nil, fmt.Errorf("bind levels root: %w", err)
@@ -491,7 +491,7 @@ func proveBase(p Params, levels []Level, plan provePlan, ts *fiatshamir.Transcri
 		friTrees[j] = tree
 		root := tree.Root()
 
-		name := foldName(j)
+		name := FoldName(j)
 		if err := ts.Bind(name, root[:]); err != nil {
 			return Proof{}, nil, fmt.Errorf("fri: Prove: bind fold %d: %w", j, err)
 		}
@@ -516,7 +516,7 @@ func proveBase(p Params, levels []Level, plan provePlan, ts *fiatshamir.Transcri
 		return Proof{}, nil, fmt.Errorf("fri: Prove: record proof of work: %w", err)
 	}
 
-	if err := ts.Bind(queryName(0), transcriptBasePoly(prf.FinalPolyBase)); err != nil {
+	if err := ts.Bind(QueryName(0), transcriptBasePoly(prf.FinalPolyBase)); err != nil {
 		return Proof{}, nil, fmt.Errorf("fri: Prove: bind final poly: %w", err)
 	}
 
@@ -532,7 +532,7 @@ func proveBase(p Params, levels []Level, plan provePlan, ts *fiatshamir.Transcri
 
 	queryPositions := make([]int, p.NumQueries)
 	for k := 0; k < p.NumQueries; k++ {
-		challenge, err := ts.ComputeChallenge(queryName(k))
+		challenge, err := ts.ComputeChallenge(QueryName(k))
 		if err != nil {
 			return Proof{}, nil, fmt.Errorf("fri: Prove: compute query challenge %d: %w", k, err)
 		}
@@ -540,7 +540,7 @@ func proveBase(p Params, levels []Level, plan provePlan, ts *fiatshamir.Transcri
 		queryPositions[k] = s
 
 		if k < p.NumQueries-1 {
-			if err := ts.Bind(queryName(k+1), challenge[:]); err != nil {
+			if err := ts.Bind(QueryName(k+1), challenge[:]); err != nil {
 				return Proof{}, nil, fmt.Errorf("fri: Prove: bind query chain %d: %w", k+1, err)
 			}
 		}
@@ -621,7 +621,7 @@ func proveExt(p Params, levels []Level, plan provePlan, ts *fiatshamir.Transcrip
 		friTrees[j] = tree
 		root := tree.Root()
 
-		name := foldName(j)
+		name := FoldName(j)
 		if err := ts.Bind(name, root[:]); err != nil {
 			return Proof{}, nil, fmt.Errorf("fri: Prove: bind fold %d: %w", j, err)
 		}
@@ -644,7 +644,7 @@ func proveExt(p Params, levels []Level, plan provePlan, ts *fiatshamir.Transcrip
 		return Proof{}, nil, fmt.Errorf("fri: Prove: record proof of work: %w", err)
 	}
 
-	if err := ts.Bind(queryName(0), transcriptExtPoly(prf.FinalPolyExt)); err != nil {
+	if err := ts.Bind(QueryName(0), transcriptExtPoly(prf.FinalPolyExt)); err != nil {
 		return Proof{}, nil, fmt.Errorf("fri: Prove: bind final poly: %w", err)
 	}
 
@@ -658,7 +658,7 @@ func proveExt(p Params, levels []Level, plan provePlan, ts *fiatshamir.Transcrip
 
 	queryPositions := make([]int, p.NumQueries)
 	for k := 0; k < p.NumQueries; k++ {
-		challenge, err := ts.ComputeChallenge(queryName(k))
+		challenge, err := ts.ComputeChallenge(QueryName(k))
 		if err != nil {
 			return Proof{}, nil, fmt.Errorf("fri: Prove: compute query challenge %d: %w", k, err)
 		}
@@ -666,7 +666,7 @@ func proveExt(p Params, levels []Level, plan provePlan, ts *fiatshamir.Transcrip
 		queryPositions[k] = s
 
 		if k < p.NumQueries-1 {
-			if err := ts.Bind(queryName(k+1), challenge[:]); err != nil {
+			if err := ts.Bind(QueryName(k+1), challenge[:]); err != nil {
 				return Proof{}, nil, fmt.Errorf("fri: Prove: bind query chain %d: %w", k+1, err)
 			}
 		}
@@ -848,7 +848,7 @@ func verifyBase(p Params, numLevels int, lv levelsCheck, roots []hash.Digest, pr
 	}
 	for j := 0; j < p.numRounds; j++ {
 
-		name := foldName(j)
+		name := FoldName(j)
 		root := roots[j]
 		if err := ts.Bind(name, root[:]); err != nil {
 			return fmt.Errorf("fri: Verify: bind fold %d: %w", j, err)
@@ -860,20 +860,20 @@ func verifyBase(p Params, numLevels int, lv levelsCheck, roots []hash.Digest, pr
 		alphas[j].Set(&challenge[0])
 	}
 
-	if err := ts.Bind(queryName(0), transcriptBasePoly(prf.FinalPolyBase)); err != nil {
+	if err := ts.Bind(QueryName(0), transcriptBasePoly(prf.FinalPolyBase)); err != nil {
 		return fmt.Errorf("fri: Verify: bind final poly: %w", err)
 	}
 
 	// ── Query phase ───────────────────────────────────────────────────────────
 	for k := 0; k < p.NumQueries; k++ {
-		challenge, err := ts.ComputeChallenge(queryName(k))
+		challenge, err := ts.ComputeChallenge(QueryName(k))
 		if err != nil {
 			return fmt.Errorf("fri: Verify: compute query challenge %d: %w", k, err)
 		}
 		s := queryIndex(challenge, p.N)
 
 		if k < p.NumQueries-1 {
-			if err := ts.Bind(queryName(k+1), challenge[:]); err != nil {
+			if err := ts.Bind(QueryName(k+1), challenge[:]); err != nil {
 				return fmt.Errorf("fri: Verify: bind query chain %d: %w", k+1, err)
 			}
 		}
@@ -910,7 +910,7 @@ func verifyExt(p Params, numLevels int, lv levelsCheck, roots []hash.Digest, prf
 	}
 	for j := 0; j < p.numRounds; j++ {
 
-		name := foldName(j)
+		name := FoldName(j)
 		root := roots[j]
 		if err := ts.Bind(name, root[:]); err != nil {
 			return fmt.Errorf("fri: Verify: bind fold %d: %w", j, err)
@@ -922,19 +922,19 @@ func verifyExt(p Params, numLevels int, lv levelsCheck, roots []hash.Digest, prf
 		alphas[j] = hash.OutputToExt(challenge)
 	}
 
-	if err := ts.Bind(queryName(0), transcriptExtPoly(prf.FinalPolyExt)); err != nil {
+	if err := ts.Bind(QueryName(0), transcriptExtPoly(prf.FinalPolyExt)); err != nil {
 		return fmt.Errorf("fri: Verify: bind final poly: %w", err)
 	}
 
 	for k := 0; k < p.NumQueries; k++ {
-		challenge, err := ts.ComputeChallenge(queryName(k))
+		challenge, err := ts.ComputeChallenge(QueryName(k))
 		if err != nil {
 			return fmt.Errorf("fri: Verify: compute query challenge %d: %w", k, err)
 		}
 		s := queryIndex(challenge, p.N)
 
 		if k < p.NumQueries-1 {
-			if err := ts.Bind(queryName(k+1), challenge[:]); err != nil {
+			if err := ts.Bind(QueryName(k+1), challenge[:]); err != nil {
 				return fmt.Errorf("fri: Verify: bind query chain %d: %w", k+1, err)
 			}
 		}
@@ -958,9 +958,18 @@ func verifyExt(p Params, numLevels int, lv levelsCheck, roots []hash.Digest, prf
 
 // ── helpers ──────────────────────────────────────────────────────────────────
 
-func levelGammaName(l int) string { return fmt.Sprintf("fri_level_%d_gamma", l) }
-func foldName(j int) string       { return fmt.Sprintf("fri_fold_%d", j) }
-func queryName(k int) string      { return fmt.Sprintf("fri_query_%d", k) }
+// Transcript names of FRI's challenges: the batching challenge of level l ≥ 1,
+// the fold challenge of round j, and the challenge of query k.
+func LevelGammaName(l int) string { return fmt.Sprintf("fri_level_%d_gamma", l) }
+func FoldName(j int) string       { return fmt.Sprintf("fri_fold_%d", j) }
+func QueryName(k int) string      { return fmt.Sprintf("fri_query_%d", k) }
+
+// Domain tags of the final polynomial's transcript encoding: the tag, the
+// number of coefficients, then the coefficients.
+const (
+	BasePolyDomainTag uint64 = 0x42415345 // "BASE"
+	ExtPolyDomainTag  uint64 = 0x45585450 // "EXTP"
+)
 
 func computeProverFoldChallenge(ts *fiatshamir.Transcript, name string, grinding int) ([8]koalabear.Element, error) {
 	if grinding == 0 {
@@ -990,7 +999,7 @@ func recordFoldProofsOfWork(p Params, prf *Proof, ts *fiatshamir.Transcript) err
 	}
 	prf.PoW = make(map[string]fiatshamir.ProofOfWork, p.numRounds)
 	for j := 0; j < p.numRounds; j++ {
-		name := foldName(j)
+		name := FoldName(j)
 		pow, ok := ts.ProofOfWork(name)
 		if !ok {
 			return fmt.Errorf("missing proof of work for %s", name)
@@ -1111,14 +1120,14 @@ func foldLayerExt(layer []ext.E6, alpha ext.E6, domain *fft.Domain, invTwo koala
 
 func transcriptBasePoly(poly []koalabear.Element) []koalabear.Element {
 	res := make([]koalabear.Element, 0, 2+len(poly))
-	res = append(res, hash.NewElement(0x42415345), hash.NewElement(uint64(len(poly)))) // "BASE"
+	res = append(res, hash.NewElement(BasePolyDomainTag), hash.NewElement(uint64(len(poly))))
 	res = append(res, poly...)
 	return res
 }
 
 func transcriptExtPoly(poly []ext.E6) []koalabear.Element {
 	res := make([]koalabear.Element, 0, 2+hash.ExtDegree*len(poly))
-	res = append(res, hash.NewElement(0x45585450), hash.NewElement(uint64(len(poly)))) // "EXTP"
+	res = append(res, hash.NewElement(ExtPolyDomainTag), hash.NewElement(uint64(len(poly))))
 	for _, v := range poly {
 		res = hash.AppendExtElements(res, v)
 	}

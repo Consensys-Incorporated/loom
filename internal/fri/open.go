@@ -23,13 +23,14 @@ import (
 	"github.com/consensys/loom/internal/poly"
 )
 
-// deepAlphaName is the transcript challenge name under which Open binds
+// DeepAlphaName is the transcript challenge name under which Open binds
 // the per-polynomial claimed evaluations and from which the DEEP batching
 // challenge alpha_DEEP is sampled. Kept as a private
 // constant so the existing outer-prover code (which uses
 // constants.DEEP_ALPHA with the same string value) remains source-
 // compatible until the migration PR rewires it.
-const deepAlphaName = "alpha_DEEP"
+// DeepAlphaName is the transcript name of the DEEP batching challenge.
+const DeepAlphaName = "alpha_DEEP"
 
 // OpenConfig configures an Open call.
 type OpenConfig struct {
@@ -147,7 +148,7 @@ func (pcs *PCS) Open(
 
 	// 3- Pre-register alpha_DEEP. FRI-internal names (fri_fold_*,
 	//    fri_level_*_gamma, fri_query_*) are registered inside fri.Prove.
-	if err := fs.NewChallenge(deepAlphaName); err != nil {
+	if err := fs.NewChallenge(DeepAlphaName); err != nil {
 		return OpeningProof{}, fmt.Errorf("fri: PCS.Open: register alpha_DEEP: %w", err)
 	}
 
@@ -159,7 +160,7 @@ func (pcs *PCS) Open(
 	}
 
 	// 5- Sample alpha_DEEP.
-	alphaOut, err := fs.ComputeChallenge(deepAlphaName)
+	alphaOut, err := fs.ComputeChallenge(DeepAlphaName)
 	if err != nil {
 		return OpeningProof{}, fmt.Errorf("fri: PCS.Open: sample alpha_DEEP: %w", err)
 	}
@@ -259,7 +260,7 @@ func bindClaimedValuesByPolynomialOrder(
 					}
 					for k, s := range ss {
 						v := gValues.Base[i][k]
-						if err := fs.Bind(deepAlphaName, hash.ExtToElements(v)); err != nil {
+						if err := fs.Bind(DeepAlphaName, hash.ExtToElements(v)); err != nil {
 							return fmt.Errorf("fri: bind claimed value (size=%d batch=%d group=%d field=base poly=%d shift=%d): %w",
 								N, b, g, i, s, err)
 						}
@@ -271,7 +272,7 @@ func bindClaimedValuesByPolynomialOrder(
 					}
 					for k, s := range ss {
 						v := gValues.Ext[i][k]
-						if err := fs.Bind(deepAlphaName, hash.ExtToElements(v)); err != nil {
+						if err := fs.Bind(DeepAlphaName, hash.ExtToElements(v)); err != nil {
 							return fmt.Errorf("fri: bind claimed value (size=%d batch=%d group=%d field=ext poly=%d shift=%d): %w",
 								N, b, g, i, s, err)
 						}

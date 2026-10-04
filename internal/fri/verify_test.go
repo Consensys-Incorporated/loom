@@ -367,13 +367,13 @@ func bridgeInputsForTest(
 	}
 
 	fs := buildVerifierTranscript(t, committed)
-	if err := fs.NewChallenge(deepAlphaName); err != nil {
+	if err := fs.NewChallenge(DeepAlphaName); err != nil {
 		t.Fatal(err)
 	}
 	if err := bindClaimedValuesByPolynomialOrder(fs, openProof.ClaimedValues, shifts, mustDeepPlan(t, sizes)); err != nil {
 		t.Fatal(err)
 	}
-	alphaOut, err := fs.ComputeChallenge(deepAlphaName)
+	alphaOut, err := fs.ComputeChallenge(DeepAlphaName)
 	if err != nil {
 		t.Fatal(err)
 	}
