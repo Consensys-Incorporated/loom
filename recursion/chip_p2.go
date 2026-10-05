@@ -31,7 +31,7 @@ func (m *Machine) numPerms() int {
 		n += len(s.data) / 2
 	}
 	for _, p := range m.paths {
-		n += len(p.siblings)
+		n += len(p.steps)
 	}
 	return n
 }

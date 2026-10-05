@@ -24,30 +24,88 @@ import (
 
 type pathInst struct {
 	leaf, index, root int
-	siblings          []int
-	gens              []koalabear.Element // x⁻¹ accumulator constants, nil if unused
+	siblings          []int // one per level, leaf level first
+	steps             []pathStep
+	gens              []koalabear.Element // x⁻¹ accumulator constants per level, nil if unused
 	xb                int                 // address of [x⁻¹, b0], if gens != nil
 }
 
+// pathStep is one row of a path: a level (compress the running hash with the
+// sibling, ordered by the index bit) or an injection (compress it with the
+// injection leaf, running hash on the left).
+type pathStep struct {
+	sib int  // the sibling or injection leaf
+	lvl int  // the level, for a level step
+	inj bool // an injection step
+}
+
+// Injection is a leaf hash folded into a Merkle path at the level whose width
+// (number of nodes) is Width, as merkle.LevelInjection: after the level's
+// compression, the running hash h becomes compress(h, Leaf). A width equal to
+// the number of leaves folds it into the leaf itself.
+type Injection struct {
+	Width int
+	Leaf  int
+}
+
 // MerklePath checks that the digest at leaf is the leaf of index (lane 0 of
-// the index cell) under the root, with siblings leaf-level first.
-func (m *Machine) MerklePath(leaf int, siblings []int, index int, root int) {
+// the index cell) under the root, with siblings leaf-level first, and the
+// injections of a mixed-height tree (in schedule order: non-increasing
+// widths, as merkle.VerifyWithInjections).
+func (m *Machine) MerklePath(leaf int, siblings []int, index int, root int, injections ...Injection) {
+	steps, err := pathSteps(siblings, injections)
+	if err != nil {
+		panic(fmt.Sprintf("MerklePath: %v", err))
+	}
+	if len(steps) == 0 {
+		panic("MerklePath: no level and no injection")
+	}
 	m.read(leaf)
 	m.read(index)
 	m.read(root)
-	for _, s := range siblings {
-		m.read(s)
+	for _, st := range steps {
+		m.read(st.sib)
 	}
-	m.paths = append(m.paths, pathInst{leaf: leaf, index: index, root: root, siblings: siblings, xb: -1})
+	m.paths = append(m.paths, pathInst{leaf: leaf, index: index, root: root, siblings: siblings, steps: steps, xb: -1})
 	m.record(instrPath, len(m.paths)-1)
+}
+
+// pathSteps orders the rows of a path: the leaf-level injections, then every
+// level followed by the injections at the width above it.
+func pathSteps(siblings []int, injections []Injection) ([]pathStep, error) {
+	d := len(siblings)
+	prev := 1 << d
+	for k, inj := range injections {
+		w := inj.Width
+		if w <= 0 || w&(w-1) != 0 || w > prev {
+			return nil, fmt.Errorf("injection %d: width %d after %d (widths must be non-increasing powers of two, at most 2^depth)", k, w, prev)
+		}
+		prev = w
+	}
+	var steps []pathStep
+	next := 0
+	fold := func(width int) {
+		for ; next < len(injections) && injections[next].Width == width; next++ {
+			steps = append(steps, pathStep{sib: injections[next].Leaf, inj: true})
+		}
+	}
+	fold(1 << d)
+	for k, s := range siblings {
+		steps = append(steps, pathStep{sib: s, lvl: k})
+		fold(1 << (d - k - 1))
+	}
+	if next != len(injections) {
+		return nil, fmt.Errorf("injection of width %d does not fit a path of depth %d", injections[next].Width, d)
+	}
+	return steps, nil
 }
 
 // MerklePathX is MerklePath for the Merkle tree of a FRI layer over a domain
 // of generator g⁻¹ = gInv: it also returns the cell [x⁻¹, b0], where x⁻¹ =
 // gInv^bitrev(index) (bit-reversed over the path depth) is the inverse of the
 // fold point of the queried pair, and b0 is the index's low bit.
-func (m *Machine) MerklePathX(leaf int, siblings []int, index int, root int, gInv koalabear.Element) int {
-	m.MerklePath(leaf, siblings, index, root)
+func (m *Machine) MerklePathX(leaf int, siblings []int, index int, root int, gInv koalabear.Element, injections ...Injection) int {
+	m.MerklePath(leaf, siblings, index, root, injections...)
 	p := &m.paths[len(m.paths)-1]
 	d := len(siblings)
 	for lvl := range d {
@@ -78,24 +136,28 @@ func (m *Machine) execPath(p pathInst, r *Run) {
 	r.values[p.xb] = xb
 }
 
-// merkleChip: one row per level of a Merkle path, leaf level first.
+// merkleChip: one row per step of a Merkle path (see pathSteps): a level,
+// leaf level first, or an injection.
 //
-// Columns: cur0..7 (the digest entering the level), s0..7 (the sibling), b
-// (the direction bit), idx (the index at this level), out0..7, x (the x⁻¹
-// accumulator), b0 (the index's low bit). Setup: first, last, active,
-// leaf_addr, idx_addr, sib_addr, root_addr, g (the accumulator constant of the
-// level), xb_addr and xb_mult (the cell [x⁻¹, b0], written on the last row).
+// Columns: cur0..7 (the running hash entering the row), s0..7 (the sibling,
+// or the injection leaf), b (the direction bit), idx (the index left to
+// consume), out0..7, x (the x⁻¹ accumulator), b0 (the index's low bit).
+// Setup: first, last, active, inj (an injection row), lvl0 (the first level
+// row), leaf_addr, idx_addr, sib_addr, root_addr, g (the accumulator constant
+// of the level, 1 on injection rows), xb_addr and xb_mult (the cell [x⁻¹, b0],
+// written on the last row).
 //
 // Constraints:
 //
-//	b·(b − 1) = 0
-//	idx = b + 2·idx[+1]        on every row but the last of a path
-//	idx = b                    on the last row (the index is below 2^depth)
-//	                           and on padding rows
-//	cur = out[−1]              on every row but the first of a path
-//	x = 1 + b·(g − 1)          on the first row
-//	x = x[−1]·(1 + b·(g − 1))  on the others
-//	b0 = b on the first row, b0 = b0[−1] on the others
+//	b·(b − 1) = 0,  inj·b = 0
+//	idx = b + (2 − inj)·idx[+1]  on every row but the last of a path: a level
+//	                             consumes a bit, an injection none
+//	idx = b                      on the last row (the index is below 2^depth)
+//	                             and on padding rows
+//	cur = out[−1]                on every row but the first of a path
+//	x = 1 + b·(g − 1)            on the first row
+//	x = x[−1]·(1 + b·(g − 1))    on the others
+//	b0 = b on the first level row, b0 = b0[−1] on the following rows
 //
 // and out = compress(b ? (s, cur) : (cur, s)), looked up in the P2 core. The
 // first row reads the leaf digest and the index (lane 0 of its cell); the last
@@ -107,7 +169,7 @@ func (c merkleChip) name() string { return merkleMod }
 func (c merkleChip) rows() int {
 	n := 0
 	for _, p := range c.m.paths {
-		n += len(p.siblings)
+		n += len(p.steps)
 	}
 	return n
 }
@@ -115,11 +177,13 @@ func (c merkleChip) rows() int {
 func (c merkleChip) define(b *board.Builder, bus *Bus) error {
 	mm := b.Modules[merkleMod]
 	first, last, active := setupCol(merkleMod, "first"), setupCol(merkleMod, "last"), setupCol(merkleMod, "active")
+	inj, lvl0 := setupCol(merkleMod, "inj"), setupCol(merkleMod, "lvl0")
 	bit, idx := col(merkleMod, "b"), col(merkleMod, "idx")
 	mm.AssertZero(bit.Mul(bit.Sub(one())))
+	mm.AssertZero(inj.Mul(bit))
 	// (active − last) is 1 on every path row but the last, 0 elsewhere, so the
 	// recurrence never reads across a path end or the wrap-around.
-	mm.AssertZero(idx.Sub(bit).Sub(active.Sub(last).Mul(constE(2)).Mul(colShift(merkleMod, "idx", 1))))
+	mm.AssertZero(idx.Sub(bit).Sub(active.Sub(last).Mul(constE(2).Sub(inj)).Mul(colShift(merkleMod, "idx", 1))))
 	for i := range digest {
 		cur, prev := col(merkleMod, fmt.Sprintf("cur%d", i)), colShift(merkleMod, fmt.Sprintf("out%d", i), -1)
 		mm.AssertZero(one().Sub(first).Mul(cur.Sub(prev)))
@@ -130,8 +194,8 @@ func (c merkleChip) define(b *board.Builder, bus *Bus) error {
 	notFirst := active.Sub(first)
 	mm.AssertZero(first.Mul(x.Sub(factor)))
 	mm.AssertZero(notFirst.Mul(x.Sub(colShift(merkleMod, "x", -1).Mul(factor))))
-	mm.AssertZero(first.Mul(b0.Sub(bit)))
-	mm.AssertZero(notFirst.Mul(b0.Sub(colShift(merkleMod, "b0", -1))))
+	mm.AssertZero(lvl0.Mul(b0.Sub(bit)))
+	mm.AssertZero(notFirst.Mul(one().Sub(lvl0)).Mul(b0.Sub(colShift(merkleMod, "b0", -1))))
 
 	bus.Read(merkleMod, setupCol(merkleMod, "leaf_addr"), cellCols(merkleMod, "cur", 0), first)
 	bus.Read(merkleMod, setupCol(merkleMod, "idx_addr"), cellOf(idx), first)
@@ -154,23 +218,30 @@ func (c merkleChip) define(b *board.Builder, bus *Bus) error {
 }
 
 func (c merkleChip) setup(cs *cols) {
-	cs.declare("first", "last", "active", "leaf_addr", "idx_addr", "sib_addr", "root_addr", "g", "xb_addr", "xb_mult")
+	cs.declare("first", "last", "active", "inj", "lvl0", "leaf_addr", "idx_addr", "sib_addr", "root_addr", "g", "xb_addr", "xb_mult")
 	row := 0
 	for _, p := range c.m.paths {
-		for lvl, sAddr := range p.siblings {
+		for k, st := range p.steps {
 			cs.set("active", row, 1)
-			cs.set("sib_addr", row, uint64(sAddr))
-			if lvl == 0 {
+			cs.set("sib_addr", row, uint64(st.sib))
+			if k == 0 {
 				cs.set("first", row, 1)
 				cs.set("leaf_addr", row, uint64(p.leaf))
 				cs.set("idx_addr", row, uint64(p.index))
 			}
 			g := koalabear.One()
-			if p.gens != nil {
-				g = p.gens[lvl]
+			if st.inj {
+				cs.set("inj", row, 1)
+			} else {
+				if st.lvl == 0 {
+					cs.set("lvl0", row, 1)
+				}
+				if p.gens != nil {
+					g = p.gens[st.lvl]
+				}
 			}
 			cs.setElem("g", row, g)
-			if lvl == len(p.siblings)-1 {
+			if k == len(p.steps)-1 {
 				cs.set("last", row, 1)
 				cs.set("root_addr", row, uint64(p.root))
 				if p.gens != nil {
@@ -183,7 +254,7 @@ func (c merkleChip) setup(cs *cols) {
 	}
 }
 
-// trace fills the levels, and records the compressions for the P2 core.
+// trace fills the steps, and records the compressions for the P2 core.
 func (c merkleChip) trace(cs *cols, r *Run) error {
 	cs.declare("b", "idx", "x", "b0")
 	cs.declareLanes("cur", digest)
@@ -198,16 +269,19 @@ func (c merkleChip) trace(cs *cols, r *Run) error {
 		b0 := index & 1
 		var x koalabear.Element
 		x.SetOne()
-		for lvl, sAddr := range p.siblings {
-			sib := r.values[sAddr]
+		for _, st := range p.steps {
+			sib := r.values[st.sib]
 			bitV := index & 1
+			if st.inj {
+				bitV = 0
+			}
 			cs.set("b", row, bitV)
 			cs.set("idx", row, index)
 			cs.set("b0", row, b0)
 			if bitV == 1 {
 				g := koalabear.One()
 				if p.gens != nil {
-					g = p.gens[lvl]
+					g = p.gens[st.lvl]
 				}
 				x.Mul(&x, &g)
 			}
@@ -232,7 +306,9 @@ func (c merkleChip) trace(cs *cols, r *Run) error {
 			}
 			copy(prevOut[:], out[:digest])
 			copy(cur[:], out[:digest])
-			index >>= 1
+			if !st.inj {
+				index >>= 1
+			}
 			row++
 		}
 	}
