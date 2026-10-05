@@ -16,6 +16,7 @@ package recursion
 import (
 	"fmt"
 
+	"github.com/consensys/gnark-crypto/field/koalabear"
 	ext "github.com/consensys/gnark-crypto/field/koalabear/extensions"
 	"github.com/consensys/loom/board"
 )
@@ -99,6 +100,23 @@ func (m *Machine) Horner(y int, coeffs []int) int {
 	}
 	rows[len(rows)-1].o = m.wr()
 	return m.addE6(opHorner, append([]int{y}, coeffs...), rows[len(rows)-1].o.addr, rows...)
+}
+
+// PowBits returns Π_i (bits[i] ? gs[i] : 1), for scalar bit cells and
+// constants gs: an exponentiation by bits, such as g^bitrev(index).
+func (m *Machine) PowBits(bits []int, gs []koalabear.Element) int {
+	if len(bits) != len(gs) {
+		panic(fmt.Sprintf("PowBits: %d bits, %d constants", len(bits), len(gs)))
+	}
+	one := koalabear.One()
+	acc := m.Const(ScalarCell(one))
+	for i, b := range bits {
+		var gm1 koalabear.Element
+		gm1.Sub(&gs[i], &one)
+		f := m.Add(m.Mul(b, m.Const(ScalarCell(gm1))), m.Const(ScalarCell(one)))
+		acc = m.Mul(acc, f)
+	}
+	return acc
 }
 
 func (m *Machine) execE6(op e6Inst, r *Run) error {

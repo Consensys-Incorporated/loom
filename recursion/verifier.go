@@ -107,6 +107,10 @@ type Verifier struct {
 	// Openings[k][t][g] holds the cells of the row pair of group g of tree t
 	// opened at query k (groups in declaration order).
 	Openings [][][]RowPair
+
+	// DEEP[k][c] holds the cells of DQ_c(X) and DQ_c(−X) at query k, for the
+	// DEEP class c (class order), X the point of the class's opened pair.
+	DEEP [][][2]int
 }
 
 // RowPair holds the cells of an opened row pair: the rows lo and hi = lo + 1.
@@ -129,6 +133,12 @@ type ClaimedCells struct {
 // RATE·max N_m, numRounds = log2(max N_m), one level per DEEP class.
 type friShape struct {
 	logN, numRounds, numLevels int
+	// The DEEP classes (fri.WithDeepClasses: one per module), in class order:
+	// classOf[t][g] is the class of group g of tree t, classN[c] its size,
+	// levelOf[c] its FRI level (levels by decreasing size, stably).
+	classOf [][]int
+	classN  []int
+	levelOf []int
 }
 
 // NewVerifier builds the circuit verifying loom proofs of program under vk,
@@ -160,6 +170,7 @@ func NewVerifier(program board.Program, vk setup.VerificationKey, shape Shape) (
 		return nil, err
 	}
 	v.buildOpenings()
+	v.buildDEEP()
 	return v, nil
 }
 
@@ -364,6 +375,29 @@ func (v *Verifier) buildPCSTranscript() error {
 	}
 	sort.Ints(order)
 	v.fri = friShape{logN: log2(constants.RATE * maxN), numRounds: log2(maxN), numLevels: len(order)}
+	dense := map[int]int{}
+	for i, id := range order {
+		dense[id] = i
+	}
+	v.fri.classN = make([]int, len(order))
+	v.fri.classOf = make([][]int, len(classes))
+	for t, tc := range classes {
+		v.fri.classOf[t] = make([]int, len(tc))
+		for g, id := range tc {
+			c := dense[id]
+			v.fri.classOf[t][g] = c
+			v.fri.classN[c] = l.TreeGroups[t][g].N
+		}
+	}
+	byLevel := make([]int, len(order))
+	for c := range byLevel {
+		byLevel[c] = c
+	}
+	sort.SliceStable(byLevel, func(a, b int) bool { return v.fri.classN[byLevel[a]] > v.fri.classN[byLevel[b]] })
+	v.fri.levelOf = make([]int, len(order))
+	for lvl, c := range byLevel {
+		v.fri.levelOf[c] = lvl
+	}
 	if v.fri.logN >= BitsWidth {
 		return fmt.Errorf("NewVerifier: FRI domain 2^%d is too large for the query decomposition", v.fri.logN)
 	}
@@ -626,6 +660,172 @@ func (v *Verifier) buildOpenings() {
 			// The pair index: the query row at the tree's height, halved.
 			index := v.Queries[k].Shr[v.fri.logN-log2(topRows)+1]
 			m.MerklePath(leaves[order[0]], sibs, index, v.roots[t], injections...)
+		}
+	}
+}
+
+// deepPoly is one polynomial of a DEEP class: its tree, group, rail and index,
+// and its shifts.
+type deepPoly struct {
+	t, g, i int
+	ext     bool
+	shifts  []int
+}
+
+// buildDEEP computes, for every query and DEEP class, the DEEP quotient at
+// the class's opened pair (fri's checkFRIBridgeByPolynomial):
+//
+//	DQ_c(±X) = Σ_i α^i Σ_s (v_{i,s} − P_i(±X)) / (ζ·ω_N^s − (±X))
+//
+// over the class's polynomials P_i in alpha_DEEP order, regrouped by shift
+// point: for each point, a Horner over α of the differences of the
+// polynomials opened there, divided once by the point's denominator.
+func (v *Verifier) buildDEEP() {
+	m, l := v.M, v.layout
+	zeta := v.ChallengeE6(constants.FINAL_EVALUATION_POINT)
+	alpha := v.ChallengeE6(fri.DeepAlphaName)
+	zero := m.Const(Cell{})
+
+	// α powers, computed on demand (query-independent).
+	alphaPow := map[int]int{1: alpha}
+	var pow func(e int) int
+	pow = func(e int) int {
+		if a, ok := alphaPow[e]; ok {
+			return a
+		}
+		alphaPow[e] = m.Mul(pow(e-1), alpha)
+		return alphaPow[e]
+	}
+
+	numClasses := len(v.fri.classN)
+	v.DEEP = make([][][2]int, v.shape.NumQueries)
+	for k := range v.DEEP {
+		v.DEEP[k] = make([][2]int, numClasses)
+	}
+	for c := range numClasses {
+		N := v.fri.classN[c]
+		// The class's polynomials, in alpha_DEEP order: trees, groups, base
+		// then extension, columns in order.
+		var polys []deepPoly
+		for t := range l.NumTrees {
+			for g, gs := range v.sched.Shifts[t] {
+				if v.fri.classOf[t][g] != c {
+					continue
+				}
+				for i, ss := range gs.Base {
+					polys = append(polys, deepPoly{t: t, g: g, i: i, shifts: ss})
+				}
+				for i, ss := range gs.Ext {
+					polys = append(polys, deepPoly{t: t, g: g, i: i, ext: true, shifts: ss})
+				}
+			}
+		}
+		// The shift points ζ·ω_N^s, query-independent.
+		omegaN, err := koalabear.Generator(uint64(N))
+		if err != nil {
+			panic(err)
+		}
+		var points []int
+		zs := map[int]int{}
+		for _, p := range polys {
+			for _, sh := range p.shifts {
+				n := ((sh % N) + N) % N
+				if _, ok := zs[n]; ok {
+					continue
+				}
+				points = append(points, n)
+				if n == 0 {
+					zs[n] = zeta
+				} else {
+					var w koalabear.Element
+					w.ExpInt64(omegaN, int64(n))
+					zs[n] = m.Mul(zeta, m.Const(ScalarCell(w)))
+				}
+			}
+		}
+		sort.Ints(points)
+
+		// X = ω_{rate·N}^bitrev(lo) over w = log2(rate·N) bits, lo the even row
+		// of the query row s >> br at the class's height: bit i ≥ 1 of lo is
+		// bit br + i of s, and weighs 2^(w−1−i) once reversed.
+		ratN := constants.RATE * N
+		wBits := log2(ratN)
+		br := v.fri.logN - wBits
+		g, err := koalabear.Generator(uint64(ratN))
+		if err != nil {
+			panic(err)
+		}
+		gens := make([]koalabear.Element, wBits-1)
+		for i := 1; i < wBits; i++ {
+			gens[i-1] = g
+			for range wBits - 1 - i {
+				gens[i-1].Square(&gens[i-1])
+			}
+		}
+
+		for k := range v.shape.NumQueries {
+			bitCells := make([]int, wBits-1)
+			for i := 1; i < wBits; i++ {
+				bitCells[i-1] = v.Queries[k].Bit[br+i]
+			}
+			x := m.PowBits(bitCells, gens)
+			negX := m.Sub(zero, x)
+			var dq [2]int
+			for side, pt := range []int{x, negX} {
+				acc := -1
+				for _, n := range points {
+					// The polynomials opened at this point, as a Horner over α
+					// from the highest index down to the lowest, times α^lowest.
+					lo, hi := -1, -1
+					diffs := make([]int, len(polys))
+					for i, p := range polys {
+						diffs[i] = -1
+						for j, sh := range p.shifts {
+							if ((sh%N)+N)%N != n {
+								continue
+							}
+							claimed := v.Claimed[p.t][p.g].Base
+							if p.ext {
+								claimed = v.Claimed[p.t][p.g].Ext
+							}
+							rp := v.Openings[k][p.t][p.g]
+							row := rp.Lo
+							if side == 1 {
+								row = rp.Hi
+							}
+							opened := row.Base
+							if p.ext {
+								opened = row.Ext
+							}
+							diffs[i] = m.Sub(claimed[p.i][j], opened[p.i])
+							if lo < 0 {
+								lo = i
+							}
+							hi = i
+						}
+					}
+					coeffs := make([]int, 0, hi-lo+1)
+					for i := hi; i >= lo; i-- {
+						if diffs[i] < 0 {
+							coeffs = append(coeffs, zero)
+						} else {
+							coeffs = append(coeffs, diffs[i])
+						}
+					}
+					num := m.Horner(alpha, coeffs)
+					if lo > 0 {
+						num = m.Mul(num, pow(lo))
+					}
+					term := m.Div(num, m.Sub(zs[n], pt))
+					if acc < 0 {
+						acc = term
+					} else {
+						acc = m.Add(acc, term)
+					}
+				}
+				dq[side] = acc
+			}
+			v.DEEP[k][c] = dq
 		}
 	}
 }

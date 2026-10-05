@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/consensys/gnark-crypto/field/koalabear"
+	ext "github.com/consensys/gnark-crypto/field/koalabear/extensions"
 	"github.com/consensys/loom"
 	"github.com/consensys/loom/arguments"
 	"github.com/consensys/loom/board"
@@ -138,6 +139,22 @@ func checkChallenges(t *testing.T, v *Verifier, p *Program, ip innerProof) *Run 
 		for j := range digest {
 			if !got[j].Equal(&want[j]) {
 				t.Fatalf("challenge %s: lane %d = %s, want %s", name, j, got[j].String(), want[j].String())
+			}
+		}
+	}
+	// The DEEP quotients at every query, as the FRI levels open them.
+	fp := ip.prf.Opening.FRIProof
+	for k := range v.DEEP {
+		for c, dq := range v.DEEP[k] {
+			lvl := v.fri.levelOf[c]
+			layer := fp.FRIQueries[k].Layers[0]
+			if lvl > 0 {
+				layer = fp.LevelQueries[lvl-1][k]
+			}
+			for side, want := range []ext.E6{layer.LeafPExt, layer.LeafQExt} {
+				if got := CellE6(r.Value(dq[side])); !got.Equal(&want) {
+					t.Fatalf("query %d, class %d (level %d), side %d: DQ = %s, want %s", k, c, lvl, side, got.String(), want.String())
+				}
 			}
 		}
 	}
