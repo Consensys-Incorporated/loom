@@ -103,6 +103,21 @@ type Verifier struct {
 	Final      []int
 	Queries    []Bits
 	fri        friShape
+
+	// Openings[k][t][g] holds the cells of the row pair of group g of tree t
+	// opened at query k (groups in declaration order).
+	Openings [][][]RowPair
+}
+
+// RowPair holds the cells of an opened row pair: the rows lo and hi = lo + 1.
+type RowPair struct {
+	Lo, Hi Row
+}
+
+// Row holds the cells of one opened row: a scalar cell per base column, an
+// E6 cell per extension column.
+type Row struct {
+	Base, Ext []int
 }
 
 // ClaimedCells holds the claimed-value cells of one group.
@@ -144,6 +159,7 @@ func NewVerifier(program board.Program, vk setup.VerificationKey, shape Shape) (
 	if err := v.buildPCSTranscript(); err != nil {
 		return nil, err
 	}
+	v.buildOpenings()
 	return v, nil
 }
 
@@ -491,4 +507,125 @@ func log2(n int) int {
 		k++
 	}
 	return k
+}
+
+// buildOpenings checks, for every query and tree, the opened row pairs
+// against the tree's root (fri's verifyOneWMerkleProof): each group's pair is
+// hashed as a leaf (fri.Poseidon2LeafHasher), the largest group's leaf is the
+// path's leaf, and the other groups are injections, in decreasing size, equal
+// sizes in declaration order. The path's index is the query row shifted to the
+// tree's height.
+func (v *Verifier) buildOpenings() {
+	m, l := v.M, v.layout
+	v.Openings = make([][][]RowPair, v.shape.NumQueries)
+	for k := range v.shape.NumQueries {
+		v.Openings[k] = make([][]RowPair, l.NumTrees)
+		for t := range l.NumTrees {
+			groups := l.TreeGroups[t]
+			order := make([]int, len(groups))
+			for g := range order {
+				order[g] = g
+			}
+			sort.SliceStable(order, func(a, b int) bool { return groups[order[a]].N > groups[order[b]].N })
+			pos := make([]int, len(groups)) // position of each group in order
+			for i, g := range order {
+				pos[g] = i
+			}
+
+			v.Openings[k][t] = make([]RowPair, len(groups))
+			leaves := make([]int, len(groups))
+			for g := range groups {
+				names := v.sched.ColNamesByTree[t][g]
+				nb, ne := len(names.Base), len(names.Ext)
+				rows := func(prf proof.Proof) (fri.RawRowPair, error) {
+					ps := prf.Opening.PointSamplings
+					if k >= len(ps) || t >= len(ps[k]) {
+						return fri.RawRowPair{}, fmt.Errorf("point samplings do not have the verifier's shape")
+					}
+					wp := ps[k][t]
+					rp := wp.TopRows
+					if i := pos[g]; i > 0 {
+						if i-1 >= len(wp.Injections) {
+							return fri.RawRowPair{}, fmt.Errorf("point samplings do not have the verifier's shape")
+						}
+						rp = wp.Injections[i-1].Rows
+					}
+					for _, r := range []fri.RawRow{rp.Lo, rp.Hi} {
+						if len(r.RawRowBase) != nb || len(r.RawRowExt) != ne {
+							return fri.RawRowPair{}, fmt.Errorf("opened rows do not have the verifier's shape")
+						}
+					}
+					return rp, nil
+				}
+				row := func(hi bool) Row {
+					var res Row
+					for i := range nb {
+						res.Base = append(res.Base, v.input(func(prf proof.Proof, _ public.Inputs) (Cell, error) {
+							rp, err := rows(prf)
+							r := rp.Lo
+							if hi {
+								r = rp.Hi
+							}
+							if err != nil {
+								return Cell{}, err
+							}
+							return ScalarCell(r.RawRowBase[i]), nil
+						}))
+					}
+					for i := range ne {
+						res.Ext = append(res.Ext, v.input(func(prf proof.Proof, _ public.Inputs) (Cell, error) {
+							rp, err := rows(prf)
+							r := rp.Lo
+							if hi {
+								r = rp.Hi
+							}
+							if err != nil {
+								return Cell{}, err
+							}
+							return E6Cell(r.RawRowExt[i]), nil
+						}))
+					}
+					return res
+				}
+				rp := RowPair{Lo: row(false), Hi: row(true)}
+				v.Openings[k][t][g] = rp
+
+				// The leaf: tag, widths, lo base, hi base, lo ext, hi ext.
+				items := m.Elements([]koalabear.Element{hash.NewElement(fri.LeafDomainTag), hash.NewElement(uint64(2 * nb)), hash.NewElement(uint64(2 * ne))})
+				for _, c := range append(append([]int(nil), rp.Lo.Base...), rp.Hi.Base...) {
+					items = append(items, Scalar(c))
+				}
+				for _, c := range append(append([]int(nil), rp.Lo.Ext...), rp.Hi.Ext...) {
+					items = append(items, E6(c))
+				}
+				addrs, kinds := make([]int, len(items)), make([]int, len(items))
+				for i, it := range items {
+					addrs[i], kinds[i] = it.Addr, it.Kind
+				}
+				stream, n := m.Pack(addrs, kinds)
+				leaves[g] = m.Sponge(stream, n)
+			}
+
+			// The path, from the largest group's leaf.
+			topRows := constants.RATE * groups[order[0]].N
+			depth := log2(topRows / 2)
+			sibs := make([]int, depth)
+			for i := range sibs {
+				sibs[i] = v.input(func(prf proof.Proof, _ public.Inputs) (Cell, error) {
+					sib := prf.Opening.PointSamplings[k][t].Path.Siblings
+					if len(sib) != depth {
+						return Cell{}, fmt.Errorf("Merkle path does not have the verifier's shape")
+					}
+					return digestCell(sib[i]), nil
+				})
+			}
+			var injections []Injection
+			for _, g := range order[1:] {
+				injections = append(injections, Injection{Width: constants.RATE * groups[g].N / 2, Leaf: leaves[g]})
+			}
+			// The pair index: the query row at the tree's height, halved.
+			index := v.Queries[k].Shr[v.fri.logN-log2(topRows)+1]
+			m.MerklePath(leaves[order[0]], sibs, index, v.roots[t], injections...)
+		}
+	}
 }

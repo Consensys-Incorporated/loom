@@ -190,3 +190,57 @@ func TestVerifierTranscript(t *testing.T) {
 		})
 	}
 }
+
+// TestVerifierOpenings: the circuit accepts the commitment openings of real
+// proofs (TestVerifierTranscript proves them), and rejects tampered ones.
+func TestVerifierOpenings(t *testing.T) {
+	// The trace round 0 tree of the Fibonacci program has two groups: range
+	// (N = 8, the leaves) and fibonacci (N = 4, an injection).
+	const tree = 0
+	cases := map[string]func(prf *proof.Proof){
+		"top row value": func(prf *proof.Proof) {
+			v := &prf.Opening.PointSamplings[3][tree].TopRows.Lo.RawRowBase[0]
+			v.SetUint64(v.Uint64() + 1)
+		},
+		"injected row value": func(prf *proof.Proof) {
+			v := &prf.Opening.PointSamplings[5][tree].Injections[0].Rows.Hi.RawRowBase[0]
+			v.SetUint64(v.Uint64() + 1)
+		},
+		"sibling": func(prf *proof.Proof) {
+			prf.Opening.PointSamplings[7][tree].Path.Siblings[1][2].SetUint64(9)
+		},
+		// a valid opening, at another query's position
+		"other position": func(prf *proof.Proof) {
+			ps := prf.Opening.PointSamplings
+			ps[0][tree], ps[1][tree] = ps[1][tree], ps[0][tree]
+		},
+	}
+	for name, tamper := range cases {
+		t.Run(name, func(t *testing.T) {
+			ip := fiboProofs(t, [2]uint64{0, 1})[0]
+			if got := len(ip.prf.Opening.PointSamplings[0][tree].Injections); got != 1 {
+				t.Fatalf("tree %d has %d injected groups, want 1", tree, got)
+			}
+			v, err := NewVerifier(ip.program, ip.vk, ShapeOf(ip.prf, ip.pi))
+			if err != nil {
+				t.Fatal(err)
+			}
+			p, err := v.M.Compile()
+			if err != nil {
+				t.Fatal(err)
+			}
+			tamper(&ip.prf)
+			in, err := v.Inputs(ip.prf, ip.pi)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r, err := p.Execute(in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := prove(t, p, r); err == nil {
+				t.Fatal("tampered opening accepted")
+			}
+		})
+	}
+}
