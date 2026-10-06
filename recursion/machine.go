@@ -40,6 +40,8 @@ const (
 	bitsMod    = "bits"
 	e6Mod      = "e6"
 	foldMod    = "fold"
+	tableMod   = "table"
+	lookupMod  = "lookup"
 	p2Mod      = "p2"
 )
 
@@ -70,6 +72,8 @@ type Machine struct {
 	bits    []bitsInst
 	e6Insts []e6Inst
 	folds   [][]foldRow
+	tables  []tableInst
+	lookups []lookupInst
 }
 
 // instr is one instruction in execution order: its kind and its index in the
@@ -85,6 +89,8 @@ const (
 	instrPath
 	instrBits
 	instrE6
+	instrTable
+	instrLookup
 )
 
 func (m *Machine) alloc() int {
@@ -186,7 +192,7 @@ type chip interface {
 
 func (m *Machine) chips() []chip {
 	return []chip{witnessChip{m}, constChip{m}, spongeChip{m}, merkleChip{m},
-		windowChip{m}, bitsChip{m}, e6Chip{m}, foldChip{m}, p2Chip{m}}
+		windowChip{m}, bitsChip{m}, e6Chip{m}, foldChip{m}, tableChip{m}, lookupChip{m}, p2Chip{m}}
 }
 
 type chipHeight struct {
@@ -274,6 +280,10 @@ func (m *Machine) exec(in instr, r *Run) error {
 		m.execBits(m.bits[in.idx], r)
 	case instrE6:
 		return m.execE6(m.e6Insts[in.idx], r)
+	case instrTable:
+		m.execTable(m.tables[in.idx], r)
+	case instrLookup:
+		return m.execLookup(m.lookups[in.idx], r)
 	}
 	return nil
 }
