@@ -171,6 +171,9 @@ func NewVerifier(program board.Program, vk setup.VerificationKey, shape Shape) (
 	}
 	v.buildOpenings()
 	v.buildDEEP()
+	if err := v.buildFRI(); err != nil {
+		return nil, err
+	}
 	return v, nil
 }
 
@@ -828,4 +831,158 @@ func (v *Verifier) buildDEEP() {
 			v.DEEP[k][c] = dq
 		}
 	}
+}
+
+// leafE6Pair returns the Merkle leaf of a pair of extension values, as
+// fri.Poseidon2LeafHasher hashes a FRI layer's row pair: the LEAF tag, 0 base
+// and 2 extension values, then p and q.
+func (v *Verifier) leafE6Pair(p, q int) int {
+	m := v.M
+	items := m.Elements([]koalabear.Element{hash.NewElement(fri.LeafDomainTag), hash.NewElement(0), hash.NewElement(2)})
+	items = append(items, E6(p), E6(q))
+	addrs, kinds := make([]int, len(items)), make([]int, len(items))
+	for i, it := range items {
+		addrs[i], kinds[i] = it.Addr, it.Kind
+	}
+	stream, n := m.Pack(addrs, kinds)
+	return m.Sponge(stream, n)
+}
+
+// buildFRI checks FRI at every query (fri.Verify and checkQueryExt):
+//
+//   - round 0 is the levels tree: its leaves are the DEEP quotients of P2.6,
+//     DQ_c(±X) for the class of each level, authenticated by one path with
+//     the levels l ≥ 1 as injections (so the circuit uses its own DEEP values
+//     as the level openings: authenticating them is the bridge check);
+//   - round j ≥ 1 opens the pair of layer j, authenticated in its tree;
+//   - each round folds its pair (the fold chip), round 0's pair being level
+//     0's plus γ_l times the pairs of the other levels entering at round 0,
+//     and the result plus the injections of the levels entering at the next
+//     round must be the next pair's entry selected by the query bit, or the
+//     final polynomial's value at s >> numRounds after the last round.
+func (v *Verifier) buildFRI() error {
+	m := v.M
+	logN, numRounds := v.fri.logN, v.fri.numRounds
+	maxN := 1 << numRounds
+	numLevels := v.fri.numLevels
+	zero := m.Const(Cell{})
+
+	// The levels: class, size and intro round of each, in level order.
+	classAt := make([]int, numLevels)
+	for c, lvl := range v.fri.levelOf {
+		classAt[lvl] = c
+	}
+	intro := make([]int, numLevels)
+	enter := map[int][]int{} // round → levels l ≥ 1 entering at it
+	for lvl, c := range classAt {
+		intro[lvl] = log2(maxN / v.fri.classN[c])
+		if lvl > 0 {
+			enter[intro[lvl]] = append(enter[intro[lvl]], lvl)
+		}
+	}
+	gammas := make([]int, numLevels)
+	for lvl := 1; lvl < numLevels; lvl++ {
+		gammas[lvl] = v.ChallengeE6(fri.LevelGammaName(lvl))
+	}
+	alphas := make([]int, numRounds)
+	for j := range numRounds {
+		alphas[j] = v.ChallengeE6(fri.FoldName(j))
+	}
+	// The domain generators' inverses, one per round.
+	gInv := make([]koalabear.Element, numRounds)
+	for j := range numRounds {
+		g, err := koalabear.Generator(uint64(1) << (logN - j))
+		if err != nil {
+			return err
+		}
+		gInv[j].Inverse(&g)
+	}
+	// The final polynomial, read at s >> numRounds.
+	final := m.Table(v.Final)
+
+	for k := range v.shape.NumQueries {
+		q := v.Queries[k]
+		pair := func(lvl int) [2]int { return v.DEEP[k][classAt[lvl]] }
+
+		var rounds []FoldRound
+		for j := range numRounds {
+			var p, qv, xb int
+			if j == 0 {
+				// The levels tree: level 0 is the leaf, the others injections.
+				lp := pair(0)
+				var injections []Injection
+				for lvl := 1; lvl < numLevels; lvl++ {
+					pl := pair(lvl)
+					injections = append(injections, Injection{Width: (1 << (logN - intro[lvl])) / 2, Leaf: v.leafE6Pair(pl[0], pl[1])})
+				}
+				sibs := v.friSiblings(k, 0, logN-1)
+				xb = m.MerklePathX(v.leafE6Pair(lp[0], lp[1]), sibs, q.Shr[1], v.LevelsRoot, gInv[0], injections...)
+				p, qv = lp[0], lp[1]
+				for _, lvl := range enter[0] {
+					pl := pair(lvl)
+					p = m.Add(p, m.Mul(gammas[lvl], pl[0]))
+					qv = m.Add(qv, m.Mul(gammas[lvl], pl[1]))
+				}
+			} else {
+				p, qv = v.friLayerValues(k, j)
+				sibs := v.friSiblings(k, j, logN-j-1)
+				xb = m.MerklePathX(v.leafE6Pair(p, qv), sibs, q.Shr[j+1], v.FRIRoots[j-1], gInv[j])
+			}
+			// The levels entering at the next round, each at the entry the
+			// next row selects: bit j + 1 of s.
+			inj := zero
+			if j+1 < numRounds {
+				for _, lvl := range enter[j+1] {
+					pl := pair(lvl)
+					sel := m.Add(pl[0], m.Mul(q.Bit[j+1], m.Sub(pl[1], pl[0])))
+					term := m.Mul(gammas[lvl], sel)
+					if inj == zero {
+						inj = term
+					} else {
+						inj = m.Add(inj, term)
+					}
+				}
+			}
+			rounds = append(rounds, FoldRound{P: p, Q: qv, Alpha: alphas[j], XB: xb, Inj: inj})
+		}
+		m.FoldChain(rounds, m.Lookup(final, q.Shr[numRounds]))
+	}
+	return nil
+}
+
+// friLayerValues allocates the inputs of the pair of FRI layer j ≥ 1 opened at
+// query k.
+func (v *Verifier) friLayerValues(k, j int) (int, int) {
+	layer := func(prf proof.Proof) (fri.QueryLayer, error) {
+		fq := prf.Opening.FRIProof.FRIQueries
+		if k >= len(fq) || j >= len(fq[k].Layers) {
+			return fri.QueryLayer{}, fmt.Errorf("FRI queries do not have the verifier's shape")
+		}
+		return fq[k].Layers[j], nil
+	}
+	p := v.input(func(prf proof.Proof, _ public.Inputs) (Cell, error) {
+		l, err := layer(prf)
+		return E6Cell(l.LeafPExt), err
+	})
+	q := v.input(func(prf proof.Proof, _ public.Inputs) (Cell, error) {
+		l, err := layer(prf)
+		return E6Cell(l.LeafQExt), err
+	})
+	return p, q
+}
+
+// friSiblings allocates the inputs of the Merkle path of FRI layer j at
+// query k (layer 0 is the levels tree).
+func (v *Verifier) friSiblings(k, j, depth int) []int {
+	sibs := make([]int, depth)
+	for i := range sibs {
+		sibs[i] = v.input(func(prf proof.Proof, _ public.Inputs) (Cell, error) {
+			fq := prf.Opening.FRIProof.FRIQueries
+			if k >= len(fq) || j >= len(fq[k].Layers) || len(fq[k].Layers[j].Path.Siblings) != depth {
+				return Cell{}, fmt.Errorf("FRI paths do not have the verifier's shape")
+			}
+			return digestCell(fq[k].Layers[j].Path.Siblings[i]), nil
+		})
+	}
+	return sibs
 }

@@ -261,3 +261,61 @@ func TestVerifierOpenings(t *testing.T) {
 		})
 	}
 }
+
+// TestVerifierFRI: the circuit rejects tampered FRI openings, final
+// polynomials and claimed values (the DEEP quotients are now authenticated in
+// the levels tree).
+func TestVerifierFRI(t *testing.T) {
+	cases := map[string]func(prf *proof.Proof){
+		"layer value": func(prf *proof.Proof) {
+			v := &prf.Opening.FRIProof.FRIQueries[2].Layers[1].LeafPExt
+			v.B0.A0.SetUint64(v.B0.A0.Uint64() + 1)
+		},
+		"layer sibling": func(prf *proof.Proof) {
+			prf.Opening.FRIProof.FRIQueries[4].Layers[1].Path.Siblings[0][3].SetUint64(9)
+		},
+		"levels tree sibling": func(prf *proof.Proof) {
+			prf.Opening.FRIProof.FRIQueries[6].Layers[0].Path.Siblings[1][0].SetUint64(9)
+		},
+		"final polynomial": func(prf *proof.Proof) {
+			v := &prf.Opening.FRIProof.FinalPolyExt[1]
+			v.B1.A1.SetUint64(v.B1.A1.Uint64() + 1)
+		},
+		// the first base claimed value of the first trace round tree
+		"claimed value": func(prf *proof.Proof) {
+			for _, g := range prf.Opening.ClaimedValues[0] {
+				if len(g.Base) > 0 {
+					v := &g.Base[0][0]
+					v.B0.A0.SetUint64(v.B0.A0.Uint64() + 1)
+					return
+				}
+			}
+			panic("no base claimed value")
+		},
+	}
+	for name, tamper := range cases {
+		t.Run(name, func(t *testing.T) {
+			ip := fiboProofs(t, [2]uint64{0, 1})[0]
+			v, err := NewVerifier(ip.program, ip.vk, ShapeOf(ip.prf, ip.pi))
+			if err != nil {
+				t.Fatal(err)
+			}
+			p, err := v.M.Compile()
+			if err != nil {
+				t.Fatal(err)
+			}
+			tamper(&ip.prf)
+			in, err := v.Inputs(ip.prf, ip.pi)
+			if err != nil {
+				t.Fatal(err)
+			}
+			r, err := p.Execute(in)
+			if err != nil {
+				return // e.g. an index out of a table: the tamper is caught at execution
+			}
+			if err := prove(t, p, r); err == nil {
+				t.Fatal("tampered proof accepted")
+			}
+		})
+	}
+}
