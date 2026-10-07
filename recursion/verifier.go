@@ -19,8 +19,10 @@ import (
 
 	"github.com/consensys/gnark-crypto/field/koalabear"
 	"github.com/consensys/loom/board"
+	"github.com/consensys/loom/expr"
 	"github.com/consensys/loom/field"
 	"github.com/consensys/loom/internal/constants"
+	"github.com/consensys/loom/internal/dag"
 	"github.com/consensys/loom/internal/fri"
 	"github.com/consensys/loom/internal/hash"
 	"github.com/consensys/loom/internal/protocol"
@@ -111,6 +113,16 @@ type Verifier struct {
 	// DEEP[k][c] holds the cells of DQ_c(X) and DQ_c(−X) at query k, for the
 	// DEEP class c (class order), X the point of the class's opened pair.
 	DEEP [][][2]int
+
+	// The entries of the public inputs and of the exposed values, by name: a
+	// scalar index cell and a value cell each (E6 for exposed values).
+	publicEntries  map[string][]entryCells
+	exposedEntries map[string][]entryCells
+}
+
+// entryCells are the cells of one indexed entry.
+type entryCells struct {
+	idx, val int
 }
 
 // RowPair holds the cells of an opened row pair: the rows lo and hi = lo + 1.
@@ -158,6 +170,9 @@ func NewVerifier(program board.Program, vk setup.VerificationKey, shape Shape) (
 		shape:      shape,
 		layout:     protocol.BuildLayout(program, len(vk.Roots)),
 		Challenges: map[string]int{},
+
+		publicEntries:  map[string][]entryCells{},
+		exposedEntries: map[string][]entryCells{},
 	}
 	v.sched = protocol.BuildCanonicalSchedule(program, v.layout)
 	if len(vk.Roots) != v.layout.SetupEnd-v.layout.SetupBegin {
@@ -172,6 +187,9 @@ func NewVerifier(program board.Program, vk setup.VerificationKey, shape Shape) (
 	v.buildOpenings()
 	v.buildDEEP()
 	if err := v.buildFRI(); err != nil {
+		return nil, err
+	}
+	if err := v.buildAIR(); err != nil {
 		return nil, err
 	}
 	return v, nil
@@ -310,6 +328,7 @@ func (v *Verifier) bindPublicInputs(name string) {
 			} else {
 				v.tr.Bind(name, Scalar(val))
 			}
+			v.publicEntries[p.Name] = append(v.publicEntries[p.Name], entryCells{idx, val})
 		}
 	}
 }
@@ -338,6 +357,7 @@ func (v *Verifier) bindExposedValue(challenge, name string) error {
 			return E6Cell(e.ExtValue()), err
 		})
 		v.tr.Bind(challenge, Scalar(idx), E6(val))
+		v.exposedEntries[name] = append(v.exposedEntries[name], entryCells{idx, val})
 	}
 	return nil
 }
@@ -985,4 +1005,272 @@ func (v *Verifier) friSiblings(k, j, depth int) []int {
 		})
 	}
 	return sibs
+}
+
+// buildAIR checks the AIR at zeta, as the Go verifier's loadClaimedValues,
+// computeVerifierColumns, checkLogupBus and checkAIRRelations: the values at
+// zeta (claimed values, round challenges, verifier columns) by leaf key, the
+// logup buses (their totals sum to zero), and for every module
+//
+//	V(ζ) = (ζ^N − 1)·Σ_i Q_i(ζ)·ζ^(iN)
+//
+// with V the folded vanishing relation, unrolled into E6 rows, and Q_i the
+// quotient chunks.
+func (v *Verifier) buildAIR() error {
+	m, l := v.M, v.layout
+	zero := m.Const(Cell{})
+	oneE := koalabear.One()
+	one := m.Const(ScalarCell(oneE))
+	zeta := v.ChallengeE6(constants.FINAL_EVALUATION_POINT)
+
+	// The values at zeta, by leaf key.
+	vals := map[string]int{}
+	for t := range l.NumTrees {
+		for g, gk := range v.sched.Keys[t] {
+			for i, perShift := range gk.Base {
+				for k, keys := range perShift {
+					for _, key := range keys {
+						vals[key] = v.Claimed[t][g].Base[i][k]
+					}
+				}
+			}
+			for i, perShift := range gk.Ext {
+				for k, keys := range perShift {
+					for _, key := range keys {
+						vals[key] = v.Claimed[t][g].Ext[i][k]
+					}
+				}
+			}
+		}
+	}
+	for r := range v.program.Rounds {
+		name := constants.CanonicalChallengeName(r)
+		vals[name] = v.ChallengeE6(name)
+	}
+
+	// ζ^(2^k), on demand.
+	zetaPow2 := []int{zeta}
+	zetaPow := func(logN int) int {
+		for len(zetaPow2) <= logN {
+			z := zetaPow2[len(zetaPow2)-1]
+			zetaPow2 = append(zetaPow2, m.Mul(z, z))
+		}
+		return zetaPow2[logN]
+	}
+	// lagrange returns L_i(ζ) = ω^i·(ζ^N − 1) / (N·(ζ − ω^i)) on the domain of
+	// size N, for a cell w = ω^i.
+	lagrange := func(N, w int) int {
+		zn1 := m.Sub(zetaPow(log2(N)), one)
+		den := m.Mul(m.Sub(zeta, w), m.Const(ScalarCell(koalabear.NewElement(uint64(N)))))
+		return m.Div(m.Mul(zn1, w), den)
+	}
+	// omegaPow returns a cell ω_N^idx for a scalar index cell, from its low
+	// log2(N) bits (ω_N^N = 1).
+	omegaPow := func(N, idx int) int {
+		n := log2(N)
+		omega, err := koalabear.Generator(uint64(N))
+		if err != nil {
+			panic(err)
+		}
+		bits := m.Bits(idx, n)
+		gs := make([]koalabear.Element, n)
+		for b := range gs {
+			gs[b] = omega
+			for range b {
+				gs[b].Square(&gs[b])
+			}
+		}
+		return m.PowBits(bits.Bit, gs)
+	}
+	// weighted returns Σ entries v·L_idx(ζ).
+	weighted := func(N int, entries []entryCells) int {
+		acc := zero
+		for _, e := range entries {
+			term := m.Mul(e.val, lagrange(N, omegaPow(N, e.idx)))
+			if acc == zero {
+				acc = term
+			} else {
+				acc = m.Add(acc, term)
+			}
+		}
+		return acc
+	}
+
+	// The public input indices are positions of the module: below its size,
+	// as the Go verifier checks.
+	modules := make([]string, 0, len(v.program.Modules))
+	for name := range v.program.Modules {
+		modules = append(modules, name)
+	}
+	sort.Strings(modules)
+	for _, p := range v.shape.PublicInputs {
+		mod, ok := v.program.Modules[p.Module]
+		if !ok {
+			return fmt.Errorf("NewVerifier: public input %q of unknown module %q", p.Name, p.Module)
+		}
+		for _, e := range v.publicEntries[p.Name] {
+			m.AssertEq(e.idx, m.Bits(e.idx, log2(mod.N)).Shr[0])
+		}
+	}
+
+	// The verifier columns of every module's relation (first come, as
+	// computeVerifierColumns).
+	cfg := expr.NewConfig(expr.OnlyVerifierColumns...)
+	for _, name := range modules {
+		mod := v.program.Modules[name]
+		if mod.VanishingRelation == nil {
+			continue
+		}
+		for _, leaf := range mod.VanishingRelation.LeavesFull(cfg) {
+			key := leaf.String()
+			if _, ok := vals[key]; ok {
+				continue
+			}
+			switch leaf.Hook {
+			case expr.LagrangeHook:
+				i := constants.ParseLagrangeName(leaf.Name)
+				if i < 0 {
+					i += mod.N
+				}
+				omega, err := koalabear.Generator(uint64(mod.N))
+				if err != nil {
+					return err
+				}
+				var w koalabear.Element
+				w.ExpInt64(omega, int64(i))
+				vals[key] = lagrange(mod.N, m.Const(ScalarCell(w)))
+			case expr.PublicInputHook:
+				entries, ok := v.publicEntries[leaf.Name]
+				if !ok {
+					return fmt.Errorf("NewVerifier: public input %q is not in the shape", leaf.Name)
+				}
+				for _, p := range v.shape.PublicInputs {
+					if p.Name == leaf.Name && p.Module != name {
+						return fmt.Errorf("NewVerifier: public input %q belongs to module %q, used from module %q", leaf.Name, p.Module, name)
+					}
+				}
+				vals[key] = weighted(mod.N, entries)
+			case expr.ExposedValueHook:
+				entries, ok := v.exposedEntries[leaf.Name]
+				if !ok {
+					return fmt.Errorf("NewVerifier: exposed value %q is not bound", leaf.Name)
+				}
+				vals[key] = weighted(mod.N, entries)
+			case expr.ExposedAverageHook:
+				entries := v.exposedEntries[leaf.Name]
+				if len(entries) != 1 {
+					return fmt.Errorf("NewVerifier: exposed average %q must have one entry", leaf.Name)
+				}
+				var invN koalabear.Element
+				invN.SetUint64(uint64(mod.N))
+				invN.Inverse(&invN)
+				vals[key] = m.Mul(entries[0].val, m.Const(ScalarCell(invN)))
+			default:
+				return fmt.Errorf("NewVerifier: %s carries unsupported hook %s", key, leaf.Hook)
+			}
+		}
+	}
+
+	// The logup buses: the totals sum to zero.
+	for _, bus := range v.program.LogupBus {
+		acc := zero
+		for _, name := range bus.Totals {
+			entries := v.exposedEntries[name]
+			if len(entries) != 1 {
+				return fmt.Errorf("NewVerifier: logup total %q must have one entry", name)
+			}
+			if acc == zero {
+				acc = entries[0].val
+			} else {
+				acc = m.Add(acc, entries[0].val)
+			}
+		}
+		m.AssertEq(acc, zero)
+	}
+
+	// Every module's relation at zeta against its quotient.
+	for _, name := range modules {
+		mod := v.program.Modules[name]
+		if mod.VanishingRelation == nil {
+			continue
+		}
+		val, err := v.evalDAG(mod.VanishingRelation, vals)
+		if err != nil {
+			return fmt.Errorf("NewVerifier: module %s: %w", name, err)
+		}
+		zn := zetaPow(log2(mod.N))
+		var chunks []int
+		for i := 0; ; i++ {
+			c, ok := vals[constants.QuotientChunkName(name, i)]
+			if !ok {
+				break
+			}
+			chunks = append(chunks, c)
+		}
+		// Σ_i Q_i·(ζ^N)^i, by Horner from the last chunk.
+		q := zero
+		if len(chunks) > 0 {
+			rev := make([]int, len(chunks))
+			for i, c := range chunks {
+				rev[len(chunks)-1-i] = c
+			}
+			q = m.Horner(zn, rev)
+		}
+		m.AssertEq(val, m.Mul(m.Sub(zn, one), q))
+	}
+	return nil
+}
+
+// evalDAG unrolls a relation's DAG into E6 rows, children before parents,
+// each node once: leaves are the cells of vals (by leaf key) or constants.
+func (v *Verifier) evalDAG(d *dag.DAG, vals map[string]int) (int, error) {
+	m := v.M
+	cell := make(map[*dag.DAGNode]int, len(d.Nodes))
+	for _, n := range d.Nodes {
+		switch n.Kind {
+		case dag.KindLeaf:
+			if n.IsConst {
+				cell[n] = m.Const(ScalarCell(n.ConstVal))
+				continue
+			}
+			c, ok := vals[n.Leaf.String()]
+			if !ok {
+				return 0, fmt.Errorf("no value at zeta for %s", n.Leaf.String())
+			}
+			cell[n] = c
+		case dag.KindAdd, dag.KindMul:
+			acc := cell[n.Children[0]]
+			for _, ch := range n.Children[1:] {
+				if n.Kind == dag.KindAdd {
+					acc = m.Add(acc, cell[ch])
+				} else {
+					acc = m.Mul(acc, cell[ch])
+				}
+			}
+			cell[n] = acc
+		case dag.KindSub:
+			cell[n] = m.Sub(cell[n.Children[0]], cell[n.Children[1]])
+		case dag.KindPow:
+			base, res := cell[n.Children[0]], -1
+			for e := n.Exp; e > 0; e >>= 1 {
+				if e&1 == 1 {
+					if res < 0 {
+						res = base
+					} else {
+						res = m.Mul(res, base)
+					}
+				}
+				if e > 1 {
+					base = m.Mul(base, base)
+				}
+			}
+			if res < 0 {
+				res = m.Const(ScalarCell(koalabear.One()))
+			}
+			cell[n] = res
+		default:
+			return 0, fmt.Errorf("unknown DAG node kind %d", n.Kind)
+		}
+	}
+	return cell[d.Root], nil
 }
