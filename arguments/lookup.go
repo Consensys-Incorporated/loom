@@ -156,9 +156,10 @@ func stageLookup(builder *board.Builder, selS, selT []expr.Expr, S, T []board.Ta
 }
 
 // MaxLogupBatch is the largest number of fractions summed by one logup
-// column: three linear denominators give a degree-4 constraint (see
-// board.LogupConstraintDegree).
-const MaxLogupBatch = 3
+// column: four linear denominators give a degree-5 constraint (see
+// board.LogupConstraintDegree), whose quotient is computed on 4N points, as
+// for degree 4.
+const MaxLogupBatch = 4
 
 // addLogups adds, at RoundRunningSums, the cyclic logup columns of the folded
 // sources (fractions numS/(s − γ)) and targets (−numT/(t − γ)), and balances
