@@ -71,13 +71,12 @@ func ComputeQuotient(Pi map[string]Polynomial, vanishingRelation dag.DAG, N int,
 		domainCache = &DomainCache{}
 	}
 
-	// Degree of E(Pi) is at most E.Degree() * sizePi
 	eDeg := vanishingRelation.Degree()
 	if eDeg <= 0 {
 		return Polynomial{}, fmt.Errorf("expression degree must be at least 1, got %d", eDeg)
 	}
 	N = nextPowerOfTwo(N)
-	bigSize := nextPowerOfTwo(eDeg * N)
+	bigSize := QuotientDomainSize(eDeg, N)
 	if bigSize%N != 0 {
 		return Polynomial{}, fmt.Errorf("big domain size %d is not divisible by vanishing domain size %d", bigSize, N)
 	}
@@ -240,7 +239,7 @@ func ComputeQuotientMixed(PiBase map[string]Polynomial, PiExt map[string]ExtPoly
 		return nil, fmt.Errorf("expression degree must be at least 1, got %d", eDeg)
 	}
 	N = nextPowerOfTwo(N)
-	bigSize := nextPowerOfTwo(eDeg * N)
+	bigSize := QuotientDomainSize(eDeg, N)
 	if bigSize%N != 0 {
 		return nil, fmt.Errorf("big domain size %d is not divisible by vanishing domain size %d", bigSize, N)
 	}
@@ -497,4 +496,15 @@ func CosetExtLagrangeNormalToCanonicalWithCache(p ExtPolynomial, cache *DomainCa
 			acc.Mul(&acc, &invFrGen)
 		}
 	})
+}
+
+// QuotientDomainSize returns the size of the coset on which the quotient
+// E(Pi)/(X^N-1) of a degree-eDeg relation over a domain of size N is
+// computed: the numerator has degree at most eDeg·(N-1), so the quotient has
+// degree at most eDeg·(N-1) - N < (eDeg-1)·N, and is determined by its
+// evaluations on a coset of size NextPowerOfTwo((eDeg-1)·N) (at least N). The
+// numerator is only evaluated pointwise there, so its own degree does not
+// matter: a degree-5 relation needs 4N, not 8N.
+func QuotientDomainSize(eDeg, N int) int {
+	return NextPowerOfTwo(max(eDeg-1, 1) * N)
 }
