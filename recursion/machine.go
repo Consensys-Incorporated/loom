@@ -62,6 +62,10 @@ type Machine struct {
 	constList []int        // addresses written by the const chip
 	constVal  map[int]Cell // value of every constant
 
+	// HornerLanes is the number of base coefficients one Horner row consumes;
+	// 0 means DefaultHornerLanes. Set it before recording any instruction.
+	HornerLanes int
+
 	instrs  []instr // every instruction, in execution order
 	packs   []packInst
 	lanes   []lanesInst
