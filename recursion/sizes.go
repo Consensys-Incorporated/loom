@@ -19,6 +19,7 @@ import (
 
 	"github.com/consensys/gnark-crypto/field/koalabear"
 	"github.com/consensys/loom/board"
+	"github.com/consensys/loom/expr"
 	"github.com/consensys/loom/internal/constants"
 	"github.com/consensys/loom/internal/hash"
 	"github.com/consensys/loom/internal/protocol"
@@ -69,9 +70,42 @@ func WithDynamicModules(names ...string) VerifierOption {
 // from a table, for a dynamic one.
 type moduleSize struct {
 	dynamic bool
-	logN    int // ℓ: the size's log, a constant for a fixed module
+	logN    int // ℓ: the size's log, a constant for a fixed module (the program's for a dynamic one)
+	minLog  int // a dynamic module's minimum ℓ (see minLogSize)
 	cell    int // the scalar cell of ℓ (dynamic modules only)
 	n       int // the scalar cell of N
+}
+
+// minLogSize returns the smallest ℓ such that N = 2^ℓ > 2·max|s| over the
+// shifts s of a module's relation. The proof's schedule keeps every shift mod
+// N, sorted (protocol.BuildCanonicalSchedule); above that size, no two shifts
+// of a column are equal mod N and their order is the same whatever N
+// (non-negative shifts ascending, then negative ones), so the proof's shape
+// does not depend on N, and a shift's raw value is recovered from its value
+// mod N (rawShift).
+func minLogSize(mod board.CompiledModule) int {
+	maxAbs := 0
+	if mod.VanishingRelation != nil {
+		for _, leaf := range mod.VanishingRelation.LeavesFull(expr.NewConfig(expr.WithoutChallenges(), expr.WithoutVerifierColumns())) {
+			maxAbs = max(maxAbs, leaf.Shift, -leaf.Shift)
+		}
+	}
+	l := 0
+	for 1<<l <= 2*maxAbs {
+		l++
+	}
+	return l
+}
+
+// rawShift returns the shift of a module's column whose value mod the
+// program's size N0 is norm (as the schedule holds it): norm if below N0/2,
+// norm − N0 otherwise (minLogSize).
+func (v *Verifier) rawShift(module string, norm int) int {
+	n0 := v.program.Modules[module].N
+	if norm < n0/2 || norm == 0 {
+		return norm
+	}
+	return norm - n0
 }
 
 // buildSizes checks the dynamic modules and allocates their size inputs: the
@@ -106,11 +140,17 @@ func (v *Verifier) buildSizes(dynamic map[string]bool) error {
 	}
 	maxLog := m.Const(ScalarCell(koalabear.NewElement(MaxLogModuleSize)))
 	for _, name := range names {
+		mod := v.program.Modules[name]
+		minLog := minLogSize(mod)
+		if log2(mod.N) < minLog {
+			return fmt.Errorf("NewVerifier: dynamic module %q: the program's size %d is below its minimum 2^%d (its shifts)", name, mod.N, minLog)
+		}
 		l := v.sizeInput(name)
-		for _, x := range []int{l, m.Sub(maxLog, l)} {
+		// ℓ − minLog and MaxLog − ℓ are both in [0, 2^5).
+		for _, x := range []int{m.Sub(l, m.Const(ScalarCell(koalabear.NewElement(uint64(minLog))))), m.Sub(maxLog, l)} {
 			m.AssertEq(x, m.Bits(x, 5).Shr[0])
 		}
-		v.sizes[name] = moduleSize{dynamic: true, logN: log2(v.program.Modules[name].N), cell: l, n: v.sizeTable("pow2", l, func(l int) koalabear.Element {
+		v.sizes[name] = moduleSize{dynamic: true, logN: log2(mod.N), minLog: minLog, cell: l, n: v.sizeTable("pow2", l, func(l int) koalabear.Element {
 			return koalabear.NewElement(uint64(1) << l)
 		})}
 	}
@@ -205,14 +245,15 @@ func (v *Verifier) bindModuleSizes(name string) {
 }
 
 // statementSize returns the input value of a dynamic module's log size for a
-// statement: its size must be a power of two at most 2^MaxLogModuleSize.
-func statementSize(sizes ModuleSizes, module string) (Cell, error) {
+// statement: its size must be a power of two between the module's minimum
+// (minLogSize) and 2^MaxLogModuleSize.
+func statementSize(sizes ModuleSizes, module string, minLog int) (Cell, error) {
 	n, ok := sizes[module]
 	if !ok {
 		return Cell{}, fmt.Errorf("no size for the dynamic module %q", module)
 	}
-	if n <= 0 || n&(n-1) != 0 || n > 1<<MaxLogModuleSize {
-		return Cell{}, fmt.Errorf("module %q: size %d is not a power of two at most 2^%d", module, n, MaxLogModuleSize)
+	if n < 1<<minLog || n&(n-1) != 0 || n > 1<<MaxLogModuleSize {
+		return Cell{}, fmt.Errorf("module %q: size %d is not a power of two between 2^%d and 2^%d", module, n, minLog, MaxLogModuleSize)
 	}
 	return ScalarCell(hash.NewElement(uint64(log2(n)))), nil
 }

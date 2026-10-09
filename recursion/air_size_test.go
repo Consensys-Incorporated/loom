@@ -15,14 +15,15 @@ import (
 	"github.com/consensys/loom/trace"
 )
 
-// accProgram is a program whose module acc can take any size: its relations
+// accProgram is a program whose module acc can take any size (range, a fixed
+// table of size rangeN, holds 0..rangeN−1): its relations
 // name rows from the start (row 0) or from the end (the last row), never by
 // an absolute index past 0. acc.A accumulates acc.B (A[i+1] = A[i] + B[i]
 // except on the last row) from the public input acc.a0; acc.B = i mod 8 is
 // looked up in the fixed table range (a cyclic logup: an exposed total and its
 // average over acc's size); acc.A's last entry and three entries of acc.B are
 // exposed.
-func accProgram(t *testing.T) board.Program {
+func accProgram(t *testing.T, rangeN int) board.Program {
 	t.Helper()
 	b := board.NewBuilder()
 	acc := board.NewModule("acc")
@@ -32,7 +33,7 @@ func accProgram(t *testing.T) board.Program {
 	acc.AssertEqualAt(A, expr.PublicInput("acc.a0"), 0)
 	b.AddModule(acc)
 	rng := board.NewModule("range")
-	rng.N = 8
+	rng.N = rangeN
 	b.AddModule(rng)
 	if err := arguments.Lookup(&b, board.Column{Module: "acc", In: B}, board.Column{Module: "range", In: expr.Col("range.T")}); err != nil {
 		t.Fatal(err)
@@ -77,7 +78,7 @@ func accProof(t *testing.T, program board.Program, n int, a0 uint64) innerProof 
 	tr := trace.New()
 	tr.SetBase("acc.A", as)
 	tr.SetBase("acc.B", bs)
-	tr.SetBase("range.T", col(8, func(i int) uint64 { return uint64(i) }))
+	tr.SetBase("range.T", col(program.Modules["range"].N, func(i int) uint64 { return uint64(i) }))
 	var e public.Entry
 	e.SetBase(koalabear.NewElement(a0))
 	pi := public.Inputs{"acc.a0": {Module: "acc", Entries: []public.Entry{e}}}
@@ -114,7 +115,7 @@ func airCircuit(t *testing.T, ip innerProof, opts ...VerifierOption) *Verifier {
 // the first and last rows, the public input's and exposed values' indices,
 // the logup average's 1/N, all at the statement's size).
 func TestAIRDynamicSizes(t *testing.T) {
-	program := accProgram(t)
+	program := accProgram(t, 8)
 	ref := accProof(t, program, 8, 3)
 	v := airCircuit(t, ref, WithDynamicModules("acc"))
 	p, err := v.M.Compile()

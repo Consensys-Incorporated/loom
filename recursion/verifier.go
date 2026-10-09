@@ -162,9 +162,10 @@ type friShape struct {
 	// The DEEP classes (fri.WithDeepClasses: one per module), in class order:
 	// classOf[t][g] is the class of group g of tree t, classN[c] its size,
 	// levelOf[c] its FRI level (levels by decreasing size, stably).
-	classOf [][]int
-	classN  []int
-	levelOf []int
+	classOf  [][]int
+	classN   []int
+	classMod []string // the module of every class (one class per module)
+	levelOf  []int
 }
 
 // NewVerifier builds the circuit verifying loom proofs of program under vk,
@@ -252,7 +253,8 @@ func (v *Verifier) Inputs(prf proof.Proof, pi public.Inputs, sizes ModuleSizes) 
 	res := make([]Cell, len(v.extract))
 	for i, f := range v.extract {
 		if f == nil {
-			c, err := statementSize(sizes, v.sizeInputs[i])
+			mod := v.sizeInputs[i]
+			c, err := statementSize(sizes, mod, v.sizes[mod].minLog)
 			if err != nil {
 				return nil, fmt.Errorf("Inputs: %w", err)
 			}
@@ -461,6 +463,7 @@ func (v *Verifier) buildPCSTranscript() error {
 		dense[id] = i
 	}
 	v.fri.classN = make([]int, len(order))
+	v.fri.classMod = make([]string, len(order))
 	v.fri.classOf = make([][]int, len(classes))
 	for t, tc := range classes {
 		v.fri.classOf[t] = make([]int, len(tc))
@@ -468,6 +471,7 @@ func (v *Verifier) buildPCSTranscript() error {
 			c := dense[id]
 			v.fri.classOf[t][g] = c
 			v.fri.classN[c] = l.TreeGroups[t][g].N
+			v.fri.classMod[c] = l.TreeGroups[t][g].Module
 		}
 	}
 	byLevel := make([]int, len(order))
@@ -645,24 +649,85 @@ func log2(n int) int {
 // tree's height.
 func (v *Verifier) buildOpenings() {
 	m, l := v.M, v.layout
+	v.allocOpenings()
+	for k := range v.shape.NumQueries {
+		for t := range l.NumTrees {
+			groups := l.TreeGroups[t]
+			order, _ := v.groupOrder(t)
+			leaves := make([]int, len(groups))
+			for g := range groups {
+				rp := v.Openings[k][t][g]
+				nb, ne := rp.Lo.NBase, len(rp.Lo.Ext)
+				// The leaf: tag, widths, lo base, hi base, lo ext, hi ext.
+				items := m.Elements([]koalabear.Element{hash.NewElement(fri.LeafDomainTag), hash.NewElement(uint64(2 * nb)), hash.NewElement(uint64(2 * ne))})
+				for _, r := range []Row{rp.Lo, rp.Hi} {
+					for c, cell := range r.Base {
+						items = append(items, Item{cell, min(CellWidth, nb-c*CellWidth)})
+					}
+				}
+				for _, c := range append(append([]int(nil), rp.Lo.Ext...), rp.Hi.Ext...) {
+					items = append(items, E6(c))
+				}
+				addrs, kinds := make([]int, len(items)), make([]int, len(items))
+				for i, it := range items {
+					addrs[i], kinds[i] = it.Addr, it.Kind
+				}
+				stream, n := m.Pack(addrs, kinds)
+				leaves[g] = m.Sponge(stream, n)
+			}
+
+			// The path, from the largest group's leaf.
+			topRows := constants.RATE * groups[order[0]].N
+			depth := log2(topRows / 2)
+			sibs := make([]int, depth)
+			for i := range sibs {
+				sibs[i] = v.input(func(prf proof.Proof, _ public.Inputs) (Cell, error) {
+					sib := prf.Opening.PointSamplings[k][t].Path.Siblings
+					if len(sib) != depth {
+						return Cell{}, fmt.Errorf("Merkle path does not have the verifier's shape")
+					}
+					return digestCell(sib[i]), nil
+				})
+			}
+			var injections []Injection
+			for _, g := range order[1:] {
+				injections = append(injections, Injection{Width: constants.RATE * groups[g].N / 2, Leaf: leaves[g]})
+			}
+			// The pair index: the query row at the tree's height, halved.
+			index := v.Queries[k].Shr[v.fri.logN-log2(topRows)+1]
+			m.MerklePath(leaves[order[0]], sibs, index, v.roots[t], injections...)
+		}
+	}
+}
+
+// groupOrder returns the groups of tree t by decreasing size, equal sizes in
+// declaration order (the path's leaf first, then the injections), and the
+// position of each group in that order.
+func (v *Verifier) groupOrder(t int) (order, pos []int) {
+	groups := v.layout.TreeGroups[t]
+	order = make([]int, len(groups))
+	for g := range order {
+		order[g] = g
+	}
+	sort.SliceStable(order, func(a, b int) bool { return groups[order[a]].N > groups[order[b]].N })
+	pos = make([]int, len(groups))
+	for i, g := range order {
+		pos[g] = i
+	}
+	return order, pos
+}
+
+// allocOpenings allocates the inputs of the opened row pairs (Openings): for
+// every query, tree and group, the rows of the group's top rows or injection.
+func (v *Verifier) allocOpenings() {
+	l := v.layout
 	v.Openings = make([][][]RowPair, v.shape.NumQueries)
 	for k := range v.shape.NumQueries {
 		v.Openings[k] = make([][]RowPair, l.NumTrees)
 		for t := range l.NumTrees {
-			groups := l.TreeGroups[t]
-			order := make([]int, len(groups))
-			for g := range order {
-				order[g] = g
-			}
-			sort.SliceStable(order, func(a, b int) bool { return groups[order[a]].N > groups[order[b]].N })
-			pos := make([]int, len(groups)) // position of each group in order
-			for i, g := range order {
-				pos[g] = i
-			}
-
-			v.Openings[k][t] = make([]RowPair, len(groups))
-			leaves := make([]int, len(groups))
-			for g := range groups {
+			_, pos := v.groupOrder(t)
+			v.Openings[k][t] = make([]RowPair, len(l.TreeGroups[t]))
+			for g := range l.TreeGroups[t] {
 				names := v.sched.ColNamesByTree[t][g]
 				nb, ne := len(names.Base), len(names.Ext)
 				rows := func(prf proof.Proof) (fri.RawRowPair, error) {
@@ -719,45 +784,7 @@ func (v *Verifier) buildOpenings() {
 				}
 				rp := RowPair{Lo: row(false), Hi: row(true)}
 				v.Openings[k][t][g] = rp
-
-				// The leaf: tag, widths, lo base, hi base, lo ext, hi ext.
-				items := m.Elements([]koalabear.Element{hash.NewElement(fri.LeafDomainTag), hash.NewElement(uint64(2 * nb)), hash.NewElement(uint64(2 * ne))})
-				for _, r := range []Row{rp.Lo, rp.Hi} {
-					for c, cell := range r.Base {
-						items = append(items, Item{cell, min(CellWidth, nb-c*CellWidth)})
-					}
-				}
-				for _, c := range append(append([]int(nil), rp.Lo.Ext...), rp.Hi.Ext...) {
-					items = append(items, E6(c))
-				}
-				addrs, kinds := make([]int, len(items)), make([]int, len(items))
-				for i, it := range items {
-					addrs[i], kinds[i] = it.Addr, it.Kind
-				}
-				stream, n := m.Pack(addrs, kinds)
-				leaves[g] = m.Sponge(stream, n)
 			}
-
-			// The path, from the largest group's leaf.
-			topRows := constants.RATE * groups[order[0]].N
-			depth := log2(topRows / 2)
-			sibs := make([]int, depth)
-			for i := range sibs {
-				sibs[i] = v.input(func(prf proof.Proof, _ public.Inputs) (Cell, error) {
-					sib := prf.Opening.PointSamplings[k][t].Path.Siblings
-					if len(sib) != depth {
-						return Cell{}, fmt.Errorf("Merkle path does not have the verifier's shape")
-					}
-					return digestCell(sib[i]), nil
-				})
-			}
-			var injections []Injection
-			for _, g := range order[1:] {
-				injections = append(injections, Injection{Width: constants.RATE * groups[g].N / 2, Leaf: leaves[g]})
-			}
-			// The pair index: the query row at the tree's height, halved.
-			index := v.Queries[k].Shr[v.fri.logN-log2(topRows)+1]
-			m.MerklePath(leaves[order[0]], sibs, index, v.roots[t], injections...)
 		}
 	}
 }
@@ -775,8 +802,9 @@ type deepPoly struct {
 //
 //	DQ_c(±X) = Σ_i α^i Σ_s (v_{i,s} − P_i(±X)) / (ζ·ω_N^s − (±X))
 //
-// over the class's polynomials P_i in alpha_DEEP order, regrouped by shift
-// point and divided once by the point's denominator. For each point, the
+// over the class's polynomials P_i in alpha_DEEP order, regrouped by shift s
+// (the point ζ·ω_N^s; two shifts equal mod N stay two terms, as in the sum
+// over s) and divided once by the point's denominator. For each point, the
 // numerator Σ_i α^i·(v_{i,s} − P_i(±X)) over the polynomials opened there is
 // split into the claimed part Σ_i α^i·v_{i,s}, query-independent and
 // computed once by the E6 chip, minus the opened part Σ_i α^i·P_i(±X), a
@@ -798,6 +826,40 @@ func (v *Verifier) buildDEEP() {
 		return alphaPow[e]
 	}
 
+	// For a dynamic class, X = X₀^(2^d)·(−1)^(bit d of s), d = MaxLog − ℓ
+	// the class's depth, with X₀ = Π_b bit_b(s)·ω_(2^(b+1)) over the bits of
+	// the full-domain row s: the bits of s from d up, reversed, weighted for
+	// the class's domain, the last factor setting bit d (the pair's even row)
+	// to 0. Per query, the tables of X₀^(2^d) and of bit d, for d ≤ MaxLog.
+	var xTables, bitTables []Table
+	queryTables := func(k int) (Table, Table) {
+		if xTables == nil {
+			xTables, bitTables = make([]Table, v.shape.NumQueries), make([]Table, v.shape.NumQueries)
+			for q := range v.shape.NumQueries {
+				bitCells := v.Queries[q].Bit[:v.fri.logN]
+				gs := make([]koalabear.Element, len(bitCells))
+				for b := range gs {
+					g, err := koalabear.Generator(uint64(1) << (b + 1))
+					if err != nil {
+						panic(err)
+					}
+					gs[b] = g
+				}
+				x := m.PowBits(bitCells, gs)
+				pows := []int{x}
+				for range MaxLogModuleSize {
+					x = m.Mul(x, x)
+					pows = append(pows, x)
+				}
+				xTables[q] = m.Table(pows)
+				bitTables[q] = m.Table(v.Queries[q].Bit[:MaxLogModuleSize+1])
+			}
+		}
+		return xTables[k], bitTables[k]
+	}
+	one := m.Const(ScalarCell(koalabear.One()))
+	maxLog := m.Const(ScalarCell(koalabear.NewElement(MaxLogModuleSize)))
+
 	numClasses := len(v.fri.classN)
 	v.DEEP = make([][][2]int, v.shape.NumQueries)
 	for k := range v.DEEP {
@@ -805,6 +867,8 @@ func (v *Verifier) buildDEEP() {
 	}
 	for c := range numClasses {
 		N := v.fri.classN[c]
+		mod := v.fri.classMod[c]
+		size := v.sizes[mod]
 		// The class's polynomials, in alpha_DEEP order: trees, groups, base
 		// then extension, columns in order.
 		var polys []deepPoly
@@ -814,33 +878,26 @@ func (v *Verifier) buildDEEP() {
 					continue
 				}
 				for i, ss := range gs.Base {
-					polys = append(polys, deepPoly{t: t, g: g, i: i, shifts: ss})
+					polys = append(polys, deepPoly{t: t, g: g, i: i, shifts: v.classShifts(mod, ss)})
 				}
 				for i, ss := range gs.Ext {
-					polys = append(polys, deepPoly{t: t, g: g, i: i, ext: true, shifts: ss})
+					polys = append(polys, deepPoly{t: t, g: g, i: i, ext: true, shifts: v.classShifts(mod, ss)})
 				}
 			}
 		}
 		// The shift points ζ·ω_N^s, query-independent.
-		omegaN, err := koalabear.Generator(uint64(N))
-		if err != nil {
-			panic(err)
-		}
 		var points []int
 		zs := map[int]int{}
 		for _, p := range polys {
 			for _, sh := range p.shifts {
-				n := ((sh % N) + N) % N
-				if _, ok := zs[n]; ok {
+				if _, ok := zs[sh]; ok {
 					continue
 				}
-				points = append(points, n)
-				if n == 0 {
-					zs[n] = zeta
+				points = append(points, sh)
+				if sh == 0 {
+					zs[sh] = zeta
 				} else {
-					var w koalabear.Element
-					w.ExpInt64(omegaN, int64(n))
-					zs[n] = m.Mul(zeta, m.Const(ScalarCell(w)))
+					zs[sh] = m.Mul(zeta, v.SizeOmega(mod, sh))
 				}
 			}
 		}
@@ -878,7 +935,7 @@ func (v *Verifier) buildDEEP() {
 			claimedAt := make([]int, len(polys))
 			for i, p := range polys {
 				for j, sh := range p.shifts {
-					if ((sh%N)+N)%N != n {
+					if sh != n {
 						continue
 					}
 					claimed := v.Claimed[p.t][p.g].Base
@@ -904,12 +961,23 @@ func (v *Verifier) buildDEEP() {
 			sets[n] = ps
 		}
 
+		var depth int // a dynamic class's depth d = MaxLog − ℓ
+		if size.dynamic {
+			depth = m.Sub(maxLog, size.cell)
+		}
 		for k := range v.shape.NumQueries {
-			bitCells := make([]int, wBits-1)
-			for i := 1; i < wBits; i++ {
-				bitCells[i-1] = v.Queries[k].Bit[br+i]
+			var x int
+			if size.dynamic {
+				xTab, bitTab := queryTables(k)
+				bit := m.Lookup(bitTab, depth)
+				x = m.Mul(m.Lookup(xTab, depth), m.Sub(one, m.Add(bit, bit)))
+			} else {
+				bitCells := make([]int, wBits-1)
+				for i := 1; i < wBits; i++ {
+					bitCells[i-1] = v.Queries[k].Bit[br+i]
+				}
+				x = m.PowBits(bitCells, gens)
 			}
-			x := m.PowBits(bitCells, gens)
 			negX := m.Sub(zero, x)
 			var dq [2]int
 			for side, pt := range []int{x, negX} {
@@ -972,6 +1040,20 @@ func (v *Verifier) deepRows(polys []deepPoly, at []bool, lo, hi, k, side int) []
 		r.Sel |= sel << lane
 	}
 	return rows
+}
+
+// classShifts returns the shifts of a polynomial as the DEEP points use them:
+// the schedule's (mod the program's size) for a fixed module, the raw shifts
+// for a dynamic one, so that ω_N^s is the statement's.
+func (v *Verifier) classShifts(module string, shifts []int) []int {
+	if !v.sizes[module].dynamic {
+		return shifts
+	}
+	res := make([]int, len(shifts))
+	for i, s := range shifts {
+		res[i] = v.rawShift(module, s)
+	}
+	return res
 }
 
 // leafE6Pair returns the Merkle leaf of a pair of extension values, as
