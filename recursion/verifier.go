@@ -143,10 +143,13 @@ type ClaimedCells struct {
 	Base, Ext [][]int
 }
 
-// friShape is the FRI configuration of the verified proofs: domain size N =
-// RATE·max N_m, numRounds = log2(max N_m), one level per DEEP class.
+// friShape is the FRI configuration of the verified proofs: FRI runs over the
+// domain of the maximum module size, N = RATE·2^MAX_LOG_MODULE_SIZE, with
+// numRounds = MAX_LOG_MODULE_SIZE; the largest module's level enters at round
+// first = log2(2^MAX_LOG_MODULE_SIZE / max N_m), and the rounds before it have
+// no layer (see fri.Proof). One level per DEEP class.
 type friShape struct {
-	logN, numRounds, numLevels int
+	logN, numRounds, numLevels, first int
 	// The DEEP classes (fri.WithDeepClasses: one per module), in class order:
 	// classOf[t][g] is the class of group g of tree t, classN[c] its size,
 	// levelOf[c] its FRI level (levels by decreasing size, stably).
@@ -399,7 +402,12 @@ func (v *Verifier) buildPCSTranscript() error {
 		order = append(order, c)
 	}
 	sort.Ints(order)
-	v.fri = friShape{logN: log2(constants.RATE * maxN), numRounds: log2(maxN), numLevels: len(order)}
+	v.fri = friShape{
+		logN:      log2(constants.RATE) + constants.MAX_LOG_MODULE_SIZE,
+		numRounds: constants.MAX_LOG_MODULE_SIZE,
+		numLevels: len(order),
+		first:     constants.MAX_LOG_MODULE_SIZE - log2(maxN),
+	}
 	dense := map[int]int{}
 	for i, id := range order {
 		dense[id] = i
@@ -471,7 +479,7 @@ func (v *Verifier) buildPCSTranscript() error {
 		if len(fp.PoW) > 0 {
 			return fp, fmt.Errorf("the FRI proof has proofs of work: grinding is not supported")
 		}
-		if len(fp.FRIRoots) != v.fri.numRounds-1 || len(fp.FinalPolyExt) != 1<<(v.fri.logN-v.fri.numRounds) {
+		if len(fp.FRIRoots) != v.fri.numRounds-1-v.fri.first || len(fp.FinalPolyExt) != 1<<(v.fri.logN-v.fri.numRounds) {
 			return fp, fmt.Errorf("the FRI proof does not have the verifier's shape")
 		}
 		return fp, nil
@@ -487,10 +495,17 @@ func (v *Verifier) buildPCSTranscript() error {
 		}
 		v.Challenges[name] = v.tr.Compute(name)
 	}
+	// The fold challenges: the rounds before first have no layer and bind the
+	// zero digest, round first binds the levels root, the next ones their
+	// layer root.
+	zeroDigest := m.Const(Cell{})
 	for j := range v.fri.numRounds {
 		root := v.LevelsRoot
-		if j > 0 {
-			i := j - 1
+		switch {
+		case j < v.fri.first:
+			root = zeroDigest
+		case j > v.fri.first:
+			i := j - v.fri.first - 1
 			root = v.input(func(prf proof.Proof, _ public.Inputs) (Cell, error) {
 				fp, err := friProof(prf)
 				if err != nil {
@@ -922,19 +937,20 @@ func (v *Verifier) leafE6Pair(p, q int) int {
 
 // buildFRI checks FRI at every query (fri.Verify and checkQueryExt):
 //
-//   - round 0 is the levels tree: its leaves are the DEEP quotients of P2.6,
-//     DQ_c(±X) for the class of each level, authenticated by one path with
-//     the levels l ≥ 1 as injections (so the circuit uses its own DEEP values
-//     as the level openings: authenticating them is the bridge check);
-//   - round j ≥ 1 opens the pair of layer j, authenticated in its tree;
-//   - each round folds its pair (the fold chip), round 0's pair being level
-//     0's plus γ_l times the pairs of the other levels entering at round 0,
+//   - the rounds before first have no layer (fri.Proof): nothing to check;
+//   - round first is the levels tree: its leaves are the DEEP quotients of
+//     P2.6, DQ_c(±X) for the class of each level, authenticated by one path
+//     with the levels l ≥ 1 as injections (so the circuit uses its own DEEP
+//     values as the level openings: authenticating them is the bridge check);
+//   - round j > first opens the pair of layer j, authenticated in its tree;
+//   - each round folds its pair (the fold chip), round first's pair being
+//     level 0's plus γ_l times the pairs of the other levels entering there,
 //     and the result plus the injections of the levels entering at the next
 //     round must be the next pair's entry selected by the query bit, or the
 //     final polynomial's value at s >> numRounds after the last round.
 func (v *Verifier) buildFRI() error {
 	m := v.M
-	logN, numRounds := v.fri.logN, v.fri.numRounds
+	logN, numRounds, first := v.fri.logN, v.fri.numRounds, v.fri.first
 	maxN := 1 << numRounds
 	numLevels := v.fri.numLevels
 	zero := m.Const(Cell{})
@@ -957,7 +973,7 @@ func (v *Verifier) buildFRI() error {
 		gammas[lvl] = v.ChallengeE6(fri.LevelGammaName(lvl))
 	}
 	alphas := make([]int, numRounds)
-	for j := range numRounds {
+	for j := first; j < numRounds; j++ {
 		alphas[j] = v.ChallengeE6(fri.FoldName(j))
 	}
 	// The domain generators' inverses, one per round.
@@ -977,9 +993,9 @@ func (v *Verifier) buildFRI() error {
 		pair := func(lvl int) [2]int { return v.DEEP[k][classAt[lvl]] }
 
 		var rounds []FoldRound
-		for j := range numRounds {
+		for j := first; j < numRounds; j++ {
 			var p, qv, xb int
-			if j == 0 {
+			if j == first {
 				// The levels tree: level 0 is the leaf, the others injections.
 				lp := pair(0)
 				var injections []Injection
@@ -987,18 +1003,18 @@ func (v *Verifier) buildFRI() error {
 					pl := pair(lvl)
 					injections = append(injections, Injection{Width: (1 << (logN - intro[lvl])) / 2, Leaf: v.leafE6Pair(pl[0], pl[1])})
 				}
-				sibs := v.friSiblings(k, 0, logN-1)
-				xb = m.MerklePathX(v.leafE6Pair(lp[0], lp[1]), sibs, q.Shr[1], v.LevelsRoot, gInv[0], injections...)
+				sibs := v.friSiblings(k, 0, logN-first-1)
+				xb = m.MerklePathX(v.leafE6Pair(lp[0], lp[1]), sibs, q.Shr[first+1], v.LevelsRoot, gInv[first], injections...)
 				p, qv = lp[0], lp[1]
-				for _, lvl := range enter[0] {
+				for _, lvl := range enter[first] {
 					pl := pair(lvl)
 					p = m.Add(p, m.Mul(gammas[lvl], pl[0]))
 					qv = m.Add(qv, m.Mul(gammas[lvl], pl[1]))
 				}
 			} else {
-				p, qv = v.friLayerValues(k, j)
-				sibs := v.friSiblings(k, j, logN-j-1)
-				xb = m.MerklePathX(v.leafE6Pair(p, qv), sibs, q.Shr[j+1], v.FRIRoots[j-1], gInv[j])
+				p, qv = v.friLayerValues(k, j-first)
+				sibs := v.friSiblings(k, j-first, logN-j-1)
+				xb = m.MerklePathX(v.leafE6Pair(p, qv), sibs, q.Shr[j+1], v.FRIRoots[j-first-1], gInv[j])
 			}
 			// The levels entering at the next round, each at the entry the
 			// next row selects: bit j + 1 of s.
@@ -1022,8 +1038,8 @@ func (v *Verifier) buildFRI() error {
 	return nil
 }
 
-// friLayerValues allocates the inputs of the pair of FRI layer j ≥ 1 opened at
-// query k.
+// friLayerValues allocates the inputs of the pair of the FRI query layer j ≥ 1
+// (round first + i) opened at query k.
 func (v *Verifier) friLayerValues(k, j int) (int, int) {
 	layer := func(prf proof.Proof) (fri.QueryLayer, error) {
 		fq := prf.Opening.FRIProof.FRIQueries
@@ -1043,8 +1059,8 @@ func (v *Verifier) friLayerValues(k, j int) (int, int) {
 	return p, q
 }
 
-// friSiblings allocates the inputs of the Merkle path of FRI layer j at
-// query k (layer 0 is the levels tree).
+// friSiblings allocates the inputs of the Merkle path of the FRI query layer j
+// (round first + j) at query k (layer 0 is the levels tree).
 func (v *Verifier) friSiblings(k, j, depth int) []int {
 	sibs := make([]int, depth)
 	for i := range sibs {

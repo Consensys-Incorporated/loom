@@ -158,11 +158,12 @@ func checkChallenges(t *testing.T, v *Verifier, p *Program, ip innerProof) *Run 
 			}
 		}
 	}
-	// The query rows, as FRI recorded them.
+	// The query rows, as FRI recorded them: the full-domain row s, whose
+	// first recorded layer is round first, at row s >> first.
 	for k, q := range v.Queries {
-		got := r.Value(q.Shr[0])
+		got := r.Value(q.Shr[v.fri.first])
 		if want := ip.prf.Opening.FRIProof.FRIQueries[k].Layers[0].Row; got[0].Uint64() != uint64(want) {
-			t.Fatalf("query %d: row %d, want %d", k, got[0].Uint64(), want)
+			t.Fatalf("query %d: row %d at round %d, want %d", k, got[0].Uint64(), v.fri.first, want)
 		}
 	}
 	return r

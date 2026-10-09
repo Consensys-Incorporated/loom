@@ -129,7 +129,11 @@ func (pcs *PCS) Verify(
 	// 5- Extract per-query FRI positions from the proof. The FRI prover
 	//    records each full-domain query row in the first FRI layer; these
 	//    rows drive both committed-tree sampling and the DEEP bridge.
-	queryPositions, err := extractFRIQueryPositions(proof.FRIProof, pcs.params.NumQueries)
+	first, err := pcs.params.firstRound(plan.levelSizes()[0])
+	if err != nil {
+		return fmt.Errorf("fri: PCS.Verify: %w", err)
+	}
+	queryPositions, err := extractFRIQueryPositions(proof.FRIProof, pcs.params.NumQueries, first)
 	if err != nil {
 		return fmt.Errorf("fri: PCS.Verify: %w", err)
 	}
@@ -244,11 +248,14 @@ func injectionOrderForBatch(batchShapes BatchShapes) []int {
 }
 
 // extractFRIQueryPositions reads the per-query positions out of the FRI
-// proof. The query position for query q is the Row of the first layer of
-// FRIQueries[q] (a property the FRI prover establishes; the verifier
-// re-derives the same s via the transcript inside fri.Verify but does not
-// expose it, so we read it back from the proof).
-func extractFRIQueryPositions(prf Proof, numQueries int) ([]int, error) {
+// proof. The first layer of FRIQueries[q] is round r0 = first, whose Row is
+// the full-domain position s >> first (fri.Verify checks it against the s it
+// re-derives from the transcript but does not expose it, so we read it back
+// from the proof). The returned position s' = Row << first differs from s in
+// its low first bits only, which no consumer reads: every committed tree and
+// DEEP class has at most p.N >> first rows, so its row is s' >> k = s >> k for
+// some k ≥ first.
+func extractFRIQueryPositions(prf Proof, numQueries, first int) ([]int, error) {
 	if len(prf.FRIQueries) != numQueries {
 		return nil, fmt.Errorf("FRIQueries has %d entries, expected %d", len(prf.FRIQueries), numQueries)
 	}
@@ -257,7 +264,7 @@ func extractFRIQueryPositions(prf Proof, numQueries int) ([]int, error) {
 		if len(prf.FRIQueries[q].Layers) == 0 {
 			return nil, fmt.Errorf("FRIQueries[%d].Layers is empty", q)
 		}
-		out[q] = prf.FRIQueries[q].Layers[0].Row
+		out[q] = prf.FRIQueries[q].Layers[0].Row << first
 	}
 	return out, nil
 }

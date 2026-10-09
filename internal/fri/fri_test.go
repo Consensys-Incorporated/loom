@@ -448,3 +448,100 @@ func TestProveVerifySharedIntroRounds(t *testing.T) {
 		})
 	}
 }
+
+// TestProveVerifyLeadingEmptyRounds runs FRI over a domain larger than its
+// largest level: with p.D = 64 (6 rounds) and levels of D = 16, 16 and 4, the
+// largest level enters at round r0 = 2. The rounds 0 and 1 have no layer, so
+// the proof holds layers and roots for the rounds 2..5 only, while the query
+// positions stay full-domain.
+func TestProveVerifyLeadingEmptyRounds(t *testing.T) {
+	ds := []int{16, 16, 4}
+	const first = 2
+	for _, extRail := range []bool{true, false} {
+		for _, grinding := range []int{0, 4} {
+			t.Run(fmt.Sprintf("ext=%v/grinding=%d", extRail, grinding), func(t *testing.T) {
+				p := testParamsWithOptions(t, 256, 64, 4, fri.WithGrinding(grinding))
+				prf, positions, err := fri.Prove(p, sharedLevels(t, p, ds, extRail), freshTS())
+				if err != nil {
+					t.Fatalf("Prove: %v", err)
+				}
+				if err := fri.Verify(p, ds, prf, freshTS()); err != nil {
+					t.Fatalf("Verify: %v", err)
+				}
+
+				// Shape: no root and no layer for the empty rounds.
+				if got, want := len(prf.FRIRoots), 6-1-first; got != want {
+					t.Fatalf("FRIRoots: %d, want %d (rounds %d+1..5)", got, want, first)
+				}
+				for k, q := range prf.FRIQueries {
+					if got, want := len(q.Layers), 6-first; got != want {
+						t.Fatalf("query %d: %d layers, want %d", k, got, want)
+					}
+					if positions[k] >= p.N {
+						t.Fatalf("query %d: position %d outside the full domain %d", k, positions[k], p.N)
+					}
+					if q.Layers[0].Row != positions[k]>>first {
+						t.Fatalf("query %d: first layer row %d, want the position %d >> %d", k, q.Layers[0].Row, positions[k], first)
+					}
+				}
+				if grinding > 0 {
+					if _, ok := prf.PoW[fri.FoldName(0)]; !ok {
+						t.Fatal("an empty round's fold challenge carries no proof of work")
+					}
+				}
+
+				clone := func() fri.Proof {
+					bad := prf
+					bad.FRIRoots = append([]hash.Digest(nil), prf.FRIRoots...)
+					bad.FRIQueries = append([]fri.Query(nil), prf.FRIQueries...)
+					bad.FRIQueries[0].Layers = append([]fri.QueryLayer(nil), prf.FRIQueries[0].Layers...)
+					return bad
+				}
+				bad := clone()
+				bad.LevelsRoot[3].SetUint64(7)
+				if err := fri.Verify(p, ds, bad, freshTS()); err == nil {
+					t.Fatal("tampered levels root accepted")
+				}
+				bad = clone()
+				bad.FRIRoots[1][0].SetUint64(7)
+				if err := fri.Verify(p, ds, bad, freshTS()); err == nil {
+					t.Fatal("tampered layer root accepted")
+				}
+				bad = clone()
+				bad.FRIQueries[0].Layers[0].LeafPExt.B1.A1.SetUint64(7)
+				bad.FRIQueries[0].Layers[0].LeafPBase.SetUint64(7)
+				if err := fri.Verify(p, ds, bad, freshTS()); err == nil {
+					t.Fatal("tampered level 0 opening accepted")
+				}
+				bad = clone()
+				bad.FRIQueries[0].Layers[2].LeafQExt.B0.A1.SetUint64(7)
+				bad.FRIQueries[0].Layers[2].LeafQBase.SetUint64(7)
+				if err := fri.Verify(p, ds, bad, freshTS()); err == nil {
+					t.Fatal("tampered layer opening accepted")
+				}
+				bad = clone()
+				bad.FRIRoots = bad.FRIRoots[1:]
+				if err := fri.Verify(p, ds, bad, freshTS()); err == nil {
+					t.Fatal("proof with a missing layer root accepted")
+				}
+				// The same proof under other level sizes: another first round.
+				if err := fri.Verify(p, []int{32, 32, 8}, prf, freshTS()); err == nil {
+					t.Fatal("proof accepted under larger level sizes")
+				}
+				if err := fri.Verify(p, []int{8, 8, 2}, prf, freshTS()); err == nil {
+					t.Fatal("proof accepted under smaller level sizes")
+				}
+			})
+		}
+	}
+}
+
+// TestProveRejectsLevelLargerThanDomain: the largest level must fit the
+// domain of Params.
+func TestProveRejectsLevelLargerThanDomain(t *testing.T) {
+	p := testParams(t, 64, 16, 4)
+	big := testParams(t, 128, 32, 4)
+	if _, _, err := fri.Prove(p, sharedLevels(t, big, []int{32}, true), freshTS()); err == nil {
+		t.Fatal("level larger than p.D accepted")
+	}
+}

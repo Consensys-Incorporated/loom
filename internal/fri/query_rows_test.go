@@ -25,7 +25,7 @@ func TestOpenQueryBaseUsesFullRows(t *testing.T) {
 	}
 
 	for _, s := range []int{2, 5} {
-		q, err := openQueryBase(s, layers, trees, len(layers))
+		q, err := openQueryBase(s, layers, trees, 0, len(layers))
 		if err != nil {
 			t.Fatalf("openQueryBase(%d): %v", s, err)
 		}
@@ -79,7 +79,7 @@ func TestOpenQueryExtUsesFullRows(t *testing.T) {
 	}
 
 	for _, s := range []int{2, 5} {
-		q, err := openQueryExt(s, layers, trees, len(layers))
+		q, err := openQueryExt(s, layers, trees, 0, len(layers))
 		if err != nil {
 			t.Fatalf("openQueryExt(%d): %v", s, err)
 		}

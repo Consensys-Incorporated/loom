@@ -184,15 +184,9 @@ func newProverRuntime(t trace.Trace, provingKey setup.ProvingKey, publicInputs p
 	}
 	res.Proof.Commitments = make([]hash.Digest, res.layout.NumTrees-res.layout.SetupEnd)
 
-	// find the largest module size N in program (used to size FRI's outer domain)
-	maxN := 0
-	for _, m := range program.Modules {
-		if m.N > maxN {
-			maxN = m.N
-		}
-	}
-
-	res.friParams, err = fri.NewParams(int(constants.RATE)*maxN, maxN, config.NumFriQueries, hashBackend.LeafHasher, hashBackend.NodeHasher, config.FriOptions...)
+	// FRI runs over the domain of the maximum module size, whatever the
+	// program's sizes (see protocol.FRIParams).
+	res.friParams, err = protocol.FRIParams(program, config.NumFriQueries, hashBackend.LeafHasher, hashBackend.NodeHasher, config.FriOptions...)
 	if err != nil {
 		return res, err
 	}

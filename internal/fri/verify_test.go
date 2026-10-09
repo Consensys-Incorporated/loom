@@ -379,7 +379,11 @@ func bridgeInputsForTest(
 	}
 	alpha := hash.OutputToExt(alphaOut)
 
-	queryPositions, err := extractFRIQueryPositions(openProof.FRIProof, params.NumQueries)
+	first, err := params.firstRound(mustDeepPlan(t, sizes).levelSizes()[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	queryPositions, err := extractFRIQueryPositions(openProof.FRIProof, params.NumQueries, first)
 	if err != nil {
 		t.Fatal(err)
 	}
