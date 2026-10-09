@@ -71,10 +71,11 @@ func ShapeOf(prf proof.Proof, pi public.Inputs) Shape {
 	return s
 }
 
-// Verifier is the circuit of loom's verifier for one program (fixed module
-// sizes), verification key and shape, on its own Machine. Build it once with
-// NewVerifier, then Compile its Machine, and execute it on the inputs of
-// every proof (Inputs).
+// Verifier is the circuit of loom's verifier for one program, verification key
+// and shape, on its own Machine. The sizes of the modules made dynamic
+// (WithDynamicModules) are inputs; the others are the program's. Build it once
+// with NewVerifier, then Compile its Machine, and execute it on the inputs of
+// every statement (Inputs).
 type Verifier struct {
 	M       *Machine
 	program board.Program
@@ -84,8 +85,15 @@ type Verifier struct {
 	sched   protocol.CanonicalSchedule
 
 	// extract[i] reads, from a proof and its public inputs, the value of the
-	// i-th input cell.
-	extract []func(prf proof.Proof, pi public.Inputs) (Cell, error)
+	// i-th input cell; nil for the size inputs, read from the statement's
+	// ModuleSizes (sizeInputs[i] is the module).
+	extract    []func(prf proof.Proof, pi public.Inputs) (Cell, error)
+	sizeInputs map[int]string
+
+	// sizes holds every module's size in circuit; sizeTables the tables of
+	// size-dependent constants, by key (see sizeTable).
+	sizes      map[string]moduleSize
+	sizeTables map[string]Table
 
 	tr *Transcript
 	// Challenges holds the digest cell of every challenge computed so far.
@@ -160,7 +168,13 @@ type friShape struct {
 
 // NewVerifier builds the circuit verifying loom proofs of program under vk,
 // for proofs of the given shape.
-func NewVerifier(program board.Program, vk setup.VerificationKey, shape Shape) (*Verifier, error) {
+func NewVerifier(program board.Program, vk setup.VerificationKey, shape Shape, opts ...VerifierOption) (*Verifier, error) {
+	var cfg verifierConfig
+	for _, opt := range opts {
+		if err := opt(&cfg); err != nil {
+			return nil, err
+		}
+	}
 	backend, err := fri.ResolveHashBackend(fri.HashBackend{}, vk.HashBackendID)
 	if err != nil {
 		return nil, err
@@ -182,6 +196,9 @@ func NewVerifier(program board.Program, vk setup.VerificationKey, shape Shape) (
 	v.sched = protocol.BuildCanonicalSchedule(program, v.layout)
 	if len(vk.Roots) != v.layout.SetupEnd-v.layout.SetupBegin {
 		return nil, fmt.Errorf("NewVerifier: %d setup roots, the layout has %d setup trees", len(vk.Roots), v.layout.SetupEnd-v.layout.SetupBegin)
+	}
+	if err := v.buildSizes(cfg.dynamic); err != nil {
+		return nil, err
 	}
 	if err := v.buildTranscript(backend.ID); err != nil {
 		return nil, err
@@ -206,11 +223,30 @@ func (v *Verifier) input(extract func(prf proof.Proof, pi public.Inputs) (Cell, 
 	return v.M.Input()
 }
 
-// Inputs returns the input cells' values for a proof and its public inputs,
-// in the order of the Machine's inputs.
-func (v *Verifier) Inputs(prf proof.Proof, pi public.Inputs) ([]Cell, error) {
+// Inputs returns the input cells' values for a statement — a proof, its public
+// inputs and its module sizes — in the order of the Machine's inputs. sizes
+// must give the size of every dynamic module; the size of a fixed module, if
+// given, must be the program's.
+func (v *Verifier) Inputs(prf proof.Proof, pi public.Inputs, sizes ModuleSizes) ([]Cell, error) {
+	for name, n := range sizes {
+		s, ok := v.sizes[name]
+		if !ok {
+			return nil, fmt.Errorf("Inputs: size of the unknown module %q", name)
+		}
+		if !s.dynamic && n != v.program.Modules[name].N {
+			return nil, fmt.Errorf("Inputs: module %q has the fixed size %d, not %d", name, v.program.Modules[name].N, n)
+		}
+	}
 	res := make([]Cell, len(v.extract))
 	for i, f := range v.extract {
+		if f == nil {
+			c, err := statementSize(sizes, v.sizeInputs[i])
+			if err != nil {
+				return nil, fmt.Errorf("Inputs: %w", err)
+			}
+			res[i] = c
+			continue
+		}
 		c, err := f(prf, pi)
 		if err != nil {
 			return nil, err
@@ -259,7 +295,7 @@ func (v *Verifier) buildTranscript(backendID string) error {
 
 	initial := constants.InitialChallengeName(numRounds)
 	v.tr.BindElements(initial, hash.StringToElements(constants.HASH_BACKEND_DOMAIN_TAG, backendID))
-	v.tr.BindElements(initial, protocol.ModuleSizesTranscript(v.program))
+	v.bindModuleSizes(initial)
 	for t := l.SetupBegin; t < l.SetupEnd; t++ {
 		v.tr.Bind(initial, Digest(v.roots[t]))
 	}

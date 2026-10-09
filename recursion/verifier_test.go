@@ -117,7 +117,7 @@ func vmProofs(t *testing.T, seeds ...uint64) []innerProof {
 // challenge it computed with loom's verifier's.
 func checkChallenges(t *testing.T, v *Verifier, p *Program, ip innerProof) *Run {
 	t.Helper()
-	in, err := v.Inputs(ip.prf, ip.pi)
+	in, err := v.Inputs(ip.prf, ip.pi, SizesOf(ip.program))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,7 +248,7 @@ func TestVerifierOpenings(t *testing.T) {
 				t.Fatal(err)
 			}
 			tamper(&ip.prf)
-			in, err := v.Inputs(ip.prf, ip.pi)
+			in, err := v.Inputs(ip.prf, ip.pi, SizesOf(ip.program))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -306,7 +306,7 @@ func TestVerifierFRI(t *testing.T) {
 				t.Fatal(err)
 			}
 			tamper(&ip.prf)
-			in, err := v.Inputs(ip.prf, ip.pi)
+			in, err := v.Inputs(ip.prf, ip.pi, SizesOf(ip.program))
 			if err != nil {
 				t.Fatal(err)
 			}

@@ -68,7 +68,7 @@ func verifierRun(t *testing.T, ip innerProof) (*Verifier, *Program, *Run) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	in, err := v.Inputs(ip.prf, ip.pi)
+	in, err := v.Inputs(ip.prf, ip.pi, SizesOf(ip.program))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +141,7 @@ func TestVerifierRejects(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			in, err := v.Inputs(ip.prf, ip.pi)
+			in, err := v.Inputs(ip.prf, ip.pi, SizesOf(ip.program))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -181,7 +181,7 @@ func TestVerifierSize(t *testing.T) {
 				t.Fatal(err)
 			}
 			build := time.Since(t0)
-			in, err := v.Inputs(ip.prf, ip.pi)
+			in, err := v.Inputs(ip.prf, ip.pi, SizesOf(ip.program))
 			if err != nil {
 				t.Fatal(err)
 			}
