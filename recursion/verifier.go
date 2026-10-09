@@ -77,12 +77,13 @@ func ShapeOf(prf proof.Proof, pi public.Inputs) Shape {
 // with NewVerifier, then Compile its Machine, and execute it on the inputs of
 // every statement (Inputs).
 type Verifier struct {
-	M       *Machine
-	program board.Program
-	vk      setup.VerificationKey
-	shape   Shape
-	layout  protocol.Layout
-	sched   protocol.CanonicalSchedule
+	M         *Machine
+	program   board.Program
+	vk        setup.VerificationKey
+	backendID string
+	shape     Shape
+	layout    protocol.Layout
+	sched     protocol.CanonicalSchedule
 
 	// extract[i] reads, from a proof and its public inputs, the value of the
 	// i-th input cell; nil for the size inputs, read from the statement's
@@ -169,6 +170,30 @@ type friShape struct {
 // NewVerifier builds the circuit verifying loom proofs of program under vk,
 // for proofs of the given shape.
 func NewVerifier(program board.Program, vk setup.VerificationKey, shape Shape, opts ...VerifierOption) (*Verifier, error) {
+	v, err := newVerifier(program, vk, shape, opts...)
+	if err != nil {
+		return nil, err
+	}
+	if err := v.buildTranscript(); err != nil {
+		return nil, err
+	}
+	if err := v.buildPCSTranscript(); err != nil {
+		return nil, err
+	}
+	v.buildOpenings()
+	v.buildDEEP()
+	if err := v.buildFRI(); err != nil {
+		return nil, err
+	}
+	if err := v.buildAIR(); err != nil {
+		return nil, err
+	}
+	return v, nil
+}
+
+// newVerifier checks the verification key and allocates the verifier's
+// state and its size inputs, before the circuit's parts are built.
+func newVerifier(program board.Program, vk setup.VerificationKey, shape Shape, opts ...VerifierOption) (*Verifier, error) {
 	var cfg verifierConfig
 	for _, opt := range opts {
 		if err := opt(&cfg); err != nil {
@@ -197,21 +222,8 @@ func NewVerifier(program board.Program, vk setup.VerificationKey, shape Shape, o
 	if len(vk.Roots) != v.layout.SetupEnd-v.layout.SetupBegin {
 		return nil, fmt.Errorf("NewVerifier: %d setup roots, the layout has %d setup trees", len(vk.Roots), v.layout.SetupEnd-v.layout.SetupBegin)
 	}
+	v.backendID = backend.ID
 	if err := v.buildSizes(cfg.dynamic); err != nil {
-		return nil, err
-	}
-	if err := v.buildTranscript(backend.ID); err != nil {
-		return nil, err
-	}
-	if err := v.buildPCSTranscript(); err != nil {
-		return nil, err
-	}
-	v.buildOpenings()
-	v.buildDEEP()
-	if err := v.buildFRI(); err != nil {
-		return nil, err
-	}
-	if err := v.buildAIR(); err != nil {
 		return nil, err
 	}
 	return v, nil
@@ -267,7 +279,7 @@ func digestCell(d hash.Digest) Cell {
 // challenge (hash backend, module sizes, setup roots, public inputs), then
 // every round (its roots, then its exposed values), then zeta (the AIR
 // roots). It mirrors verifier.newVerifierRuntime and deriveChallenges.
-func (v *Verifier) buildTranscript(backendID string) error {
+func (v *Verifier) buildTranscript() error {
 	m, l := v.M, v.layout
 	numRounds := len(v.program.Rounds)
 	names := make([]string, 0, numRounds+1)
@@ -294,7 +306,7 @@ func (v *Verifier) buildTranscript(backendID string) error {
 	}
 
 	initial := constants.InitialChallengeName(numRounds)
-	v.tr.BindElements(initial, hash.StringToElements(constants.HASH_BACKEND_DOMAIN_TAG, backendID))
+	v.tr.BindElements(initial, hash.StringToElements(constants.HASH_BACKEND_DOMAIN_TAG, v.backendID))
 	v.bindModuleSizes(initial)
 	for t := l.SetupBegin; t < l.SetupEnd; t++ {
 		v.tr.Bind(initial, Digest(v.roots[t]))
@@ -474,13 +486,7 @@ func (v *Verifier) buildPCSTranscript() error {
 	// alpha_DEEP: the claimed values, class by class, then by tree, group,
 	// base polynomials then extension ones, shifts in order.
 	v.tr.NewChallenge(fri.DeepAlphaName)
-	v.Claimed = make([][]ClaimedCells, l.NumTrees)
-	for t := range l.NumTrees {
-		v.Claimed[t] = make([]ClaimedCells, len(v.sched.Shifts[t]))
-		for g, gs := range v.sched.Shifts[t] {
-			v.Claimed[t][g] = ClaimedCells{Base: v.claimedInputs(t, g, false, gs.Base), Ext: v.claimedInputs(t, g, true, gs.Ext)}
-		}
-	}
+	v.allocClaimed()
 	for _, class := range order {
 		for t := range l.NumTrees {
 			for g := range v.Claimed[t] {
@@ -583,6 +589,18 @@ func (v *Verifier) buildPCSTranscript() error {
 		v.Queries = append(v.Queries, m.Bits(m.Lanes(d, 1, KindScalar), v.fri.logN))
 	}
 	return nil
+}
+
+// allocClaimed allocates the claimed-value inputs of every group (Claimed).
+func (v *Verifier) allocClaimed() {
+	l := v.layout
+	v.Claimed = make([][]ClaimedCells, l.NumTrees)
+	for t := range l.NumTrees {
+		v.Claimed[t] = make([]ClaimedCells, len(v.sched.Shifts[t]))
+		for g, gs := range v.sched.Shifts[t] {
+			v.Claimed[t][g] = ClaimedCells{Base: v.claimedInputs(t, g, false, gs.Base), Ext: v.claimedInputs(t, g, true, gs.Ext)}
+		}
+	}
 }
 
 // claimedInputs allocates the claimed-value inputs of one rail of group g of
@@ -1161,36 +1179,67 @@ func (v *Verifier) buildAIR() error {
 		}
 		return zetaPow2[logN]
 	}
+	// zetaN returns ζ^N for a module: ζ^(2^ℓ), a fixed power for a fixed
+	// module, read at ℓ from the table of ζ^(2^k), k ≤ MaxLogModuleSize, for
+	// a dynamic one.
+	var zetaTable *Table
+	zetaN := func(mod string) int {
+		s := v.sizes[mod]
+		if !s.dynamic {
+			return zetaPow(s.logN)
+		}
+		if zetaTable == nil {
+			cells := make([]int, MaxLogModuleSize+1)
+			for k := range cells {
+				cells[k] = zetaPow(k)
+			}
+			t := m.Table(cells)
+			zetaTable = &t
+		}
+		return m.Lookup(*zetaTable, s.cell)
+	}
 	// lagrange returns L_i(ζ) = ω^i·(ζ^N − 1) / (N·(ζ − ω^i)) on the domain of
-	// size N, for a cell w = ω^i.
-	lagrange := func(N, w int) int {
-		zn1 := m.Sub(zetaPow(log2(N)), one)
-		den := m.Mul(m.Sub(zeta, w), m.Const(ScalarCell(koalabear.NewElement(uint64(N)))))
+	// a module, for a cell w = ω^i.
+	lagrange := func(mod string, w int) int {
+		zn1 := m.Sub(zetaN(mod), one)
+		den := m.Mul(m.Sub(zeta, w), v.SizeN(mod))
 		return m.Div(m.Mul(zn1, w), den)
 	}
-	// omegaPow returns a cell ω_N^idx for a scalar index cell, from its low
-	// log2(N) bits (ω_N^N = 1).
-	omegaPow := func(N, idx int) int {
-		n := log2(N)
-		omega, err := koalabear.Generator(uint64(N))
-		if err != nil {
-			panic(err)
-		}
-		bits := m.Bits(idx, n)
-		gs := make([]koalabear.Element, n)
-		for b := range gs {
-			gs[b] = omega
-			for range b {
-				gs[b].Square(&gs[b])
+	// omegaPow returns a cell ω_N^idx for a scalar index cell and a module's
+	// ω_N: from the low log2(N) bits of idx for a fixed module (ω_N^N = 1);
+	// for a dynamic one, from its low MaxLogModuleSize bits, bit b weighing
+	// ω_N^(2^b) (a cell, 1 for b ≥ ℓ).
+	omegaPow := func(mod string, idx int) int {
+		s := v.sizes[mod]
+		if !s.dynamic {
+			n := s.logN
+			omega, err := koalabear.Generator(uint64(1) << n)
+			if err != nil {
+				panic(err)
 			}
+			bits := m.Bits(idx, n)
+			gs := make([]koalabear.Element, n)
+			for b := range gs {
+				gs[b] = omega
+				for range b {
+					gs[b].Square(&gs[b])
+				}
+			}
+			return m.PowBits(bits.Bit, gs)
 		}
-		return m.PowBits(bits.Bit, gs)
+		bits := m.Bits(idx, MaxLogModuleSize)
+		acc := one
+		for b, bit := range bits.Bit {
+			g := v.SizeOmega(mod, 1<<b)
+			acc = m.Mul(acc, m.Add(m.Mul(bit, m.Sub(g, one)), one))
+		}
+		return acc
 	}
 	// weighted returns Σ entries v·L_idx(ζ).
-	weighted := func(N int, entries []entryCells) int {
+	weighted := func(mod string, entries []entryCells) int {
 		acc := zero
 		for _, e := range entries {
-			term := m.Mul(e.val, lagrange(N, omegaPow(N, e.idx)))
+			term := m.Mul(e.val, lagrange(mod, omegaPow(mod, e.idx)))
 			if acc == zero {
 				acc = term
 			} else {
@@ -1207,13 +1256,21 @@ func (v *Verifier) buildAIR() error {
 		modules = append(modules, name)
 	}
 	sort.Strings(modules)
+	// For a dynamic module: below 2^MaxLogModuleSize, and its value shifted
+	// by ℓ (read at ℓ from a table of its shifts) is zero.
 	for _, p := range v.shape.PublicInputs {
-		mod, ok := v.program.Modules[p.Module]
+		s, ok := v.sizes[p.Module]
 		if !ok {
 			return fmt.Errorf("NewVerifier: public input %q of unknown module %q", p.Name, p.Module)
 		}
 		for _, e := range v.publicEntries[p.Name] {
-			m.AssertEq(e.idx, m.Bits(e.idx, log2(mod.N)).Shr[0])
+			if !s.dynamic {
+				m.AssertEq(e.idx, m.Bits(e.idx, s.logN).Shr[0])
+				continue
+			}
+			bits := m.Bits(e.idx, MaxLogModuleSize)
+			m.AssertEq(e.idx, bits.Shr[0])
+			m.AssertEq(m.Lookup(m.Table(append(bits.Shr[:MaxLogModuleSize:MaxLogModuleSize], zero)), s.cell), zero)
 		}
 	}
 
@@ -1232,17 +1289,9 @@ func (v *Verifier) buildAIR() error {
 			}
 			switch leaf.Hook {
 			case expr.LagrangeHook:
+				// ω_N^i, i < 0 counting from the end (ω_N^−1 = ω_N^(N−1)).
 				i := constants.ParseLagrangeName(leaf.Name)
-				if i < 0 {
-					i += mod.N
-				}
-				omega, err := koalabear.Generator(uint64(mod.N))
-				if err != nil {
-					return err
-				}
-				var w koalabear.Element
-				w.ExpInt64(omega, int64(i))
-				vals[key] = lagrange(mod.N, m.Const(ScalarCell(w)))
+				vals[key] = lagrange(name, v.SizeOmega(name, i))
 			case expr.PublicInputHook:
 				entries, ok := v.publicEntries[leaf.Name]
 				if !ok {
@@ -1253,22 +1302,19 @@ func (v *Verifier) buildAIR() error {
 						return fmt.Errorf("NewVerifier: public input %q belongs to module %q, used from module %q", leaf.Name, p.Module, name)
 					}
 				}
-				vals[key] = weighted(mod.N, entries)
+				vals[key] = weighted(name, entries)
 			case expr.ExposedValueHook:
 				entries, ok := v.exposedEntries[leaf.Name]
 				if !ok {
 					return fmt.Errorf("NewVerifier: exposed value %q is not bound", leaf.Name)
 				}
-				vals[key] = weighted(mod.N, entries)
+				vals[key] = weighted(name, entries)
 			case expr.ExposedAverageHook:
 				entries := v.exposedEntries[leaf.Name]
 				if len(entries) != 1 {
 					return fmt.Errorf("NewVerifier: exposed average %q must have one entry", leaf.Name)
 				}
-				var invN koalabear.Element
-				invN.SetUint64(uint64(mod.N))
-				invN.Inverse(&invN)
-				vals[key] = m.Mul(entries[0].val, m.Const(ScalarCell(invN)))
+				vals[key] = m.Mul(entries[0].val, v.SizeInvN(name))
 			default:
 				return fmt.Errorf("NewVerifier: %s carries unsupported hook %s", key, leaf.Hook)
 			}
@@ -1302,7 +1348,7 @@ func (v *Verifier) buildAIR() error {
 		if err != nil {
 			return fmt.Errorf("NewVerifier: module %s: %w", name, err)
 		}
-		zn := zetaPow(log2(mod.N))
+		zn := zetaN(name)
 		var chunks []int
 		for i := 0; ; i++ {
 			c, ok := vals[constants.QuotientChunkName(name, i)]

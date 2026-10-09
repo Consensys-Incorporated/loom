@@ -227,10 +227,18 @@ func TestVerifierOpenings(t *testing.T) {
 		"sibling": func(prf *proof.Proof) {
 			prf.Opening.PointSamplings[7][tree].Path.Siblings[1][2].SetUint64(9)
 		},
-		// a valid opening, at another query's position
+		// a valid opening, at another query's position: query 0's and that of
+		// the first query opening another leaf (two queries may open the same
+		// pair of rows, whose openings are then equal)
 		"other position": func(prf *proof.Proof) {
 			ps := prf.Opening.PointSamplings
-			ps[0][tree], ps[1][tree] = ps[1][tree], ps[0][tree]
+			for k := 1; k < len(ps); k++ {
+				if ps[k][tree].Path.LeafIdx != ps[0][tree].Path.LeafIdx {
+					ps[0][tree], ps[k][tree] = ps[k][tree], ps[0][tree]
+					return
+				}
+			}
+			panic("every query opens the same leaf")
 		},
 	}
 	for name, tamper := range cases {
