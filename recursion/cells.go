@@ -65,7 +65,8 @@ func (m *Machine) mult(s slot) int64 {
 	return 0
 }
 
-// Item lengths of the window chip.
+// Item kinds: the number of lanes of an item, any of 1..CellWidth for the
+// window chip; these are the usual ones.
 const (
 	KindScalar = 1
 	KindE6     = 6

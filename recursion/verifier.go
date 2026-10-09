@@ -130,10 +130,12 @@ type RowPair struct {
 	Lo, Hi Row
 }
 
-// Row holds the cells of one opened row: a scalar cell per base column, an
-// E6 cell per extension column.
+// Row holds the cells of one opened row: the NBase base values packed
+// CellWidth per cell in Base (the last cell partial, zero padded), and an E6
+// cell per extension column in Ext.
 type Row struct {
 	Base, Ext []int
+	NBase     int
 }
 
 // ClaimedCells holds the claimed-value cells of one group.
@@ -615,8 +617,8 @@ func (v *Verifier) buildOpenings() {
 					return rp, nil
 				}
 				row := func(hi bool) Row {
-					var res Row
-					for i := range nb {
+					res := Row{NBase: nb}
+					for c := 0; c < nb; c += CellWidth {
 						res.Base = append(res.Base, v.input(func(prf proof.Proof, _ public.Inputs) (Cell, error) {
 							rp, err := rows(prf)
 							r := rp.Lo
@@ -626,7 +628,9 @@ func (v *Verifier) buildOpenings() {
 							if err != nil {
 								return Cell{}, err
 							}
-							return ScalarCell(r.RawRowBase[i]), nil
+							var cell Cell
+							copy(cell[:], r.RawRowBase[c:min(c+CellWidth, nb)])
+							return cell, nil
 						}))
 					}
 					for i := range ne {
@@ -649,8 +653,10 @@ func (v *Verifier) buildOpenings() {
 
 				// The leaf: tag, widths, lo base, hi base, lo ext, hi ext.
 				items := m.Elements([]koalabear.Element{hash.NewElement(fri.LeafDomainTag), hash.NewElement(uint64(2 * nb)), hash.NewElement(uint64(2 * ne))})
-				for _, c := range append(append([]int(nil), rp.Lo.Base...), rp.Hi.Base...) {
-					items = append(items, Scalar(c))
+				for _, r := range []Row{rp.Lo, rp.Hi} {
+					for c, cell := range r.Base {
+						items = append(items, Item{cell, min(CellWidth, nb-c*CellWidth)})
+					}
 				}
 				for _, c := range append(append([]int(nil), rp.Lo.Ext...), rp.Hi.Ext...) {
 					items = append(items, E6(c))
@@ -701,8 +707,11 @@ type deepPoly struct {
 //	DQ_c(±X) = Σ_i α^i Σ_s (v_{i,s} − P_i(±X)) / (ζ·ω_N^s − (±X))
 //
 // over the class's polynomials P_i in alpha_DEEP order, regrouped by shift
-// point: for each point, a Horner over α of the differences of the
-// polynomials opened there, divided once by the point's denominator.
+// point and divided once by the point's denominator. For each point, the
+// numerator Σ_i α^i·(v_{i,s} − P_i(±X)) over the polynomials opened there is
+// split into the claimed part Σ_i α^i·v_{i,s}, query-independent and
+// computed once by the E6 chip, minus the opened part Σ_i α^i·P_i(±X), a
+// Horner on the deep chip, CellWidth base values per row (deepRows).
 func (v *Verifier) buildDEEP() {
 	m, l := v.M, v.layout
 	zeta := v.ChallengeE6(constants.FINAL_EVALUATION_POINT)
@@ -786,6 +795,46 @@ func (v *Verifier) buildDEEP() {
 			}
 		}
 
+		// Per point n: the polynomials opened there (their claimed value at
+		// n), their index range [lo, hi], and the query-independent
+		// C_n = Σ_{i ∈ [lo, hi]} α^(i−lo)·v_{i,n}.
+		type pointSet struct {
+			lo, hi int
+			at     []bool
+			c      int
+		}
+		sets := make(map[int]*pointSet, len(points))
+		for _, n := range points {
+			ps := &pointSet{lo: -1, at: make([]bool, len(polys))}
+			claimedAt := make([]int, len(polys))
+			for i, p := range polys {
+				for j, sh := range p.shifts {
+					if ((sh%N)+N)%N != n {
+						continue
+					}
+					claimed := v.Claimed[p.t][p.g].Base
+					if p.ext {
+						claimed = v.Claimed[p.t][p.g].Ext
+					}
+					ps.at[i], claimedAt[i] = true, claimed[p.i][j]
+					if ps.lo < 0 {
+						ps.lo = i
+					}
+					ps.hi = i
+				}
+			}
+			coeffs := make([]int, 0, ps.hi-ps.lo+1)
+			for i := ps.hi; i >= ps.lo; i-- {
+				if ps.at[i] {
+					coeffs = append(coeffs, claimedAt[i])
+				} else {
+					coeffs = append(coeffs, zero)
+				}
+			}
+			ps.c = m.Horner(alpha, coeffs)
+			sets[n] = ps
+		}
+
 		for k := range v.shape.NumQueries {
 			bitCells := make([]int, wBits-1)
 			for i := 1; i < wBits; i++ {
@@ -797,47 +846,14 @@ func (v *Verifier) buildDEEP() {
 			for side, pt := range []int{x, negX} {
 				acc := -1
 				for _, n := range points {
-					// The polynomials opened at this point, as a Horner over α
-					// from the highest index down to the lowest, times α^lowest.
-					lo, hi := -1, -1
-					diffs := make([]int, len(polys))
-					for i, p := range polys {
-						diffs[i] = -1
-						for j, sh := range p.shifts {
-							if ((sh%N)+N)%N != n {
-								continue
-							}
-							claimed := v.Claimed[p.t][p.g].Base
-							if p.ext {
-								claimed = v.Claimed[p.t][p.g].Ext
-							}
-							rp := v.Openings[k][p.t][p.g]
-							row := rp.Lo
-							if side == 1 {
-								row = rp.Hi
-							}
-							opened := row.Base
-							if p.ext {
-								opened = row.Ext
-							}
-							diffs[i] = m.Sub(claimed[p.i][j], opened[p.i])
-							if lo < 0 {
-								lo = i
-							}
-							hi = i
-						}
-					}
-					coeffs := make([]int, 0, hi-lo+1)
-					for i := hi; i >= lo; i-- {
-						if diffs[i] < 0 {
-							coeffs = append(coeffs, zero)
-						} else {
-							coeffs = append(coeffs, diffs[i])
-						}
-					}
-					num := m.Horner(alpha, coeffs)
-					if lo > 0 {
-						num = m.Mul(num, pow(lo))
+					// Σ_i α^(i−lo)·(v_{i,n} − P_i(±X)) over the polynomials
+					// opened at n, times α^lo: C_n minus the deep chip's
+					// Horner over the opened values.
+					ps := sets[n]
+					opened := m.DeepHorner(alpha, v.deepRows(polys, ps.at, ps.lo, ps.hi, k, side))
+					num := m.Sub(ps.c, opened)
+					if ps.lo > 0 {
+						num = m.Mul(num, pow(ps.lo))
 					}
 					term := m.Div(num, m.Sub(zs[n], pt))
 					if acc < 0 {
@@ -851,6 +867,42 @@ func (v *Verifier) buildDEEP() {
 			v.DEEP[k][c] = dq
 		}
 	}
+}
+
+// deepRows returns the deep chip rows of the Horner over the opened values
+// P_i(±X) of polys[lo..hi], from hi down to lo, at query k on side lo (0) or
+// hi (1): the base values of a group share a row per opened cell, CellWidth
+// lanes each, and an extension value takes a row; at[i] selects the
+// polynomials whose value is added (the others count as 0).
+func (v *Verifier) deepRows(polys []deepPoly, at []bool, lo, hi, k, side int) []DeepRow {
+	var rows []DeepRow
+	cur := -1 // the cell of the last row, if it is a base row
+	for i := hi; i >= lo; i-- {
+		p := polys[i]
+		rp := v.Openings[k][p.t][p.g]
+		row := rp.Lo
+		if side == 1 {
+			row = rp.Hi
+		}
+		var sel uint8
+		if at[i] {
+			sel = 1
+		}
+		if p.ext {
+			rows = append(rows, DeepRow{Cell: row.Ext[p.i], Ext: true, Act: 1, Sel: sel})
+			cur = -1
+			continue
+		}
+		cell, lane := row.Base[p.i/CellWidth], p.i%CellWidth
+		if cell != cur {
+			rows = append(rows, DeepRow{Cell: cell})
+			cur = cell
+		}
+		r := &rows[len(rows)-1]
+		r.Act |= 1 << lane
+		r.Sel |= sel << lane
+	}
+	return rows
 }
 
 // leafE6Pair returns the Merkle leaf of a pair of extension values, as
