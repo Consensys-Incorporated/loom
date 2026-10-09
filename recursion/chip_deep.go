@@ -21,6 +21,26 @@ import (
 	"github.com/consensys/loom/expr"
 )
 
+// Setup columns of the deep chip.
+const (
+	deepActive = "active"
+	deepFirst  = "first"
+	deepExt    = "ext"
+	deepAct    = "act" // lanes
+	deepSel    = "sel" // lanes
+	deepAddrX  = "addr_x"
+	deepAddrAl = "addr_al"
+	deepAddrO  = "addr_o"
+	deepMO     = "m_o"
+)
+
+// Witness columns of the deep chip.
+const (
+	deepX  = "x"  // lanes
+	deepAl = "al" // lanes
+	deepH  = "h"  // h<j>_0..5, the E6 h after lane j (deepHPrefix)
+)
+
 // DeepRow is one row of a DEEP Horner chain: the cell it reads and, as bit
 // masks over its lanes, the lanes that take part (Act) and those whose value
 // is added (Sel). A base row reads up to CellWidth base values; an Ext row
@@ -124,15 +144,18 @@ func (c deepChip) rows() int {
 	return n
 }
 
-func hCols(j, s int) []expr.Expr { return e6Cols(deepMod, fmt.Sprintf("h%d_", j), s) }
+// deepHPrefix is the prefix of the lanes of h after lane j: h<j>_0..5.
+func deepHPrefix(j int) string { return laneName(deepH, j) + "_" }
+
+func hCols(j, s int) []expr.Expr { return e6Cols(deepMod, deepHPrefix(j), s) }
 
 func (c deepChip) define(b *board.Builder, bus *Bus) error {
 	mm := b.Modules[deepMod]
-	active, first, isExt := setupCol(deepMod, "active"), setupCol(deepMod, "first"), setupCol(deepMod, "ext")
-	al := e6Cols(deepMod, "al", 0)
+	active, first, isExt := setupCol(deepMod, deepActive), setupCol(deepMod, deepFirst), setupCol(deepMod, deepExt)
+	al := e6Cols(deepMod, deepAl, 0)
 	x := make([]expr.Expr, CellWidth)
 	for k := range x {
-		x[k] = col(deepMod, fmt.Sprintf("x%d", k))
+		x[k] = col(deepMod, laneName(deepX, k))
 	}
 	notFirst := one().Sub(first)
 	prev := make([]expr.Expr, 6)
@@ -140,7 +163,7 @@ func (c deepChip) define(b *board.Builder, bus *Bus) error {
 		prev[k] = notFirst.Mul(h)
 	}
 	for j := CellWidth - 1; j >= 0; j-- {
-		act, sel := setupCol(deepMod, fmt.Sprintf("act%d", j)), setupCol(deepMod, fmt.Sprintf("sel%d", j))
+		act, sel := setupCol(deepMod, laneName(deepAct, j)), setupCol(deepMod, laneName(deepSel, j))
 		step := e6MulExprs(prev, al)
 		step[0] = step[0].Add(sel.Mul(x[j]))
 		if j == 0 {
@@ -154,49 +177,49 @@ func (c deepChip) define(b *board.Builder, bus *Bus) error {
 		}
 		prev = h
 	}
-	bus.Read(deepMod, setupCol(deepMod, "addr_x"), cellOf(x...), active)
-	bus.Read(deepMod, setupCol(deepMod, "addr_al"), cellOf(al...), active)
-	bus.Write(deepMod, setupCol(deepMod, "addr_o"), cellOf(hCols(0, 0)...), setupCol(deepMod, "m_o"))
+	bus.Read(deepMod, setupCol(deepMod, deepAddrX), cellOf(x...), active)
+	bus.Read(deepMod, setupCol(deepMod, deepAddrAl), cellOf(al...), active)
+	bus.Write(deepMod, setupCol(deepMod, deepAddrO), cellOf(hCols(0, 0)...), setupCol(deepMod, deepMO))
 	return nil
 }
 
 func (c deepChip) setup(cs *cols) {
-	cs.declare("active", "first", "ext", "addr_x", "addr_al", "addr_o", "m_o")
-	cs.declareLanes("act", CellWidth)
-	cs.declareLanes("sel", CellWidth)
+	cs.declare(deepActive, deepFirst, deepExt, deepAddrX, deepAddrAl, deepAddrO, deepMO)
+	cs.declareLanes(deepAct, CellWidth)
+	cs.declareLanes(deepSel, CellWidth)
 	row := 0
 	for _, in := range c.m.deeps {
 		for i, r := range in.rows {
-			cs.set("active", row, 1)
+			cs.set(deepActive, row, 1)
 			if i == 0 {
-				cs.set("first", row, 1)
+				cs.set(deepFirst, row, 1)
 			}
 			if r.Ext {
-				cs.set("ext", row, 1)
+				cs.set(deepExt, row, 1)
 			}
 			for j := range CellWidth {
-				cs.set(fmt.Sprintf("act%d", j), row, uint64(r.Act>>j&1))
-				cs.set(fmt.Sprintf("sel%d", j), row, uint64(r.Sel>>j&1))
+				cs.set(laneName(deepAct, j), row, uint64(r.Act>>j&1))
+				cs.set(laneName(deepSel, j), row, uint64(r.Sel>>j&1))
 			}
-			cs.set("addr_x", row, uint64(r.Cell))
-			cs.set("addr_al", row, uint64(in.alpha))
+			cs.set(deepAddrX, row, uint64(r.Cell))
+			cs.set(deepAddrAl, row, uint64(in.alpha))
 			if i == len(in.rows)-1 {
-				cs.set("addr_o", row, uint64(in.out.addr))
-				cs.setInt("m_o", row, c.m.mult(in.out))
+				cs.set(deepAddrO, row, uint64(in.out.addr))
+				cs.setInt(deepMO, row, c.m.mult(in.out))
 			}
 			row++
 		}
 	}
 	for ; row < cs.n; row++ {
-		cs.set("first", row, 1)
+		cs.set(deepFirst, row, 1)
 	}
 }
 
 func (c deepChip) trace(cs *cols, r *Run) error {
-	cs.declareLanes("x", CellWidth)
-	cs.declareLanes("al", 6)
+	cs.declareLanes(deepX, CellWidth)
+	cs.declareLanes(deepAl, 6)
 	for j := range CellWidth {
-		cs.declareLanes(fmt.Sprintf("h%d_", j), 6)
+		cs.declareLanes(deepHPrefix(j), 6)
 	}
 	row := 0
 	for _, in := range c.m.deeps {
@@ -205,10 +228,10 @@ func (c deepChip) trace(cs *cols, r *Run) error {
 		for _, dr := range in.rows {
 			x := r.values[dr.Cell]
 			hs := deepRowSteps(h, alpha, dr, x)
-			cs.setCell("x", row, x)
-			cs.setE6("al", row, alpha)
+			cs.setCell(deepX, row, x)
+			cs.setE6(deepAl, row, alpha)
 			for j := range CellWidth {
-				cs.setE6(fmt.Sprintf("h%d_", j), row, hs[j])
+				cs.setE6(deepHPrefix(j), row, hs[j])
 			}
 			h = hs[0]
 			row++

@@ -37,7 +37,7 @@ func one() expr.Expr { return constE(1) }
 func cellCols(module, prefix string, from int) [CellWidth]expr.Expr {
 	var res [CellWidth]expr.Expr
 	for i := range res {
-		res[i] = col(module, fmt.Sprintf("%s%d", prefix, from+i))
+		res[i] = col(module, laneName(prefix, from+i))
 	}
 	return res
 }
@@ -85,7 +85,7 @@ func constElem(v koalabear.Element) expr.Expr { return expr.Const(v) }
 func setupCellCols(module, prefix string) [CellWidth]expr.Expr {
 	var res [CellWidth]expr.Expr
 	for i := range res {
-		res[i] = setupCol(module, fmt.Sprintf("%s%d", prefix, i))
+		res[i] = setupCol(module, laneName(prefix, i))
 	}
 	return res
 }
@@ -94,7 +94,7 @@ func setupCellCols(module, prefix string) [CellWidth]expr.Expr {
 func e6Cols(module, prefix string, s int) []expr.Expr {
 	res := make([]expr.Expr, 6)
 	for i := range res {
-		res[i] = colShift(module, fmt.Sprintf("%s%d", prefix, i), s)
+		res[i] = colShift(module, laneName(prefix, i), s)
 	}
 	return res
 }
@@ -115,18 +115,21 @@ func cellOf(lanes ...expr.Expr) [CellWidth]expr.Expr {
 func (c *cols) setE6(prefix string, row int, x ext.E6) {
 	cell := E6Cell(x)
 	for i := range 6 {
-		c.setElem(fmt.Sprintf("%s%d", prefix, i), row, cell[i])
+		c.setElem(laneName(prefix, i), row, cell[i])
 	}
 }
 
 func (c *cols) setCell(prefix string, row int, v Cell) {
 	for i := range CellWidth {
-		c.setElem(fmt.Sprintf("%s%d", prefix, i), row, v[i])
+		c.setElem(laneName(prefix, i), row, v[i])
 	}
 }
 
 func (c *cols) declareLanes(prefix string, n int) {
 	for i := range n {
-		c.declare(fmt.Sprintf("%s%d", prefix, i))
+		c.declare(laneName(prefix, i))
 	}
 }
+
+// laneName returns the name of lane i of the columns prefix: prefix<i>.
+func laneName(prefix string, i int) string { return fmt.Sprintf("%s%d", prefix, i) }

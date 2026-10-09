@@ -20,6 +20,30 @@ import (
 	"github.com/consensys/loom/board"
 )
 
+// Setup columns of the bits chip.
+const (
+	bitsFirst  = "first"
+	bitsLast   = "last"
+	bitsActive = "active"
+	bitsPow    = "pow"
+	bitsInlow  = "inlow"
+	bitsChk    = "chk"
+	bitsAddrV  = "addr_v"
+	bitsRAddr  = "r_addr"
+	bitsRMult  = "r_mult"
+	bitsBAddr  = "b_addr"
+	bitsBMult  = "b_mult"
+)
+
+// Witness columns of the bits chip.
+const (
+	bitsB   = "b"
+	bitsW   = "w"
+	bitsR   = "r"
+	bitsV   = "v"
+	bitsInv = "inv"
+)
+
 // BitsWidth is the number of bits of a canonical KoalaBear element, and the
 // number of rows of a decomposition.
 const BitsWidth = 31
@@ -88,76 +112,76 @@ func (c bitsChip) rows() int { return BitsWidth * len(c.m.bits) }
 
 func (c bitsChip) define(b *board.Builder, bus *Bus) error {
 	mm := b.Modules[bitsMod]
-	first, last, active := setupCol(bitsMod, "first"), setupCol(bitsMod, "last"), setupCol(bitsMod, "active")
-	bit, w, r, v, inv := col(bitsMod, "b"), col(bitsMod, "w"), col(bitsMod, "r"), col(bitsMod, "v"), col(bitsMod, "inv")
-	pow := setupCol(bitsMod, "pow")
+	first, last, active := setupCol(bitsMod, bitsFirst), setupCol(bitsMod, bitsLast), setupCol(bitsMod, bitsActive)
+	bit, w, r, v, inv := col(bitsMod, bitsB), col(bitsMod, bitsW), col(bitsMod, bitsR), col(bitsMod, bitsV), col(bitsMod, bitsInv)
+	pow := setupCol(bitsMod, bitsPow)
 	notLast := active.Sub(last)
 
 	mm.AssertZero(bit.Mul(bit.Sub(one())))
 	mm.AssertZero(first.Mul(w))
-	mm.AssertZero(notLast.Mul(colShift(bitsMod, "w", 1).Sub(w).Sub(bit.Mul(pow))))
-	mm.AssertZero(notLast.Mul(colShift(bitsMod, "v", 1).Sub(v)))
+	mm.AssertZero(notLast.Mul(colShift(bitsMod, bitsW, 1).Sub(w).Sub(bit.Mul(pow))))
+	mm.AssertZero(notLast.Mul(colShift(bitsMod, bitsV, 1).Sub(v)))
 	mm.AssertZero(last.Mul(v.Sub(w).Sub(bit.Mul(pow))))
-	mm.AssertZero(r.Sub(setupCol(bitsMod, "inlow").Mul(bit.Add(constE(2).Mul(colShift(bitsMod, "r", 1))))))
+	mm.AssertZero(r.Sub(setupCol(bitsMod, bitsInlow).Mul(bit.Add(constE(2).Mul(colShift(bitsMod, bitsR, 1))))))
 	var inv24 koalabear.Element
 	inv24.SetUint64(1 << 24)
 	inv24.Inverse(&inv24)
 	z := constE(koalaHigh).Sub(v.Sub(w).Mul(constElem(inv24)))
-	mm.AssertZero(setupCol(bitsMod, "chk").Mul(w).Mul(one().Sub(z.Mul(inv))))
+	mm.AssertZero(setupCol(bitsMod, bitsChk).Mul(w).Mul(one().Sub(z.Mul(inv))))
 
-	bus.Read(bitsMod, setupCol(bitsMod, "addr_v"), cellOf(v), first)
-	bus.Write(bitsMod, setupCol(bitsMod, "r_addr"), cellOf(r), setupCol(bitsMod, "r_mult"))
-	bus.Write(bitsMod, setupCol(bitsMod, "b_addr"), cellOf(bit), setupCol(bitsMod, "b_mult"))
+	bus.Read(bitsMod, setupCol(bitsMod, bitsAddrV), cellOf(v), first)
+	bus.Write(bitsMod, setupCol(bitsMod, bitsRAddr), cellOf(r), setupCol(bitsMod, bitsRMult))
+	bus.Write(bitsMod, setupCol(bitsMod, bitsBAddr), cellOf(bit), setupCol(bitsMod, bitsBMult))
 	return nil
 }
 
 func (c bitsChip) setup(cs *cols) {
-	cs.declare("first", "last", "active", "pow", "inlow", "chk", "addr_v", "r_addr", "r_mult", "b_addr", "b_mult")
+	cs.declare(bitsFirst, bitsLast, bitsActive, bitsPow, bitsInlow, bitsChk, bitsAddrV, bitsRAddr, bitsRMult, bitsBAddr, bitsBMult)
 	for k, inst := range c.m.bits {
 		for i := range BitsWidth {
 			row := k*BitsWidth + i
-			cs.set("active", row, 1)
-			cs.set("pow", row, 1<<i)
+			cs.set(bitsActive, row, 1)
+			cs.set(bitsPow, row, 1<<i)
 			switch i {
 			case 0:
-				cs.set("first", row, 1)
-				cs.set("addr_v", row, uint64(inst.v))
+				cs.set(bitsFirst, row, 1)
+				cs.set(bitsAddrV, row, uint64(inst.v))
 			case 24:
-				cs.set("chk", row, 1)
+				cs.set(bitsChk, row, 1)
 			case BitsWidth - 1:
-				cs.set("last", row, 1)
+				cs.set(bitsLast, row, 1)
 			}
 			if i < inst.n {
-				cs.set("inlow", row, 1)
-				cs.set("r_addr", row, uint64(inst.out.Shr[i]))
-				cs.set("r_mult", row, uint64(c.m.reads[inst.out.Shr[i]]))
-				cs.set("b_addr", row, uint64(inst.out.Bit[i]))
-				cs.set("b_mult", row, uint64(c.m.reads[inst.out.Bit[i]]))
+				cs.set(bitsInlow, row, 1)
+				cs.set(bitsRAddr, row, uint64(inst.out.Shr[i]))
+				cs.set(bitsRMult, row, uint64(c.m.reads[inst.out.Shr[i]]))
+				cs.set(bitsBAddr, row, uint64(inst.out.Bit[i]))
+				cs.set(bitsBMult, row, uint64(c.m.reads[inst.out.Bit[i]]))
 			}
 		}
 	}
 }
 
 func (c bitsChip) trace(cs *cols, r *Run) error {
-	cs.declare("b", "w", "r", "v", "inv")
+	cs.declare(bitsB, bitsW, bitsR, bitsV, bitsInv)
 	for k, inst := range c.m.bits {
 		x := r.values[inst.v][0].Uint64()
 		low := x & (1<<inst.n - 1)
 		for i := range BitsWidth {
 			row := k*BitsWidth + i
-			cs.set("b", row, x>>i&1)
-			cs.set("w", row, x&(1<<i-1))
-			cs.set("v", row, x)
+			cs.set(bitsB, row, x>>i&1)
+			cs.set(bitsW, row, x&(1<<i-1))
+			cs.set(bitsV, row, x)
 			if i == 24 {
 				var zv koalabear.Element
 				zv.SetUint64(koalaHigh - x>>24)
 				if !zv.IsZero() {
 					zv.Inverse(&zv)
 				}
-				cs.setElem("inv", row, zv)
+				cs.setElem(bitsInv, row, zv)
 			}
 			if i < inst.n {
-				cs.set("r", row, low>>i)
+				cs.set(bitsR, row, low>>i)
 			}
 		}
 	}

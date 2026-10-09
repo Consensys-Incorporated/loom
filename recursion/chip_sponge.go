@@ -21,6 +21,26 @@ import (
 	"github.com/consensys/loom/board"
 )
 
+// Setup columns of the sponge chip.
+const (
+	spongeFirst   = "first"
+	spongeLast    = "last"
+	spongeActive  = "active"
+	spongeKeepCap = "keep_cap"
+	spongeAddrA   = "addr_a"
+	spongeAddrB   = "addr_b"
+	spongeOutAddr = "out_addr"
+	spongeOutMult = "out_mult"
+	spongeData    = "data" // lanes
+	spongeKeep    = "keep" // lanes
+)
+
+// Witness columns of the sponge chip.
+const (
+	spongeX   = "x"   // lanes
+	spongeOut = "out" // lanes
+)
+
 type spongeInst struct {
 	data   []int // data cells, 2 per block
 	length int   // number of input elements
@@ -92,53 +112,53 @@ func (c spongeChip) rows() int {
 }
 
 func (c spongeChip) define(b *board.Builder, bus *Bus) error {
-	active := setupCol(spongeMod, "active")
-	bus.Read(spongeMod, setupCol(spongeMod, "addr_a"), cellCols(spongeMod, "x", 0), active)
-	bus.Read(spongeMod, setupCol(spongeMod, "addr_b"), cellCols(spongeMod, "x", CellWidth), active)
-	bus.Write(spongeMod, setupCol(spongeMod, "out_addr"), cellCols(spongeMod, "out", 0), setupCol(spongeMod, "out_mult"))
+	active := setupCol(spongeMod, spongeActive)
+	bus.Read(spongeMod, setupCol(spongeMod, spongeAddrA), cellCols(spongeMod, spongeX, 0), active)
+	bus.Read(spongeMod, setupCol(spongeMod, spongeAddrB), cellCols(spongeMod, spongeX, CellWidth), active)
+	bus.Write(spongeMod, setupCol(spongeMod, spongeOutAddr), cellCols(spongeMod, spongeOut, 0), setupCol(spongeMod, spongeOutMult))
 
 	src := board.NewTable(spongeMod, 2*width)
 	for l := range width {
-		prev := colShift(spongeMod, fmt.Sprintf("out%d", l), -1)
+		prev := colShift(spongeMod, laneName(spongeOut, l), -1)
 		if l < rate {
-			src.In[l] = setupCol(spongeMod, fmt.Sprintf("data%d", l)).Mul(col(spongeMod, fmt.Sprintf("x%d", l))).
-				Add(setupCol(spongeMod, fmt.Sprintf("keep%d", l)).Mul(prev))
+			src.In[l] = setupCol(spongeMod, laneName(spongeData, l)).Mul(col(spongeMod, laneName(spongeX, l))).
+				Add(setupCol(spongeMod, laneName(spongeKeep, l)).Mul(prev))
 		} else {
-			src.In[l] = setupCol(spongeMod, "keep_cap").Mul(prev)
+			src.In[l] = setupCol(spongeMod, spongeKeepCap).Mul(prev)
 		}
-		src.In[width+l] = col(spongeMod, fmt.Sprintf("out%d", l))
+		src.In[width+l] = col(spongeMod, laneName(spongeOut, l))
 	}
 	return arguments.CLookupTuple(b, src, p2Table(width), active, one())
 }
 
 func (c spongeChip) setup(cs *cols) {
-	cs.declare("first", "last", "active", "keep_cap", "addr_a", "addr_b", "out_addr", "out_mult")
+	cs.declare(spongeFirst, spongeLast, spongeActive, spongeKeepCap, spongeAddrA, spongeAddrB, spongeOutAddr, spongeOutMult)
 	for j := range rate {
-		cs.declare(fmt.Sprintf("data%d", j), fmt.Sprintf("keep%d", j))
+		cs.declare(laneName(spongeData, j), laneName(spongeKeep, j))
 	}
 	row := 0
 	for _, s := range c.m.sponges {
 		blocks := len(s.data) / 2
 		for blk := range blocks {
-			cs.set("active", row, 1)
-			cs.set("addr_a", row, uint64(s.data[2*blk]))
-			cs.set("addr_b", row, uint64(s.data[2*blk+1]))
+			cs.set(spongeActive, row, 1)
+			cs.set(spongeAddrA, row, uint64(s.data[2*blk]))
+			cs.set(spongeAddrB, row, uint64(s.data[2*blk+1]))
 			if blk == 0 {
-				cs.set("first", row, 1)
+				cs.set(spongeFirst, row, 1)
 			} else {
-				cs.set("keep_cap", row, 1)
+				cs.set(spongeKeepCap, row, 1)
 			}
 			for j := range rate {
 				if blk*rate+j < s.length {
-					cs.set(fmt.Sprintf("data%d", j), row, 1)
+					cs.set(laneName(spongeData, j), row, 1)
 				} else if blk > 0 {
-					cs.set(fmt.Sprintf("keep%d", j), row, 1)
+					cs.set(laneName(spongeKeep, j), row, 1)
 				}
 			}
 			if blk == blocks-1 {
-				cs.set("last", row, 1)
-				cs.set("out_addr", row, uint64(s.out))
-				cs.set("out_mult", row, uint64(c.m.reads[s.out]))
+				cs.set(spongeLast, row, 1)
+				cs.set(spongeOutAddr, row, uint64(s.out))
+				cs.set(spongeOutMult, row, uint64(c.m.reads[s.out]))
 			}
 			row++
 		}
@@ -148,8 +168,8 @@ func (c spongeChip) setup(cs *cols) {
 // trace fills the blocks and the chained states, and records the
 // permutations for the P2 core.
 func (c spongeChip) trace(cs *cols, r *Run) error {
-	cs.declareLanes("x", rate)
-	cs.declareLanes("out", width)
+	cs.declareLanes(spongeX, rate)
+	cs.declareLanes(spongeOut, width)
 	perm := newPerm()
 	row := 0
 	for _, s := range c.m.sponges {
@@ -161,7 +181,7 @@ func (c spongeChip) trace(cs *cols, r *Run) error {
 				if j >= CellWidth {
 					x = hi[j-CellWidth]
 				}
-				cs.setElem(fmt.Sprintf("x%d", j), row, x)
+				cs.setElem(laneName(spongeX, j), row, x)
 				if blk*rate+j < s.length {
 					state[j] = x
 				}
@@ -171,7 +191,7 @@ func (c spongeChip) trace(cs *cols, r *Run) error {
 				return err
 			}
 			for l := range width {
-				cs.setElem(fmt.Sprintf("out%d", l), row, state[l])
+				cs.setElem(laneName(spongeOut, l), row, state[l])
 			}
 			row++
 		}

@@ -23,6 +23,12 @@ import (
 	"github.com/consensys/loom/trace"
 )
 
+// Witness columns of the p2 chip.
+const (
+	p2S = "s" // lanes
+	p2R = "r" // lanes
+)
+
 // numPerms is the number of Poseidon2 permutations: one per sponge block and
 // one per Merkle level.
 func (m *Machine) numPerms() int {
@@ -39,7 +45,7 @@ func (m *Machine) numPerms() int {
 func p2Ins() []string {
 	res := make([]string, width)
 	for i := range res {
-		res[i] = fmt.Sprintf("%s.s%d", p2Mod, i)
+		res[i] = p2Mod + "." + laneName(p2S, i)
 	}
 	return res
 }
@@ -47,7 +53,7 @@ func p2Ins() []string {
 func p2Outs() []string {
 	res := make([]string, width)
 	for i := range res {
-		res[i] = fmt.Sprintf("%s.r%d", p2Mod, i)
+		res[i] = p2Mod + "." + laneName(p2R, i)
 	}
 	return res
 }
@@ -74,8 +80,8 @@ func (c p2Chip) trace(cs *cols, r *Run) error {
 	if len(r.p2) != c.rows() {
 		return fmt.Errorf("%d permutations recorded, want %d", len(r.p2), c.rows())
 	}
-	cs.declareLanes("s", width)
-	cs.declareLanes("r", width)
+	cs.declareLanes(p2S, width)
+	cs.declareLanes(p2R, width)
 	perm := newPerm()
 	for row, in := range r.p2 {
 		out := in
@@ -83,8 +89,8 @@ func (c p2Chip) trace(cs *cols, r *Run) error {
 			return err
 		}
 		for i := range width {
-			cs.setElem(fmt.Sprintf("s%d", i), row, in[i])
-			cs.setElem(fmt.Sprintf("r%d", i), row, out[i])
+			cs.setElem(laneName(p2S, i), row, in[i])
+			cs.setElem(laneName(p2R, i), row, out[i])
 		}
 	}
 	// The AIR fills its columns from a trace: run it on these columns and
@@ -105,10 +111,10 @@ func (c p2Chip) trace(cs *cols, r *Run) error {
 func p2Table(nOut int) board.Table {
 	t := board.NewTable(p2Mod, width+nOut)
 	for i := range width {
-		t.In[i] = col(p2Mod, fmt.Sprintf("s%d", i))
+		t.In[i] = col(p2Mod, laneName(p2S, i))
 	}
 	for i := range nOut {
-		t.In[width+i] = col(p2Mod, fmt.Sprintf("r%d", i))
+		t.In[width+i] = col(p2Mod, laneName(p2R, i))
 	}
 	return t
 }

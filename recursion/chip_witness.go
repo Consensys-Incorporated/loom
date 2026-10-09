@@ -15,6 +15,17 @@ package recursion
 
 import "github.com/consensys/loom/board"
 
+// Setup columns of the witness chip.
+const (
+	witnessAddr = "addr"
+	witnessMult = "mult"
+)
+
+// Witness columns of the witness chip.
+const (
+	witnessV = "v" // lanes
+)
+
 // witnessChip: one row per cell the prover writes freely: the inputs, and the
 // hints, cells computed during execution whose windows check them (the
 // streams of Pack, the outputs of Lanes).
@@ -31,22 +42,22 @@ func (c witnessChip) cells() []int {
 func (c witnessChip) rows() int { return len(c.cells()) }
 
 func (c witnessChip) define(b *board.Builder, bus *Bus) error {
-	bus.Write(witnessMod, setupCol(witnessMod, "addr"), cellCols(witnessMod, "v", 0), setupCol(witnessMod, "mult"))
+	bus.Write(witnessMod, setupCol(witnessMod, witnessAddr), cellCols(witnessMod, witnessV, 0), setupCol(witnessMod, witnessMult))
 	return nil
 }
 
 func (c witnessChip) setup(cs *cols) {
-	cs.declare("addr", "mult")
+	cs.declare(witnessAddr, witnessMult)
 	for row, a := range c.cells() {
-		cs.set("addr", row, uint64(a))
-		cs.set("mult", row, uint64(c.m.reads[a]))
+		cs.set(witnessAddr, row, uint64(a))
+		cs.set(witnessMult, row, uint64(c.m.reads[a]))
 	}
 }
 
 func (c witnessChip) trace(cs *cols, r *Run) error {
-	cs.declareLanes("v", CellWidth)
+	cs.declareLanes(witnessV, CellWidth)
 	for row, a := range c.cells() {
-		cs.setCell("v", row, r.values[a])
+		cs.setCell(witnessV, row, r.values[a])
 	}
 	return nil
 }

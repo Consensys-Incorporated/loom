@@ -19,6 +19,34 @@ import (
 	"github.com/consensys/loom/board"
 )
 
+// Setup columns of the table chip.
+const (
+	tableActive  = "active"
+	tableSrcAddr = "src_addr"
+	tableAddr    = "addr"
+)
+
+// Witness columns of the table chip.
+const (
+	tableCnt = "cnt"
+	tableV   = "v" // lanes
+)
+
+// Setup columns of the lookup chip.
+const (
+	lookupActive  = "active"
+	lookupIdxAddr = "idx_addr"
+	lookupBase    = "base"
+	lookupOutAddr = "out_addr"
+	lookupOutMult = "out_mult"
+)
+
+// Witness columns of the lookup chip.
+const (
+	lookupIdx = "idx"
+	lookupV   = "v" // lanes
+)
+
 // Dynamic reads. A table copies cells to n consecutive fresh addresses, base
 // to base + n − 1; a lookup reads the entry at base + idx, an address computed
 // in the circuit from the index cell idx. How often each entry is read
@@ -121,20 +149,20 @@ func (c tableChip) rows() int {
 }
 
 func (c tableChip) define(b *board.Builder, bus *Bus) error {
-	v := cellCols(tableMod, "v", 0)
-	bus.Read(tableMod, setupCol(tableMod, "src_addr"), v, setupCol(tableMod, "active"))
-	bus.Write(tableMod, setupCol(tableMod, "addr"), v, col(tableMod, "cnt"))
+	v := cellCols(tableMod, tableV, 0)
+	bus.Read(tableMod, setupCol(tableMod, tableSrcAddr), v, setupCol(tableMod, tableActive))
+	bus.Write(tableMod, setupCol(tableMod, tableAddr), v, col(tableMod, tableCnt))
 	return nil
 }
 
 func (c tableChip) setup(cs *cols) {
-	cs.declare("active", "src_addr", "addr")
+	cs.declare(tableActive, tableSrcAddr, tableAddr)
 	row := 0
 	for _, t := range c.m.tables {
 		for i, e := range t.entries {
-			cs.set("active", row, 1)
-			cs.set("src_addr", row, uint64(t.src[i]))
-			cs.set("addr", row, uint64(e))
+			cs.set(tableActive, row, 1)
+			cs.set(tableSrcAddr, row, uint64(t.src[i]))
+			cs.set(tableAddr, row, uint64(e))
 			row++
 		}
 	}
@@ -142,8 +170,8 @@ func (c tableChip) setup(cs *cols) {
 
 // trace fills the values and counts the lookups of every entry.
 func (c tableChip) trace(cs *cols, r *Run) error {
-	cs.declare("cnt")
-	cs.declareLanes("v", CellWidth)
+	cs.declare(tableCnt)
+	cs.declareLanes(tableV, CellWidth)
 	counts := make([][]uint64, len(c.m.tables))
 	for k, t := range c.m.tables {
 		counts[k] = make([]uint64, len(t.entries))
@@ -154,8 +182,8 @@ func (c tableChip) trace(cs *cols, r *Run) error {
 	row := 0
 	for k, t := range c.m.tables {
 		for i, e := range t.entries {
-			cs.setCell("v", row, r.values[e])
-			cs.set("cnt", row, counts[k][i])
+			cs.setCell(tableV, row, r.values[e])
+			cs.set(tableCnt, row, counts[k][i])
 			row++
 		}
 	}
@@ -174,31 +202,31 @@ func (c lookupChip) name() string { return lookupMod }
 func (c lookupChip) rows() int    { return len(c.m.lookups) }
 
 func (c lookupChip) define(b *board.Builder, bus *Bus) error {
-	active, idx := setupCol(lookupMod, "active"), col(lookupMod, "idx")
-	v := cellCols(lookupMod, "v", 0)
-	bus.Read(lookupMod, setupCol(lookupMod, "idx_addr"), cellOf(idx), active)
-	bus.Read(lookupMod, setupCol(lookupMod, "base").Add(idx), v, active)
-	bus.Write(lookupMod, setupCol(lookupMod, "out_addr"), v, setupCol(lookupMod, "out_mult"))
+	active, idx := setupCol(lookupMod, lookupActive), col(lookupMod, lookupIdx)
+	v := cellCols(lookupMod, lookupV, 0)
+	bus.Read(lookupMod, setupCol(lookupMod, lookupIdxAddr), cellOf(idx), active)
+	bus.Read(lookupMod, setupCol(lookupMod, lookupBase).Add(idx), v, active)
+	bus.Write(lookupMod, setupCol(lookupMod, lookupOutAddr), v, setupCol(lookupMod, lookupOutMult))
 	return nil
 }
 
 func (c lookupChip) setup(cs *cols) {
-	cs.declare("active", "idx_addr", "base", "out_addr", "out_mult")
+	cs.declare(lookupActive, lookupIdxAddr, lookupBase, lookupOutAddr, lookupOutMult)
 	for row, l := range c.m.lookups {
-		cs.set("active", row, 1)
-		cs.set("idx_addr", row, uint64(l.idx))
-		cs.set("base", row, uint64(c.m.tables[l.table].entries[0]))
-		cs.set("out_addr", row, uint64(l.out))
-		cs.set("out_mult", row, uint64(c.m.reads[l.out]))
+		cs.set(lookupActive, row, 1)
+		cs.set(lookupIdxAddr, row, uint64(l.idx))
+		cs.set(lookupBase, row, uint64(c.m.tables[l.table].entries[0]))
+		cs.set(lookupOutAddr, row, uint64(l.out))
+		cs.set(lookupOutMult, row, uint64(c.m.reads[l.out]))
 	}
 }
 
 func (c lookupChip) trace(cs *cols, r *Run) error {
-	cs.declare("idx")
-	cs.declareLanes("v", CellWidth)
+	cs.declare(lookupIdx)
+	cs.declareLanes(lookupV, CellWidth)
 	for row, l := range c.m.lookups {
-		cs.setElem("idx", row, r.values[l.idx][0])
-		cs.setCell("v", row, r.values[l.out])
+		cs.setElem(lookupIdx, row, r.values[l.idx][0])
+		cs.setCell(lookupV, row, r.values[l.out])
 	}
 	return nil
 }

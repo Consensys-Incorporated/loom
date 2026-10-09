@@ -15,6 +15,13 @@ package recursion
 
 import "github.com/consensys/loom/board"
 
+// Setup columns of the const chip.
+const (
+	constAddr = "addr"
+	constMult = "mult"
+	constV    = "v" // lanes
+)
+
 // Const returns the address of a constant cell of value v, written by the
 // const chip (its values are setup columns). Constants are shared.
 func (m *Machine) Const(v Cell) int {
@@ -39,17 +46,17 @@ func (c constChip) name() string { return constMod }
 func (c constChip) rows() int { return len(c.m.constList) }
 
 func (c constChip) define(b *board.Builder, bus *Bus) error {
-	bus.Write(constMod, setupCol(constMod, "addr"), setupCellCols(constMod, "v"), setupCol(constMod, "mult"))
+	bus.Write(constMod, setupCol(constMod, constAddr), setupCellCols(constMod, constV), setupCol(constMod, constMult))
 	return nil
 }
 
 func (c constChip) setup(cs *cols) {
-	cs.declare("addr", "mult")
-	cs.declareLanes("v", CellWidth)
+	cs.declare(constAddr, constMult)
+	cs.declareLanes(constV, CellWidth)
 	for row, a := range c.m.constList {
-		cs.set("addr", row, uint64(a))
-		cs.set("mult", row, uint64(c.m.reads[a]))
-		cs.setCell("v", row, c.m.constVal[a])
+		cs.set(constAddr, row, uint64(a))
+		cs.set(constMult, row, uint64(c.m.reads[a]))
+		cs.setCell(constV, row, c.m.constVal[a])
 	}
 }
 

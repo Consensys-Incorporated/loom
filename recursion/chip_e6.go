@@ -21,6 +21,31 @@ import (
 	"github.com/consensys/loom/board"
 )
 
+// Setup columns of the e6 chip.
+const (
+	e6Mul = "mul"
+	e6Add = "add"
+	e6Bs  = "bs"
+	e6Hor = "hor"
+	// Per operand x ∈ {a, b, o}: addr_x and m_x (e6Addr, e6Mult).
+	e6AddrPrefix = "addr_"
+	e6MultPrefix = "m_"
+)
+
+// e6Operands are the operands of an E6 chip row.
+var e6Operands = []string{e6A, e6B, e6O}
+
+// e6Addr and e6Mult name the address and multiplicity columns of operand x.
+func e6Addr(x string) string { return e6AddrPrefix + x }
+func e6Mult(x string) string { return e6MultPrefix + x }
+
+// Witness columns of the e6 chip.
+const (
+	e6A = "a" // lanes
+	e6B = "b" // lanes
+	e6O = "o" // lanes
+)
+
 // e6Row is one row of the E6 chip:
 //
 //	o = mul·(a·b) + add·a + bs·b + hor·(o[−1]·a)
@@ -174,22 +199,25 @@ func (c e6Chip) rows() int {
 
 func (c e6Chip) define(b *board.Builder, bus *Bus) error {
 	mm := b.Modules[e6Mod]
-	a, bb, o := e6Cols(e6Mod, "a", 0), e6Cols(e6Mod, "b", 0), e6Cols(e6Mod, "o", 0)
+	a, bb, o := e6Cols(e6Mod, e6A, 0), e6Cols(e6Mod, e6B, 0), e6Cols(e6Mod, e6O, 0)
 	ab := e6MulExprs(a, bb)
-	prevA := e6MulExprs(e6Cols(e6Mod, "o", -1), a)
-	mul, add, bs, hor := setupCol(e6Mod, "mul"), setupCol(e6Mod, "add"), setupCol(e6Mod, "bs"), setupCol(e6Mod, "hor")
+	prevA := e6MulExprs(e6Cols(e6Mod, e6O, -1), a)
+	mul, add, bs, hor := setupCol(e6Mod, e6Mul), setupCol(e6Mod, e6Add), setupCol(e6Mod, e6Bs), setupCol(e6Mod, e6Hor)
 	for i := range 6 {
 		rhs := mul.Mul(ab[i]).Add(add.Mul(a[i])).Add(bs.Mul(bb[i])).Add(hor.Mul(prevA[i]))
 		mm.AssertZero(o[i].Sub(rhs))
 	}
-	for _, x := range []string{"a", "b", "o"} {
-		bus.Write(e6Mod, setupCol(e6Mod, "addr_"+x), cellOf(e6Cols(e6Mod, x, 0)...), setupCol(e6Mod, "m_"+x))
+	for _, x := range e6Operands {
+		bus.Write(e6Mod, setupCol(e6Mod, e6Addr(x)), cellOf(e6Cols(e6Mod, x, 0)...), setupCol(e6Mod, e6Mult(x)))
 	}
 	return nil
 }
 
 func (c e6Chip) setup(cs *cols) {
-	cs.declare("mul", "add", "bs", "hor", "addr_a", "m_a", "addr_b", "m_b", "addr_o", "m_o")
+	cs.declare(e6Mul, e6Add, e6Bs, e6Hor)
+	for _, x := range e6Operands {
+		cs.declare(e6Addr(x), e6Mult(x))
+	}
 	row := -1
 	for _, in := range c.m.e6Insts {
 		for _, r := range in.rows {
@@ -200,17 +228,17 @@ func (c e6Chip) setup(cs *cols) {
 }
 
 func (c e6Chip) setupRow(cs *cols, row int, r e6Row) {
-	cs.setInt("mul", row, r.mul)
-	cs.setInt("add", row, r.add)
-	cs.setInt("bs", row, r.bs)
-	cs.setInt("hor", row, r.hor)
+	cs.setInt(e6Mul, row, r.mul)
+	cs.setInt(e6Add, row, r.add)
+	cs.setInt(e6Bs, row, r.bs)
+	cs.setInt(e6Hor, row, r.hor)
 	for _, op := range []struct {
 		name string
 		s    slot
-	}{{"a", r.a}, {"b", r.b}, {"o", r.o}} {
+	}{{e6A, r.a}, {e6B, r.b}, {e6O, r.o}} {
 		if op.s.role != roleNone {
-			cs.set("addr_"+op.name, row, uint64(op.s.addr))
-			cs.setInt("m_"+op.name, row, c.m.mult(op.s))
+			cs.set(e6Addr(op.name), row, uint64(op.s.addr))
+			cs.setInt(e6Mult(op.name), row, c.m.mult(op.s))
 		}
 	}
 }
@@ -218,7 +246,7 @@ func (c e6Chip) setupRow(cs *cols, row int, r e6Row) {
 // trace reads a and b from their cells (zero when unused) and computes o by
 // the row's formula: on a row whose o is read, the bus checks it.
 func (c e6Chip) trace(cs *cols, r *Run) error {
-	for _, x := range []string{"a", "b", "o"} {
+	for _, x := range []string{e6A, e6B, e6O} {
 		cs.declareLanes(x, 6)
 	}
 	var prev ext.E6
@@ -259,8 +287,8 @@ func traceE6Row(cs *cols, row int, er e6Row, prev ext.E6, r *Run) ext.E6 {
 		t.Mul(&prev, &a)
 		o.Add(&o, &t)
 	}
-	cs.setE6("a", row, a)
-	cs.setE6("b", row, b)
-	cs.setE6("o", row, o)
+	cs.setE6(e6A, row, a)
+	cs.setE6(e6B, row, b)
+	cs.setE6(e6O, row, o)
 	return o
 }
