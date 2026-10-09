@@ -56,7 +56,7 @@ func shouldRunExtStep(prog *Program, out string) bool {
 
 type ExposeEntriesCtx struct {
 	Idx []int // indices of the entries to make public
-	N   int
+	N   int   // the module's size when the step was added; the step uses the evaluated column's (runtime) length
 }
 
 func ExposeEntriesStep(ins []expr.Expr, outs []string, t trace.Trace, prog *Program, proof *proof.Proof, mu *sync.Mutex, ctx StepContext) error {
@@ -83,7 +83,9 @@ func ExposeEntriesStep(ins []expr.Expr, outs []string, t trace.Trace, prog *Prog
 		}
 		proof.ExposedValues[out] = publicColumnInfo
 
-		sparseCol := make(trace.ExtPolynomial, _ctx.N)
+		// The module's runtime size (the program may have been resized since
+		// the step was added, see Program.SetSize).
+		sparseCol := make(trace.ExtPolynomial, len(res))
 		for _, i := range _ctx.Idx {
 			sparseCol[i].Set(&res[i])
 		}
@@ -111,7 +113,7 @@ func ExposeEntriesStep(ins []expr.Expr, outs []string, t trace.Trace, prog *Prog
 	// The constraint L_pos*(E - Public(out))=0 requires Public(out) to be the sparse
 	// polynomial with E[pos] at index pos and 0 elsewhere, matching what computePublicColumns
 	// reconstructs on the verifier side via Lagrange interpolation.
-	sparseCol := make([]koalabear.Element, _ctx.N)
+	sparseCol := make([]koalabear.Element, len(res))
 	for _, i := range _ctx.Idx {
 		sparseCol[i].Set(&res[i])
 	}
