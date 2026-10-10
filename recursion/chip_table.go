@@ -133,7 +133,8 @@ func (m *Machine) execLookup(l lookupInst, r *Run) error {
 
 // tableChip: one row per table entry.
 //
-// Columns: v0..7 (the value), cnt (how many lookups read the entry). Setup:
+// Columns: v0..7 (the value), cnt (how many lookups and dynamic paths read
+// the entry). Setup:
 // active, src_addr (the copied cell, read), addr (the entry's address,
 // written with multiplicity cnt).
 type tableChip struct{ m *Machine }
@@ -178,6 +179,11 @@ func (c tableChip) trace(cs *cols, r *Run) error {
 	}
 	for _, l := range c.m.lookups {
 		counts[l.table][r.values[l.idx][0].Uint64()]++
+	}
+	for k, reads := range r.tableReads {
+		for i, n := range reads {
+			counts[k][i] += n
+		}
 	}
 	row := 0
 	for k, t := range c.m.tables {

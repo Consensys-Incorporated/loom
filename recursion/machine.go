@@ -36,6 +36,7 @@ const (
 	constMod   = "const"
 	spongeMod  = "sponge"
 	merkleMod  = "merkle"
+	dpathMod   = "dpath"
 	windowMod  = "window"
 	bitsMod    = "bits"
 	e6Mod      = "e6"
@@ -69,6 +70,7 @@ type Machine struct {
 	lanes   []lanesInst
 	sponges []spongeInst
 	paths   []pathInst
+	dpaths  []dpathInst
 	windows []windowInst
 	bits    []bitsInst
 	e6Insts []e6Inst
@@ -89,6 +91,7 @@ const (
 	instrLanes
 	instrSponge
 	instrPath
+	instrDPath
 	instrBits
 	instrE6
 	instrDeep
@@ -194,7 +197,7 @@ type chip interface {
 }
 
 func (m *Machine) chips() []chip {
-	return []chip{witnessChip{m}, constChip{m}, spongeChip{m}, merkleChip{m},
+	return []chip{witnessChip{m}, constChip{m}, spongeChip{m}, merkleChip{m}, dpathChip{m},
 		windowChip{m}, bitsChip{m}, e6Chip{m}, deepChip{m}, foldChip{m}, tableChip{m}, lookupChip{m}, p2Chip{m}}
 }
 
@@ -221,6 +224,12 @@ type Run struct {
 	Trace  trace.Trace // the witness columns (loom merges the setup ones)
 	values []Cell
 	p2     [][width]koalabear.Element // the permutation inputs, in P2 row order
+
+	// tableReads[t][i] counts the reads of entry i of table t by dynamic
+	// paths (Lookup's are counted from the lookups); dpathRows[i] are the
+	// rows of dynamic path i.
+	tableReads map[int][]uint64
+	dpathRows  map[int][]dpathRow
 }
 
 // Value returns the value of the cell at addr.
@@ -279,6 +288,8 @@ func (m *Machine) exec(in instr, r *Run) error {
 		r.values[s.out] = d
 	case instrPath:
 		m.execPath(m.paths[in.idx], r)
+	case instrDPath:
+		return m.execDPath(in.idx, r)
 	case instrBits:
 		m.execBits(m.bits[in.idx], r)
 	case instrE6:

@@ -15,6 +15,7 @@ package recursion
 
 import (
 	"fmt"
+	"github.com/consensys/gnark-crypto/field/koalabear"
 	"strings"
 
 	"github.com/consensys/gnark-crypto/field/koalabear/poseidon2"
@@ -29,8 +30,10 @@ const (
 	p2R = "r" // lanes
 )
 
-// numPerms is the number of Poseidon2 permutations: one per sponge block and
-// one per Merkle level.
+// numPerms is the number of rows of the P2 core: one per sponge block and
+// one per Merkle level, and for a dynamic path an upper bound, H + G (its rows
+// before its first leaf do not hash; the unused rows permute zero, and no
+// lookup reads them).
 func (m *Machine) numPerms() int {
 	n := 0
 	for _, s := range m.sponges {
@@ -38,6 +41,9 @@ func (m *Machine) numPerms() int {
 	}
 	for _, p := range m.paths {
 		n += len(p.steps)
+	}
+	for _, d := range m.dpaths {
+		n += d.p.Siblings.Len() + d.p.Order.Len()
 	}
 	return n
 }
@@ -77,8 +83,11 @@ func (c p2Chip) setup(*cols) {}
 // trace fills the permutations recorded by the sponge and Merkle traces, then
 // the AIR's round columns.
 func (c p2Chip) trace(cs *cols, r *Run) error {
-	if len(r.p2) != c.rows() {
-		return fmt.Errorf("%d permutations recorded, want %d", len(r.p2), c.rows())
+	if len(r.p2) > c.rows() {
+		return fmt.Errorf("%d permutations recorded, at most %d", len(r.p2), c.rows())
+	}
+	for len(r.p2) < c.rows() {
+		r.p2 = append(r.p2, [width]koalabear.Element{})
 	}
 	cs.declareLanes(p2S, width)
 	cs.declareLanes(p2R, width)
