@@ -1,6 +1,7 @@
 package recursion
 
 import (
+	"sort"
 	"testing"
 
 	"github.com/consensys/gnark-crypto/field/koalabear"
@@ -34,7 +35,7 @@ func deepCircuit(t *testing.T, ip innerProof, opts ...VerifierOption) *Verifier 
 // loom's prover committed. range (size 64, fixed) stays the largest module,
 // so FRI's shape and the trees' group order do not change (P3.4, P3.5).
 func TestDEEPDynamicSizes(t *testing.T) {
-	program := accProgram(t, 64)
+	program := accProgram(t, 64, 0)
 	v := deepCircuit(t, accProof(t, program, 8, 3), WithDynamicModules("acc"))
 	p, err := v.M.Compile()
 	if err != nil {
@@ -87,7 +88,7 @@ func TestDEEPDynamicSizes(t *testing.T) {
 // largest shift — acc's shifts are −1, 0 and 1, so its sizes start at 4 —
 // below which shifts merge mod N and the proof's shape changes.
 func TestDynamicModuleMinimumSize(t *testing.T) {
-	program := accProgram(t, 64)
+	program := accProgram(t, 64, 0)
 	if got := minLogSize(program.Modules["acc"]); got != 2 {
 		t.Fatalf("acc's minimum log size is %d, want 2", got)
 	}
@@ -104,5 +105,59 @@ func TestDynamicModuleMinimumSize(t *testing.T) {
 	small := withSizes(program, ModuleSizes{"acc": 2})
 	if _, err := newVerifier(small, ip.vk, ShapeOf(ip.prf, ip.pi), WithDynamicModules("acc")); err == nil {
 		t.Fatal("verifier built for a program below the dynamic module's minimum size")
+	}
+}
+
+// TestOpeningsDynamicOrder: the opened rows of each group are read from the
+// proof by the group's position in its tree's order at the statement's sizes
+// (TopRows or an injection). With big (128, fixed) the largest module, acc of
+// size 8, 16, 32 and 64 is below, equal to (declaration order: acc first) and
+// above range (16), so the trees' order changes with acc's size; the DEEP
+// quotients, which read every group's opened rows, stay equal to FRI's level
+// openings.
+func TestOpeningsDynamicOrder(t *testing.T) {
+	program := accProgram(t, 16, 128)
+	v := deepCircuit(t, accProof(t, program, 8, 3), WithDynamicModules("acc"))
+	p, err := v.M.Compile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range []int{8, 16, 32, 64} {
+		ip := accProof(t, program, n, 5)
+		in, err := v.Inputs(ip.prf, ip.pi, ModuleSizes{"acc": n})
+		if err != nil {
+			t.Fatalf("size %d: %v", n, err)
+		}
+		r, err := p.Execute(in)
+		if err != nil {
+			t.Fatalf("size %d: %v", n, err)
+		}
+		// FRI's levels at the statement's sizes: classes by decreasing size,
+		// stably (the circuit's own level order is P3.5's).
+		classes := make([]int, len(v.fri.classMod))
+		for c := range classes {
+			classes[c] = c
+		}
+		size := func(c int) int { return ip.program.Modules[v.fri.classMod[c]].N }
+		sort.SliceStable(classes, func(a, b int) bool { return size(classes[a]) > size(classes[b]) })
+		levelOf := make([]int, len(classes))
+		for lvl, c := range classes {
+			levelOf[c] = lvl
+		}
+		fp := ip.prf.Opening.FRIProof
+		for k := range v.DEEP {
+			for c, dq := range v.DEEP[k] {
+				lvl := levelOf[c]
+				layer := fp.FRIQueries[k].Layers[0]
+				if lvl > 0 {
+					layer = fp.LevelQueries[lvl-1][k]
+				}
+				for side, want := range []ext.E6{layer.LeafPExt, layer.LeafQExt} {
+					if got := CellE6(r.Value(dq[side])); !got.Equal(&want) {
+						t.Fatalf("size %d, query %d, class %s, side %d: DQ differs from the level opening", n, k, v.fri.classMod[c], side)
+					}
+				}
+			}
+		}
 	}
 }

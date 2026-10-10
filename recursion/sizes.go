@@ -145,7 +145,7 @@ func (v *Verifier) buildSizes(dynamic map[string]bool) error {
 		if log2(mod.N) < minLog {
 			return fmt.Errorf("NewVerifier: dynamic module %q: the program's size %d is below its minimum 2^%d (its shifts)", name, mod.N, minLog)
 		}
-		l := v.sizeInput(name)
+		l := v.sizeInput(name, minLog)
 		// ℓ − minLog and MaxLog − ℓ are both in [0, 2^5).
 		for _, x := range []int{m.Sub(l, m.Const(ScalarCell(koalabear.NewElement(uint64(minLog))))), m.Sub(maxLog, l)} {
 			m.AssertEq(x, m.Bits(x, 5).Shr[0])
@@ -158,14 +158,15 @@ func (v *Verifier) buildSizes(dynamic map[string]bool) error {
 }
 
 // sizeInput allocates the input cell of a dynamic module's log size, read
-// from the statement's ModuleSizes.
-func (v *Verifier) sizeInput(module string) int {
+// from the statement's ModuleSizes (its minimum is minLog).
+func (v *Verifier) sizeInput(module string, minLog int) int {
 	if v.sizeInputs == nil {
 		v.sizeInputs = map[int]string{}
 	}
 	v.sizeInputs[len(v.extract)] = module
-	v.extract = append(v.extract, nil)
-	return v.M.Input()
+	return v.input(func(st *statement) (Cell, error) {
+		return statementSize(st.sizes, module, minLog)
+	})
 }
 
 // sizeTable returns the cell f(ℓ) for the scalar cell ℓ of a dynamic size,

@@ -85,10 +85,9 @@ type Verifier struct {
 	layout    protocol.Layout
 	sched     protocol.CanonicalSchedule
 
-	// extract[i] reads, from a proof and its public inputs, the value of the
-	// i-th input cell; nil for the size inputs, read from the statement's
-	// ModuleSizes (sizeInputs[i] is the module).
-	extract    []func(prf proof.Proof, pi public.Inputs) (Cell, error)
+	// extract[i] reads the value of the i-th input cell from a statement;
+	// sizeInputs[i] is the module of a size input.
+	extract    []func(st *statement) (Cell, error)
 	sizeInputs map[int]string
 
 	// sizes holds every module's size in circuit; sizeTables the tables of
@@ -230,8 +229,53 @@ func newVerifier(program board.Program, vk setup.VerificationKey, shape Shape, o
 	return v, nil
 }
 
-// input allocates an input cell whose value extract reads from each proof.
-func (v *Verifier) input(extract func(prf proof.Proof, pi public.Inputs) (Cell, error)) int {
+// statement is what the circuit verifies: a proof, its public inputs and its
+// module sizes. pos caches, per tree, the position of every group in the
+// tree's order at these sizes (statementGroupPos).
+type statement struct {
+	prf   proof.Proof
+	pi    public.Inputs
+	sizes ModuleSizes
+	pos   map[int][]int
+}
+
+// size returns a module's size in the statement: its own for a dynamic
+// module, the program's for a fixed one.
+func (v *Verifier) statementModuleSize(st *statement, module string) int {
+	if v.sizes[module].dynamic {
+		return st.sizes[module]
+	}
+	return v.program.Modules[module].N
+}
+
+// statementGroupPos returns the position of every group of tree t in the
+// tree's order at the statement's sizes: by decreasing size, equal sizes in
+// declaration order — the path's leaf first, then the injections, as the
+// proof's WMerkleProof holds them (TopRows, then Injections[pos−1]).
+func (v *Verifier) statementGroupPos(st *statement, t int) []int {
+	if p, ok := st.pos[t]; ok {
+		return p
+	}
+	groups := v.layout.TreeGroups[t]
+	n := make([]int, len(groups))
+	order := make([]int, len(groups))
+	for g, grp := range groups {
+		n[g], order[g] = v.statementModuleSize(st, grp.Module), g
+	}
+	sort.SliceStable(order, func(a, b int) bool { return n[order[a]] > n[order[b]] })
+	pos := make([]int, len(groups))
+	for i, g := range order {
+		pos[g] = i
+	}
+	if st.pos == nil {
+		st.pos = map[int][]int{}
+	}
+	st.pos[t] = pos
+	return pos
+}
+
+// input allocates an input cell whose value extract reads from each statement.
+func (v *Verifier) input(extract func(st *statement) (Cell, error)) int {
 	v.extract = append(v.extract, extract)
 	return v.M.Input()
 }
@@ -250,18 +294,10 @@ func (v *Verifier) Inputs(prf proof.Proof, pi public.Inputs, sizes ModuleSizes) 
 			return nil, fmt.Errorf("Inputs: module %q has the fixed size %d, not %d", name, v.program.Modules[name].N, n)
 		}
 	}
+	st := &statement{prf: prf, pi: pi, sizes: sizes}
 	res := make([]Cell, len(v.extract))
 	for i, f := range v.extract {
-		if f == nil {
-			mod := v.sizeInputs[i]
-			c, err := statementSize(sizes, mod, v.sizes[mod].minLog)
-			if err != nil {
-				return nil, fmt.Errorf("Inputs: %w", err)
-			}
-			res[i] = c
-			continue
-		}
-		c, err := f(prf, pi)
+		c, err := f(st)
 		if err != nil {
 			return nil, err
 		}
@@ -299,7 +335,8 @@ func (v *Verifier) buildTranscript() error {
 	}
 	for t := l.SetupEnd; t < l.NumTrees; t++ {
 		i := t - l.SetupEnd
-		v.roots[t] = v.input(func(prf proof.Proof, _ public.Inputs) (Cell, error) {
+		v.roots[t] = v.input(func(st *statement) (Cell, error) {
+			prf := st.prf
 			if i >= len(prf.Commitments) {
 				return Cell{}, fmt.Errorf("proof has %d commitments, want more than %d", len(prf.Commitments), i)
 			}
@@ -365,13 +402,15 @@ func (v *Verifier) bindPublicInputs(name string) {
 				}
 				return es[k], nil
 			}
-			idx := v.input(func(_ proof.Proof, pi public.Inputs) (Cell, error) {
+			idx := v.input(func(st *statement) (Cell, error) {
+				pi := st.pi
 				e, err := entry(pi)
 				return ScalarCell(koalabear.NewElement(uint64(e.Idx))), err
 			})
 			v.tr.Bind(name, Scalar(idx))
 			v.tr.BindElements(name, []koalabear.Element{hash.NewElement(uint64(f))})
-			val := v.input(func(_ proof.Proof, pi public.Inputs) (Cell, error) {
+			val := v.input(func(st *statement) (Cell, error) {
+				pi := st.pi
 				e, err := entry(pi)
 				if f == field.Ext {
 					return E6Cell(e.ValueExt), err
@@ -403,11 +442,13 @@ func (v *Verifier) bindExposedValue(challenge, name string) error {
 			}
 			return ev.Entries[k], nil
 		}
-		idx := v.input(func(prf proof.Proof, _ public.Inputs) (Cell, error) {
+		idx := v.input(func(st *statement) (Cell, error) {
+			prf := st.prf
 			e, err := entry(prf)
 			return ScalarCell(koalabear.NewElement(uint64(e.Idx))), err
 		})
-		val := v.input(func(prf proof.Proof, _ public.Inputs) (Cell, error) {
+		val := v.input(func(st *statement) (Cell, error) {
+			prf := st.prf
 			e, err := entry(prf)
 			return E6Cell(e.ExtValue()), err
 		})
@@ -530,7 +571,8 @@ func (v *Verifier) buildPCSTranscript() error {
 		}
 		return fp, nil
 	}
-	v.LevelsRoot = v.input(func(prf proof.Proof, _ public.Inputs) (Cell, error) {
+	v.LevelsRoot = v.input(func(st *statement) (Cell, error) {
+		prf := st.prf
 		fp, err := friProof(prf)
 		return digestCell(fp.LevelsRoot), err
 	})
@@ -552,7 +594,8 @@ func (v *Verifier) buildPCSTranscript() error {
 			root = zeroDigest
 		case j > v.fri.first:
 			i := j - v.fri.first - 1
-			root = v.input(func(prf proof.Proof, _ public.Inputs) (Cell, error) {
+			root = v.input(func(st *statement) (Cell, error) {
+				prf := st.prf
 				fp, err := friProof(prf)
 				if err != nil {
 					return Cell{}, err
@@ -569,7 +612,8 @@ func (v *Verifier) buildPCSTranscript() error {
 	nFinal := 1 << (v.fri.logN - v.fri.numRounds)
 	v.tr.BindElements(fri.QueryName(0), []koalabear.Element{hash.NewElement(fri.ExtPolyDomainTag), hash.NewElement(uint64(nFinal))})
 	for i := range nFinal {
-		c := v.input(func(prf proof.Proof, _ public.Inputs) (Cell, error) {
+		c := v.input(func(st *statement) (Cell, error) {
+			prf := st.prf
 			fp, err := friProof(prf)
 			if err != nil {
 				return Cell{}, err
@@ -613,7 +657,8 @@ func (v *Verifier) claimedInputs(t, g int, extRail bool, shifts [][]int) [][]int
 	res := make([][]int, len(shifts))
 	for i, ss := range shifts {
 		for k := range ss {
-			res[i] = append(res[i], v.input(func(prf proof.Proof, _ public.Inputs) (Cell, error) {
+			res[i] = append(res[i], v.input(func(st *statement) (Cell, error) {
+				prf := st.prf
 				cv := prf.Opening.ClaimedValues
 				if t >= len(cv) || g >= len(cv[t]) {
 					return Cell{}, fmt.Errorf("claimed values do not have the verifier's shape")
@@ -681,7 +726,8 @@ func (v *Verifier) buildOpenings() {
 			depth := log2(topRows / 2)
 			sibs := make([]int, depth)
 			for i := range sibs {
-				sibs[i] = v.input(func(prf proof.Proof, _ public.Inputs) (Cell, error) {
+				sibs[i] = v.input(func(st *statement) (Cell, error) {
+					prf := st.prf
 					sib := prf.Opening.PointSamplings[k][t].Path.Siblings
 					if len(sib) != depth {
 						return Cell{}, fmt.Errorf("Merkle path does not have the verifier's shape")
@@ -725,19 +771,20 @@ func (v *Verifier) allocOpenings() {
 	for k := range v.shape.NumQueries {
 		v.Openings[k] = make([][]RowPair, l.NumTrees)
 		for t := range l.NumTrees {
-			_, pos := v.groupOrder(t)
 			v.Openings[k][t] = make([]RowPair, len(l.TreeGroups[t]))
 			for g := range l.TreeGroups[t] {
 				names := v.sched.ColNamesByTree[t][g]
 				nb, ne := len(names.Base), len(names.Ext)
-				rows := func(prf proof.Proof) (fri.RawRowPair, error) {
-					ps := prf.Opening.PointSamplings
+				// The group's rows: TopRows or an injection, by its position
+				// in the tree's order at the statement's sizes.
+				rows := func(st *statement) (fri.RawRowPair, error) {
+					ps := st.prf.Opening.PointSamplings
 					if k >= len(ps) || t >= len(ps[k]) {
 						return fri.RawRowPair{}, fmt.Errorf("point samplings do not have the verifier's shape")
 					}
 					wp := ps[k][t]
 					rp := wp.TopRows
-					if i := pos[g]; i > 0 {
+					if i := v.statementGroupPos(st, t)[g]; i > 0 {
 						if i-1 >= len(wp.Injections) {
 							return fri.RawRowPair{}, fmt.Errorf("point samplings do not have the verifier's shape")
 						}
@@ -753,8 +800,8 @@ func (v *Verifier) allocOpenings() {
 				row := func(hi bool) Row {
 					res := Row{NBase: nb}
 					for c := 0; c < nb; c += CellWidth {
-						res.Base = append(res.Base, v.input(func(prf proof.Proof, _ public.Inputs) (Cell, error) {
-							rp, err := rows(prf)
+						res.Base = append(res.Base, v.input(func(st *statement) (Cell, error) {
+							rp, err := rows(st)
 							r := rp.Lo
 							if hi {
 								r = rp.Hi
@@ -768,8 +815,8 @@ func (v *Verifier) allocOpenings() {
 						}))
 					}
 					for i := range ne {
-						res.Ext = append(res.Ext, v.input(func(prf proof.Proof, _ public.Inputs) (Cell, error) {
-							rp, err := rows(prf)
+						res.Ext = append(res.Ext, v.input(func(st *statement) (Cell, error) {
+							rp, err := rows(st)
 							r := rp.Lo
 							if hi {
 								r = rp.Hi
@@ -1184,11 +1231,13 @@ func (v *Verifier) friLayerValues(k, j int) (int, int) {
 		}
 		return fq[k].Layers[j], nil
 	}
-	p := v.input(func(prf proof.Proof, _ public.Inputs) (Cell, error) {
+	p := v.input(func(st *statement) (Cell, error) {
+		prf := st.prf
 		l, err := layer(prf)
 		return E6Cell(l.LeafPExt), err
 	})
-	q := v.input(func(prf proof.Proof, _ public.Inputs) (Cell, error) {
+	q := v.input(func(st *statement) (Cell, error) {
+		prf := st.prf
 		l, err := layer(prf)
 		return E6Cell(l.LeafQExt), err
 	})
@@ -1200,7 +1249,8 @@ func (v *Verifier) friLayerValues(k, j int) (int, int) {
 func (v *Verifier) friSiblings(k, j, depth int) []int {
 	sibs := make([]int, depth)
 	for i := range sibs {
-		sibs[i] = v.input(func(prf proof.Proof, _ public.Inputs) (Cell, error) {
+		sibs[i] = v.input(func(st *statement) (Cell, error) {
+			prf := st.prf
 			fq := prf.Opening.FRIProof.FRIQueries
 			if k >= len(fq) || j >= len(fq[k].Layers) || len(fq[k].Layers[j].Path.Siblings) != depth {
 				return Cell{}, fmt.Errorf("FRI paths do not have the verifier's shape")

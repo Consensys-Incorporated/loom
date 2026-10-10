@@ -176,9 +176,11 @@ func TestVerifierDynamicModule(t *testing.T) {
 	run := func(n int) error {
 		sizes := SizesOf(ip.program)
 		sizes["fibonacci"] = n
+		// A lying size may already be rejected by Inputs: the proof's
+		// openings do not fit the trees' order at that size.
 		in, err := v.Inputs(ip.prf, ip.pi, sizes)
 		if err != nil {
-			t.Fatal(err)
+			return err
 		}
 		r, err := p.Execute(in)
 		if err != nil {
