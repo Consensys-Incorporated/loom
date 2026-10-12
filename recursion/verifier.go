@@ -18,6 +18,7 @@ import (
 	"sort"
 
 	"github.com/consensys/gnark-crypto/field/koalabear"
+	ext "github.com/consensys/gnark-crypto/field/koalabear/extensions"
 	"github.com/consensys/loom/board"
 	"github.com/consensys/loom/expr"
 	"github.com/consensys/loom/field"
@@ -192,7 +193,9 @@ func NewVerifier(program board.Program, vk setup.VerificationKey, shape Shape, o
 	}
 	v.buildOpenings()
 	v.buildDEEP()
-	if err := v.buildFRI(); err != nil {
+	if v.friDyn != nil {
+		v.buildFRIDynamic()
+	} else if err := v.buildFRI(); err != nil {
 		return nil, err
 	}
 	if err := v.buildAIR(); err != nil {
@@ -1026,18 +1029,25 @@ func (v *Verifier) dynamicOpening(k, t int, leaves []int) {
 			return digestCell(sib[top-h]), nil
 		})
 	}
+	bits := v.queryBitsTable(k)
+	m.MerklePathDynamic(DynamicPath{
+		Leaves: m.Table(leaves), Heights: heights, Order: order,
+		Siblings: m.Table(sibs), Bits: bits, L: v.fri.logN, Root: v.roots[t],
+	})
+}
+
+// queryBitsTable returns the table of the bits of query k's full-domain row,
+// built once per query.
+func (v *Verifier) queryBitsTable(k int) Table {
 	if v.queryBits == nil {
 		v.queryBits = map[int]Table{}
 	}
 	bits, ok := v.queryBits[k]
 	if !ok {
-		bits = m.Table(v.Queries[k].Bit[:v.fri.logN])
+		bits = v.M.Table(v.Queries[k].Bit[:v.fri.logN])
 		v.queryBits[k] = bits
 	}
-	m.MerklePathDynamic(DynamicPath{
-		Leaves: m.Table(leaves), Heights: heights, Order: order,
-		Siblings: m.Table(sibs), Bits: bits, L: v.fri.logN, Root: v.roots[t],
-	})
+	return bits
 }
 
 // groupOrder returns the groups of tree t by decreasing size, equal sizes in
@@ -1513,6 +1523,165 @@ func (v *Verifier) buildFRI() error {
 		m.FoldChain(rounds, m.Lookup(final, q.Shr[numRounds]))
 	}
 	return nil
+}
+
+// zeroTree returns the digests of the all-zero FRI layer: Z[0] the leaf of
+// the pair (0, 0), Z[i] the root of a subtree of 2^i such leaves.
+func zeroTree(depth int) []hash.Digest {
+	var zero ext.E6
+	row := fri.RawRow{RawRowExt: []ext.E6{zero}}
+	z := []hash.Digest{fri.DefaultLeafHasher.HashLeafPair(row, row)}
+	for i := 1; i <= depth; i++ {
+		z = append(z, fri.DefaultNodeHasher.HashNode(z[i-1], z[i-1]))
+	}
+	return z
+}
+
+// buildFRIDynamic checks FRI at every query for the statement's sizes, over
+// all the rounds 0..numRounds−1 (the structure of P3.5a: friDynamic):
+//
+//   - the levels tree: a dynamic path over the classes (their heights and
+//     canonical order), whose leaves are the DEEP pairs DQ_c(±X), through its
+//     siblings by height, to the levels root;
+//   - round j's layer: its opened pair, through a path of depth logN − j − 1,
+//     to Select(g_j, layer root j, zero-tree root): rounds up to first have no
+//     layer, and open (0, 0) in the all-zero tree (zeroTree);
+//   - the folded pair of round j: the opened one plus, at first,
+//     Σ_(levels at first) γ·DQ — f_j·SL[b_j], SL the prefix sums of γ_k·DQ
+//     over the sorted levels (γ_0 = 1) — and, entering round j + 1,
+//     SS[b_(j+1)] − SS[b_j], SS the prefix sums of γ_k times the entry of
+//     level k's pair selected by the bit of its entry round;
+//   - the fold chain over every round, to the final polynomial at s >> numRounds.
+func (v *Verifier) buildFRIDynamic() {
+	m, d := v.M, v.friDyn
+	logN, numRounds := v.fri.logN, v.fri.numRounds
+	zero := m.Const(Cell{})
+	gammas := []int{m.Const(ScalarCell(koalabear.One()))}
+	for k := 1; k < len(d.levels.pi); k++ {
+		gammas = append(gammas, v.ChallengeE6(fri.LevelGammaName(k)))
+	}
+	alphas := make([]int, numRounds)
+	gInv := make([]koalabear.Element, numRounds)
+	for j := range numRounds {
+		alphas[j] = v.ChallengeE6(fri.FoldName(j))
+		g, err := koalabear.Generator(uint64(1) << (logN - j))
+		if err != nil {
+			panic(err)
+		}
+		gInv[j].Inverse(&g)
+	}
+	final := m.Table(v.Final)
+	z := zeroTree(logN)
+	roots := make([]int, numRounds)
+	for j := range numRounds {
+		roots[j] = m.Const(digestCell(z[logN-j-1]))
+		if j > 0 {
+			roots[j] = m.Select(d.g[j], d.layerRoots[j], roots[j])
+		}
+	}
+
+	// layer returns the opening of round j at query k in a statement, nil for a
+	// round without layer.
+	layer := func(st *statement, k, j int) (*fri.QueryLayer, error) {
+		first := v.statementFirst(st)
+		fq := st.prf.Opening.FRIProof.FRIQueries
+		if k >= len(fq) || len(fq[k].Layers) != numRounds-first {
+			return nil, fmt.Errorf("FRI queries do not have the verifier's shape")
+		}
+		if j < first {
+			return nil, nil
+		}
+		return &fq[k].Layers[j-first], nil
+	}
+
+	for k := range v.shape.NumQueries {
+		q := v.Queries[k]
+		bits := v.queryBitsTable(k)
+		nc := len(v.DEEP[k])
+		lo, hi, leaves := make([]int, nc), make([]int, nc), make([]int, nc)
+		for c, dq := range v.DEEP[k] {
+			lo[c], hi[c] = dq[0], dq[1]
+			leaves[c] = v.leafE6Pair(dq[0], dq[1])
+		}
+		dlo, dhi := m.Table(lo), m.Table(hi)
+
+		// The levels tree, its path from the opening of round first.
+		sibs := make([]int, maxTreeHeight)
+		for h := 1; h <= maxTreeHeight; h++ {
+			sibs[h-1] = v.input(func(st *statement) (Cell, error) {
+				l, err := layer(st, k, v.statementFirst(st))
+				if err != nil {
+					return Cell{}, err
+				}
+				top := logN - v.statementFirst(st) - 1
+				if len(l.Path.Siblings) != top {
+					return Cell{}, fmt.Errorf("the levels tree path does not have the verifier's shape")
+				}
+				if h > top {
+					return Cell{}, nil
+				}
+				return digestCell(l.Path.Siblings[top-h]), nil
+			})
+		}
+		m.MerklePathDynamic(DynamicPath{
+			Leaves: m.Table(leaves), Heights: d.levels.heights, Order: d.levels.order,
+			Siblings: m.Table(sibs), Bits: bits, L: logN, Root: v.LevelsRoot,
+		})
+
+		// The prefix sums over the sorted levels.
+		sl, sh, ss := []int{zero}, []int{zero}, []int{zero}
+		for i, pi := range d.levels.pi {
+			l, h := m.Lookup(dlo, pi), m.Lookup(dhi, pi)
+			sel := m.Add(l, m.Mul(m.Lookup(bits, d.levels.intro[i]), m.Sub(h, l)))
+			sl = append(sl, m.Add(sl[i], m.Mul(gammas[i], l)))
+			sh = append(sh, m.Add(sh[i], m.Mul(gammas[i], h)))
+			ss = append(ss, m.Add(ss[i], m.Mul(gammas[i], sel)))
+		}
+		tsl, tsh, tss := m.Table(sl), m.Table(sh), m.Table(ss)
+
+		var rounds []FoldRound
+		for j := range numRounds {
+			value := func(qside bool) int {
+				return v.input(func(st *statement) (Cell, error) {
+					l, err := layer(st, k, j)
+					if err != nil || l == nil || j == v.statementFirst(st) {
+						return Cell{}, err
+					}
+					if qside {
+						return E6Cell(l.LeafQExt), nil
+					}
+					return E6Cell(l.LeafPExt), nil
+				})
+			}
+			p, qv := value(false), value(true)
+			depth := logN - j - 1
+			path := make([]int, depth)
+			for i := range path {
+				path[i] = v.input(func(st *statement) (Cell, error) {
+					l, err := layer(st, k, j)
+					if err != nil {
+						return Cell{}, err
+					}
+					if l == nil || j == v.statementFirst(st) {
+						return digestCell(z[i]), nil
+					}
+					if len(l.Path.Siblings) != depth {
+						return Cell{}, fmt.Errorf("FRI paths do not have the verifier's shape")
+					}
+					return digestCell(l.Path.Siblings[i]), nil
+				})
+			}
+			xb := m.MerklePathX(v.leafE6Pair(p, qv), path, q.Shr[j+1], roots[j], gInv[j])
+			P := m.Add(p, m.Mul(d.f[j], m.Lookup(tsl, d.b[j])))
+			Q := m.Add(qv, m.Mul(d.f[j], m.Lookup(tsh, d.b[j])))
+			inj := zero
+			if j+1 < numRounds {
+				inj = m.Sub(m.Lookup(tss, d.b[j+1]), m.Lookup(tss, d.b[j]))
+			}
+			rounds = append(rounds, FoldRound{P: P, Q: Q, Alpha: alphas[j], XB: xb, Inj: inj})
+		}
+		m.FoldChain(rounds, m.Lookup(final, q.Shr[numRounds]))
+	}
 }
 
 // friLayerValues allocates the inputs of the pair of the FRI query layer j ≥ 1
