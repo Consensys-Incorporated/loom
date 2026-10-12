@@ -37,6 +37,7 @@ const (
 	spongeMod  = "sponge"
 	merkleMod  = "merkle"
 	dpathMod   = "dpath"
+	selectMod  = "select"
 	windowMod  = "window"
 	bitsMod    = "bits"
 	e6Mod      = "e6"
@@ -71,6 +72,7 @@ type Machine struct {
 	sponges []spongeInst
 	paths   []pathInst
 	dpaths  []dpathInst
+	selects []selectInst
 	windows []windowInst
 	bits    []bitsInst
 	e6Insts []e6Inst
@@ -92,6 +94,7 @@ const (
 	instrSponge
 	instrPath
 	instrDPath
+	instrSelect
 	instrBits
 	instrE6
 	instrDeep
@@ -197,7 +200,7 @@ type chip interface {
 }
 
 func (m *Machine) chips() []chip {
-	return []chip{witnessChip{m}, constChip{m}, spongeChip{m}, merkleChip{m}, dpathChip{m},
+	return []chip{witnessChip{m}, constChip{m}, spongeChip{m}, merkleChip{m}, dpathChip{m}, selectChip{m},
 		windowChip{m}, bitsChip{m}, e6Chip{m}, deepChip{m}, foldChip{m}, tableChip{m}, lookupChip{m}, p2Chip{m}}
 }
 
@@ -290,6 +293,8 @@ func (m *Machine) exec(in instr, r *Run) error {
 		m.execPath(m.paths[in.idx], r)
 	case instrDPath:
 		return m.execDPath(in.idx, r)
+	case instrSelect:
+		return m.execSelect(m.selects[in.idx], r)
 	case instrBits:
 		m.execBits(m.bits[in.idx], r)
 	case instrE6:

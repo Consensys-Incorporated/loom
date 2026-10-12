@@ -96,10 +96,14 @@ type Verifier struct {
 	sizeTables map[string]Table
 	// treeOrders[t] are the heights and order tables of a tree with a dynamic
 	// group; queryBits[k] the table of query k's row bits.
-	treeOrders map[int][2]Table
-	queryBits  map[int]Table
-	// orderInputs[t] are the positions, among the inputs, of tree t's π.
-	orderInputs map[int][]int
+	// orders are the canonical orders of trees and of FRI's levels, by key
+	// (dynamicOrder); orderInputs[key] the positions of π among the inputs;
+	// queryBits[k] the table of query k's row bits.
+	orders      map[string]dynOrder
+	orderInputs map[string][]int
+	queryBits   map[int]Table
+	// friDyn is FRI's structure in circuit when a module is dynamic.
+	friDyn *friDynamic
 
 	tr *Transcript
 	// Challenges holds the digest cell of every challenge computed so far.
@@ -239,10 +243,11 @@ func newVerifier(program board.Program, vk setup.VerificationKey, shape Shape, o
 // module sizes. pos caches, per tree, the position of every group in the
 // tree's order at these sizes (statementGroupPos).
 type statement struct {
-	prf   proof.Proof
-	pi    public.Inputs
-	sizes ModuleSizes
-	pos   map[int][]int
+	prf    proof.Proof
+	pi     public.Inputs
+	sizes  ModuleSizes
+	pos    map[int][]int
+	orders map[string][]int // statementOrder's cache
 }
 
 // size returns a module's size in the statement: its own for a dynamic
@@ -567,19 +572,18 @@ func (v *Verifier) buildPCSTranscript() error {
 		v.tr.NewChallenge(fri.QueryName(k))
 	}
 
-	friProof := func(prf proof.Proof) (fri.Proof, error) {
-		fp := prf.Opening.FRIProof
+	friProof := func(st *statement) (fri.Proof, error) {
+		fp := st.prf.Opening.FRIProof
 		if len(fp.PoW) > 0 {
 			return fp, fmt.Errorf("the FRI proof has proofs of work: grinding is not supported")
 		}
-		if len(fp.FRIRoots) != v.fri.numRounds-1-v.fri.first || len(fp.FinalPolyExt) != 1<<(v.fri.logN-v.fri.numRounds) {
+		if len(fp.FRIRoots) != v.fri.numRounds-1-v.statementFirst(st) || len(fp.FinalPolyExt) != 1<<(v.fri.logN-v.fri.numRounds) {
 			return fp, fmt.Errorf("the FRI proof does not have the verifier's shape")
 		}
 		return fp, nil
 	}
 	v.LevelsRoot = v.input(func(st *statement) (Cell, error) {
-		prf := st.prf
-		fp, err := friProof(prf)
+		fp, err := friProof(st)
 		return digestCell(fp.LevelsRoot), err
 	})
 	for lvl := 1; lvl < v.fri.numLevels; lvl++ {
@@ -592,8 +596,14 @@ func (v *Verifier) buildPCSTranscript() error {
 	// The fold challenges: the rounds before first have no layer and bind the
 	// zero digest, round first binds the levels root, the next ones their
 	// layer root.
+	if v.anyDynamic() {
+		v.buildFoldTranscriptDynamic(friProof)
+	}
 	zeroDigest := m.Const(Cell{})
 	for j := range v.fri.numRounds {
+		if v.anyDynamic() {
+			break
+		}
 		root := v.LevelsRoot
 		switch {
 		case j < v.fri.first:
@@ -601,8 +611,7 @@ func (v *Verifier) buildPCSTranscript() error {
 		case j > v.fri.first:
 			i := j - v.fri.first - 1
 			root = v.input(func(st *statement) (Cell, error) {
-				prf := st.prf
-				fp, err := friProof(prf)
+				fp, err := friProof(st)
 				if err != nil {
 					return Cell{}, err
 				}
@@ -619,8 +628,7 @@ func (v *Verifier) buildPCSTranscript() error {
 	v.tr.BindElements(fri.QueryName(0), []koalabear.Element{hash.NewElement(fri.ExtPolyDomainTag), hash.NewElement(uint64(nFinal))})
 	for i := range nFinal {
 		c := v.input(func(st *statement) (Cell, error) {
-			prf := st.prf
-			fp, err := friProof(prf)
+			fp, err := friProof(st)
 			if err != nil {
 				return Cell{}, err
 			}
@@ -655,6 +663,128 @@ func (v *Verifier) allocClaimed() {
 			v.Claimed[t][g] = ClaimedCells{Base: v.claimedInputs(t, g, false, gs.Base), Ext: v.claimedInputs(t, g, true, gs.Ext)}
 		}
 	}
+}
+
+// layerRoot returns the root cell of FRI layer j > first: the input of round
+// j when a module is dynamic (friDynamic), FRIRoots' otherwise.
+func (v *Verifier) layerRoot(j int) int {
+	if v.friDyn != nil {
+		return v.friDyn.layerRoots[j]
+	}
+	return v.FRIRoots[j-v.fri.first-1]
+}
+
+// hintInput returns the position among the inputs of the hint b_j.
+func (v *Verifier) hintInput(j int) int { return v.friDyn.bInputs[j] }
+
+// anyDynamic reports whether the circuit has a dynamic module.
+func (v *Verifier) anyDynamic() bool {
+	for _, s := range v.sizes {
+		if s.dynamic {
+			return true
+		}
+	}
+	return false
+}
+
+// statementFirst returns FRI's first round at the statement's sizes: the
+// round MaxLog − ℓ at which the largest class enters (fri.Proof).
+func (v *Verifier) statementFirst(st *statement) int {
+	maxLog := 0
+	for _, mod := range v.fri.classMod {
+		maxLog = max(maxLog, log2(v.statementModuleSize(st, mod)))
+	}
+	return MaxLogModuleSize - maxLog
+}
+
+// friDynamic is FRI's structure at the statement's sizes, in circuit: the
+// levels' canonical order (classes by decreasing size, equal sizes by class
+// index — fri.Prove's level order) with the round each enters, and per round
+// j the number b_j of levels entered by j, the indicators p_j = [j ≥ first],
+// g_j = [j > first], f_j = [j = first] (scalar cells), and the layer root
+// input (rounds ≥ 1).
+type friDynamic struct {
+	levels     dynOrder
+	b          []int
+	bInputs    []int // the positions of the b_j among the inputs
+	rootInputs []int // rootInputs[j]: the position of layerRoots[j] (j ≥ 1)
+	p, f, g    []int
+	layerRoots []int // layerRoots[j], j ≥ 1
+}
+
+// buildFoldTranscriptDynamic binds FRI's fold challenges for the statement's
+// sizes. The levels' order is checked (dynamicOrder), so its first level is a
+// largest class, entering at first. Per round j, the hint b_j is checked:
+// b_j ≤ n, the level at position b_j (if any) enters after j and the one at
+// b_j − 1 (if any) at j or before — through the tables of the entry rounds
+// with sentinels. Then p_j = [b_j > 0], and fri_fold_j binds
+// Select(f_j, levels root, Select(g_j, layer root j, 0)): the zero digest
+// before first, the levels root at first, the layer root after (fri.Proof).
+func (v *Verifier) buildFoldTranscriptDynamic(friProof func(*statement) (fri.Proof, error)) {
+	m := v.M
+	c := func(x int) int { return m.Const(ScalarCell(koalabear.NewElement(uint64(x)))) }
+	below := func(x, bits int) { m.AssertEq(x, m.Bits(x, bits).Shr[0]) }
+	d := &friDynamic{levels: v.dynamicOrder("fri", v.fri.classMod)}
+	n := len(d.levels.intro)
+	after := m.Table(append(append([]int(nil), d.levels.intro...), c(1<<7)))
+	before := m.Table(append([]int{c(0)}, d.levels.intro...))
+	posCells := []int{c(0)}
+	for range n {
+		posCells = append(posCells, c(1))
+	}
+	pos := m.Table(posCells)
+	zero := m.Const(Cell{})
+	for j := range v.fri.numRounds {
+		d.bInputs = append(d.bInputs, len(v.extract))
+		b := v.input(func(st *statement) (Cell, error) {
+			entered := 0
+			for _, mod := range v.fri.classMod {
+				if MaxLogModuleSize-log2(v.statementModuleSize(st, mod)) <= j {
+					entered++
+				}
+			}
+			return ScalarCell(koalabear.NewElement(uint64(entered))), nil
+		})
+		below(b, 8)
+		below(m.Sub(c(n), b), 8)
+		below(m.Sub(m.Sub(m.Lookup(after, b), c(j)), c(1)), 8)
+		below(m.Sub(c(j), m.Lookup(before, b)), 8)
+		d.b = append(d.b, b)
+		p := m.Lookup(pos, b)
+		g := c(0)
+		if j > 0 {
+			g = d.p[j-1]
+		}
+		d.p, d.g, d.f = append(d.p, p), append(d.g, g), append(d.f, m.Sub(p, g))
+
+		root := zero
+		if j > 0 {
+			for len(d.rootInputs) < j {
+				d.rootInputs = append(d.rootInputs, -1)
+			}
+			d.rootInputs = append(d.rootInputs, len(v.extract))
+			layer := v.input(func(st *statement) (Cell, error) {
+				fp, err := friProof(st)
+				if err != nil {
+					return Cell{}, err
+				}
+				if i := j - v.statementFirst(st) - 1; i >= 0 {
+					return digestCell(fp.FRIRoots[i]), nil
+				}
+				return Cell{}, nil
+			})
+			for len(d.layerRoots) < j {
+				d.layerRoots = append(d.layerRoots, -1)
+			}
+			d.layerRoots = append(d.layerRoots, layer)
+			v.FRIRoots = append(v.FRIRoots, layer)
+			root = m.Select(g, layer, zero)
+		}
+		root = m.Select(d.f[j], v.LevelsRoot, root)
+		v.tr.Bind(fri.FoldName(j), Digest(root))
+		v.Challenges[fri.FoldName(j)] = v.tr.Compute(fri.FoldName(j))
+	}
+	v.friDyn = d
 }
 
 // claimedInputs allocates the claimed-value inputs of one rail of group g of
@@ -774,67 +904,101 @@ var treeHeightOffset = log2(constants.RATE) - 1
 // maxTreeHeight is the height of a tree of the maximum module size.
 var maxTreeHeight = MaxLogModuleSize + treeHeightOffset
 
-// dynamicTreeOrder returns, for a tree with a dynamic group, the tables of
-// its groups' heights and of its canonical order π — the groups by decreasing
-// height, equal heights by increasing index — built once per tree. π is an
-// input (the order at the statement's sizes), checked: every π_k is below G,
-// and the keys (H − h_(π_k))·2^8 + π_k strictly increase, so π is that
-// permutation (distinct, sorted). The order then cannot depend on the query:
-// every path folds the same groups, in the same order.
-func (v *Verifier) dynamicTreeOrder(t int) (heights, order Table) {
-	if tabs, ok := v.treeOrders[t]; ok {
-		return tabs[0], tabs[1]
+// dynOrder is the canonical order of a list of modules (a tree's groups, or
+// FRI's classes): by decreasing size, equal sizes by increasing index.
+type dynOrder struct {
+	heights, order Table // h by item, π by position
+	pi             []int // π_k
+	intro          []int // H − h_(π_k): for FRI's levels, the round level k enters
+}
+
+// statementOrder returns the canonical order of modules at the statement's
+// sizes, cached by key.
+func (v *Verifier) statementOrder(st *statement, key string, modules []string) []int {
+	if p, ok := st.orders[key]; ok {
+		return p
+	}
+	n := make([]int, len(modules))
+	order := make([]int, len(modules))
+	for i, mod := range modules {
+		n[i], order[i] = v.statementModuleSize(st, mod), i
+	}
+	sort.SliceStable(order, func(a, b int) bool { return n[order[a]] > n[order[b]] })
+	if st.orders == nil {
+		st.orders = map[string][]int{}
+	}
+	st.orders[key] = order
+	return order
+}
+
+// dynamicOrder returns the canonical order of modules, built once per key:
+// the table of their heights in a tree (h = ℓ + log2(RATE) − 1: constants for
+// fixed modules, cells for dynamic ones) and of the order π, an input (the
+// order at the statement's sizes) checked: every π_k is below G, and the keys
+// (H − h_(π_k))·2^8 + π_k strictly increase, so π is that permutation
+// (distinct, sorted). The order then cannot depend on the query.
+func (v *Verifier) dynamicOrder(key string, modules []string) dynOrder {
+	if o, ok := v.orders[key]; ok {
+		return o
 	}
 	m := v.M
-	groups := v.layout.TreeGroups[t]
-	G := len(groups)
+	G := len(modules)
 	if G > 1<<8 {
-		panic(fmt.Sprintf("tree %d has %d groups, above 2^8", t, G))
+		panic(fmt.Sprintf("%s: %d items, above 2^8", key, G))
 	}
 	c := func(x int) int { return m.Const(ScalarCell(koalabear.NewElement(uint64(x)))) }
 	hs := make([]int, G)
-	for g, grp := range groups {
-		s := v.sizes[grp.Module]
+	for i, mod := range modules {
+		s := v.sizes[mod]
 		if s.dynamic {
-			hs[g] = m.Add(s.cell, c(treeHeightOffset))
+			hs[i] = m.Add(s.cell, c(treeHeightOffset))
 		} else {
-			hs[g] = c(s.logN + treeHeightOffset)
+			hs[i] = c(s.logN + treeHeightOffset)
 		}
 	}
-	heights = m.Table(hs)
-	pi := make([]int, G)
+	o := dynOrder{heights: m.Table(hs)}
 	if v.orderInputs == nil {
-		v.orderInputs = map[int][]int{}
+		v.orderInputs = map[string][]int{}
 	}
-	for k := range pi {
-		v.orderInputs[t] = append(v.orderInputs[t], len(v.extract))
-		pi[k] = v.input(func(st *statement) (Cell, error) {
-			pos := v.statementGroupPos(st, t)
-			for g, p := range pos {
-				if p == k {
-					return ScalarCell(koalabear.NewElement(uint64(g))), nil
-				}
-			}
-			return Cell{}, fmt.Errorf("tree %d: no group at position %d", t, k)
-		})
+	for k := range G {
+		v.orderInputs[key] = append(v.orderInputs[key], len(v.extract))
+		o.pi = append(o.pi, v.input(func(st *statement) (Cell, error) {
+			return ScalarCell(koalabear.NewElement(uint64(v.statementOrder(st, key, modules)[k]))), nil
+		}))
 	}
 	below := func(x, bits int) { m.AssertEq(x, m.Bits(x, bits).Shr[0]) }
 	prev := -1
-	for k := range pi {
-		below(pi[k], 8)
-		below(m.Sub(c(G-1), pi[k]), 8)
-		key := m.Add(m.Mul(m.Sub(c(maxTreeHeight), m.Lookup(heights, pi[k])), c(1<<8)), pi[k])
-		if prev >= 0 {
+	for k, pi := range o.pi {
+		below(pi, 8)
+		below(m.Sub(c(G-1), pi), 8)
+		intro := m.Sub(c(maxTreeHeight), m.Lookup(o.heights, pi))
+		o.intro = append(o.intro, intro)
+		key := m.Add(m.Mul(intro, c(1<<8)), pi)
+		if k > 0 {
 			below(m.Sub(m.Sub(key, prev), c(1)), 13)
 		}
 		prev = key
 	}
-	order = m.Table(pi)
-	if v.treeOrders == nil {
-		v.treeOrders = map[int][2]Table{}
+	o.order = m.Table(o.pi)
+	if v.orders == nil {
+		v.orders = map[string]dynOrder{}
 	}
-	v.treeOrders[t] = [2]Table{heights, order}
-	return heights, order
+	v.orders[key] = o
+	return o
+}
+
+// treeOrderKey is the dynamicOrder key of tree t.
+func treeOrderKey(t int) string { return fmt.Sprintf("tree %d", t) }
+
+// dynamicTreeOrder returns the heights and order tables of tree t's groups.
+func (v *Verifier) dynamicTreeOrder(t int) (heights, order Table) {
+	groups := v.layout.TreeGroups[t]
+	modules := make([]string, len(groups))
+	for g, grp := range groups {
+		modules[g] = grp.Module
+	}
+	o := v.dynamicOrder(treeOrderKey(t), modules)
+	return o.heights, o.order
 }
 
 // dynamicOpening checks the path of query k in tree t, of a dynamic shape:
@@ -1327,7 +1491,7 @@ func (v *Verifier) buildFRI() error {
 			} else {
 				p, qv = v.friLayerValues(k, j-first)
 				sibs := v.friSiblings(k, j-first, logN-j-1)
-				xb = m.MerklePathX(v.leafE6Pair(p, qv), sibs, q.Shr[j+1], v.FRIRoots[j-first-1], gInv[j])
+				xb = m.MerklePathX(v.leafE6Pair(p, qv), sibs, q.Shr[j+1], v.layerRoot(j), gInv[j])
 			}
 			// The levels entering at the next round, each at the entry the
 			// next row selects: bit j + 1 of s.

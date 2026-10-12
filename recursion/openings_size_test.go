@@ -112,7 +112,7 @@ func TestOpeningsDynamicPaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pos := v.orderInputs[tree]
+	pos := v.orderInputs[treeOrderKey(tree)]
 	in[pos[0]], in[pos[1]] = in[pos[1]], in[pos[0]]
 	rejected("order", in, nil)
 	// The proof of size 32 claimed of size 16.
@@ -142,7 +142,7 @@ func TestDynamicTreeOrderCheck(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pos := v.orderInputs[tree]
+	pos := v.orderInputs[treeOrderKey(tree)]
 	groups := v.layout.TreeGroups[tree]
 	index := map[string]int{}
 	for g, grp := range groups {
