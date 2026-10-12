@@ -94,6 +94,12 @@ type Verifier struct {
 	// size-dependent constants, by key (see sizeTable).
 	sizes      map[string]moduleSize
 	sizeTables map[string]Table
+	// treeOrders[t] are the heights and order tables of a tree with a dynamic
+	// group; queryBits[k] the table of query k's row bits.
+	treeOrders map[int][2]Table
+	queryBits  map[int]Table
+	// orderInputs[t] are the positions, among the inputs, of tree t's π.
+	orderInputs map[int][]int
 
 	tr *Transcript
 	// Challenges holds the digest cell of every challenge computed so far.
@@ -720,6 +726,10 @@ func (v *Verifier) buildOpenings() {
 				stream, n := m.Pack(addrs, kinds)
 				leaves[g] = m.Sponge(stream, n)
 			}
+			if v.dynamicTree(t) {
+				v.dynamicOpening(k, t, leaves)
+				continue
+			}
 
 			// The path, from the largest group's leaf.
 			topRows := constants.RATE * groups[order[0]].N
@@ -744,6 +754,126 @@ func (v *Verifier) buildOpenings() {
 			m.MerklePath(leaves[order[0]], sibs, index, v.roots[t], injections...)
 		}
 	}
+}
+
+// dynamicTree reports whether tree t has a group of a dynamic module: its
+// shape then depends on the statement's sizes (dynamicOpening).
+func (v *Verifier) dynamicTree(t int) bool {
+	for _, g := range v.layout.TreeGroups[t] {
+		if v.sizes[g.Module].dynamic {
+			return true
+		}
+	}
+	return false
+}
+
+// treeHeightOffset is a group's height in its tree minus its log size: a
+// group of size N has RATE·N rows, RATE·N/2 leaves.
+var treeHeightOffset = log2(constants.RATE) - 1
+
+// maxTreeHeight is the height of a tree of the maximum module size.
+var maxTreeHeight = MaxLogModuleSize + treeHeightOffset
+
+// dynamicTreeOrder returns, for a tree with a dynamic group, the tables of
+// its groups' heights and of its canonical order π — the groups by decreasing
+// height, equal heights by increasing index — built once per tree. π is an
+// input (the order at the statement's sizes), checked: every π_k is below G,
+// and the keys (H − h_(π_k))·2^8 + π_k strictly increase, so π is that
+// permutation (distinct, sorted). The order then cannot depend on the query:
+// every path folds the same groups, in the same order.
+func (v *Verifier) dynamicTreeOrder(t int) (heights, order Table) {
+	if tabs, ok := v.treeOrders[t]; ok {
+		return tabs[0], tabs[1]
+	}
+	m := v.M
+	groups := v.layout.TreeGroups[t]
+	G := len(groups)
+	if G > 1<<8 {
+		panic(fmt.Sprintf("tree %d has %d groups, above 2^8", t, G))
+	}
+	c := func(x int) int { return m.Const(ScalarCell(koalabear.NewElement(uint64(x)))) }
+	hs := make([]int, G)
+	for g, grp := range groups {
+		s := v.sizes[grp.Module]
+		if s.dynamic {
+			hs[g] = m.Add(s.cell, c(treeHeightOffset))
+		} else {
+			hs[g] = c(s.logN + treeHeightOffset)
+		}
+	}
+	heights = m.Table(hs)
+	pi := make([]int, G)
+	if v.orderInputs == nil {
+		v.orderInputs = map[int][]int{}
+	}
+	for k := range pi {
+		v.orderInputs[t] = append(v.orderInputs[t], len(v.extract))
+		pi[k] = v.input(func(st *statement) (Cell, error) {
+			pos := v.statementGroupPos(st, t)
+			for g, p := range pos {
+				if p == k {
+					return ScalarCell(koalabear.NewElement(uint64(g))), nil
+				}
+			}
+			return Cell{}, fmt.Errorf("tree %d: no group at position %d", t, k)
+		})
+	}
+	below := func(x, bits int) { m.AssertEq(x, m.Bits(x, bits).Shr[0]) }
+	prev := -1
+	for k := range pi {
+		below(pi[k], 8)
+		below(m.Sub(c(G-1), pi[k]), 8)
+		key := m.Add(m.Mul(m.Sub(c(maxTreeHeight), m.Lookup(heights, pi[k])), c(1<<8)), pi[k])
+		if prev >= 0 {
+			below(m.Sub(m.Sub(key, prev), c(1)), 13)
+		}
+		prev = key
+	}
+	order = m.Table(pi)
+	if v.treeOrders == nil {
+		v.treeOrders = map[int][2]Table{}
+	}
+	v.treeOrders[t] = [2]Table{heights, order}
+	return heights, order
+}
+
+// dynamicOpening checks the path of query k in tree t, of a dynamic shape:
+// the groups' leaves fold at their heights in the tree's canonical order
+// (dynamicTreeOrder), through the siblings indexed by height — taken from
+// the proof at the statement's top height, zero above it — ordered by the
+// bits of the query's full-domain row (MerklePathDynamic).
+func (v *Verifier) dynamicOpening(k, t int, leaves []int) {
+	m := v.M
+	heights, order := v.dynamicTreeOrder(t)
+	sibs := make([]int, maxTreeHeight)
+	for h := 1; h <= maxTreeHeight; h++ {
+		sibs[h-1] = v.input(func(st *statement) (Cell, error) {
+			top := 0
+			for _, grp := range v.layout.TreeGroups[t] {
+				top = max(top, log2(v.statementModuleSize(st, grp.Module))+treeHeightOffset)
+			}
+			sib := st.prf.Opening.PointSamplings[k][t].Path.Siblings
+			if len(sib) != top {
+				return Cell{}, fmt.Errorf("Merkle path does not have the verifier's shape")
+			}
+			if h > top {
+				return Cell{}, nil
+			}
+			return digestCell(sib[top-h]), nil
+		})
+	}
+	if v.queryBits == nil {
+		v.queryBits = map[int]Table{}
+	}
+	bits, ok := v.queryBits[k]
+	if !ok {
+		bits = m.Table(v.Queries[k].Bit[:v.fri.logN])
+		v.queryBits[k] = bits
+	}
+	m.MerklePathDynamic(DynamicPath{
+		Leaves: m.Table(leaves), Heights: heights, Order: order,
+		Siblings: m.Table(sibs), Bits: bits, L: v.fri.logN, Root: v.roots[t],
+	})
 }
 
 // groupOrder returns the groups of tree t by decreasing size, equal sizes in
