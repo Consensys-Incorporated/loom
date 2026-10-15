@@ -156,7 +156,7 @@ func AIRChunkCount(m board.CompiledModule) int {
 	if m.VanishingRelation == nil || m.VanishingRelation.Degree() <= 0 {
 		return 0
 	}
-	return poly.NextPowerOfTwo(m.VanishingRelation.Degree()*m.N) / m.N
+	return poly.QuotientDomainSize(m.VanishingRelation.Degree(), m.N) / m.N
 }
 
 // BuildLayout builds the canonical commitment layout for a Prove/Verify run.

@@ -16,7 +16,7 @@ import (
 
 const n = 8
 
-// lookupProgram looks up three source columns of module "m" into the table
+// lookupProgram looks up four source columns of module "m" into the table
 // column "tab.t" = 0..n-1.
 func lookupProgram(t *testing.T) board.Program {
 	t.Helper()
@@ -28,7 +28,7 @@ func lookupProgram(t *testing.T) board.Program {
 	tab.N = n
 	b.AddModule(tab)
 	var S []board.Column
-	for _, c := range []string{"m.s0", "m.s1", "m.s2"} {
+	for _, c := range []string{"m.s0", "m.s1", "m.s2", "m.s3"} {
 		S = append(S, board.Column{Module: "m", In: expr.Col(c)})
 	}
 	if err := arguments.LookupUnion(&b, S, []board.Column{{Module: "tab", In: expr.Col("tab.t")}}); err != nil {
@@ -59,6 +59,7 @@ func lookupTrace(bad bool) trace.Trace {
 		}
 		return 3
 	}))
+	tr.SetBase("m.s3", col(func(i int) uint64 { return uint64(i / 2) }))
 	return tr
 }
 
@@ -76,7 +77,7 @@ func prove(t *testing.T, pg board.Program, tr trace.Trace) (loom.Statement, proo
 func TestBatchedCyclicLookup(t *testing.T) {
 	pg := lookupProgram(t)
 
-	// The three sources share one logup column in "m", of degree 4.
+	// The four sources share one logup column in "m", of degree 5.
 	logups := 0
 	for _, r := range pg.Rounds {
 		for _, c := range r.Staged {
@@ -88,8 +89,8 @@ func TestBatchedCyclicLookup(t *testing.T) {
 	if logups != 1 {
 		t.Fatalf("module m has %d logup columns, want 1", logups)
 	}
-	if d := pg.Modules["m"].VanishingRelation.Degree(); d > board.MaxLogupDegree {
-		t.Fatalf("module m has degree %d, want at most %d", d, board.MaxLogupDegree)
+	if d := pg.Modules["m"].VanishingRelation.Degree(); d != board.MaxLogupDegree {
+		t.Fatalf("module m has degree %d, want %d", d, board.MaxLogupDegree)
 	}
 
 	// The totals are exposed in the running-sums round, which must bind them

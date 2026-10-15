@@ -19,6 +19,27 @@ import (
 	"github.com/consensys/loom/expr"
 )
 
+// Setup columns of the fold chip.
+const (
+	foldActive = "active"
+	foldLast   = "last"
+	foldAddrP  = "addr_p"
+	foldAddrQ  = "addr_q"
+	foldAddrAl = "addr_al"
+	foldAddrXb = "addr_xb"
+	foldAddrJ  = "addr_j"
+)
+
+// Witness columns of the fold chip.
+const (
+	foldP  = "p"  // lanes
+	foldQ  = "q"  // lanes
+	foldAl = "al" // lanes
+	foldJ  = "j"  // lanes
+	foldXi = "xi"
+	foldBn = "bn"
+)
+
 // FoldRound is one round of a FRI query: the opened pair (P, Q) = (f(x),
 // f(−x)) of the round's layer, its fold challenge Alpha, the cell XB = [x⁻¹,
 // b] written by the layer's Merkle path (b selects P or Q in the next layer),
@@ -76,11 +97,11 @@ func (c foldChip) rows() int {
 
 func (c foldChip) define(b *board.Builder, bus *Bus) error {
 	mm := b.Modules[foldMod]
-	active, last := setupCol(foldMod, "active"), setupCol(foldMod, "last")
+	active, last := setupCol(foldMod, foldActive), setupCol(foldMod, foldLast)
 	notLast := active.Sub(last)
-	p, q, al, j := e6Cols(foldMod, "p", 0), e6Cols(foldMod, "q", 0), e6Cols(foldMod, "al", 0), e6Cols(foldMod, "j", 0)
-	pn, qn := e6Cols(foldMod, "p", 1), e6Cols(foldMod, "q", 1)
-	xi, bn := col(foldMod, "xi"), col(foldMod, "bn")
+	p, q, al, j := e6Cols(foldMod, foldP, 0), e6Cols(foldMod, foldQ, 0), e6Cols(foldMod, foldAl, 0), e6Cols(foldMod, foldJ, 0)
+	pn, qn := e6Cols(foldMod, foldP, 1), e6Cols(foldMod, foldQ, 1)
+	xi, bn := col(foldMod, foldXi), col(foldMod, foldBn)
 	var half koalabear.Element
 	half.SetUint64(2)
 	half.Inverse(&half)
@@ -94,28 +115,28 @@ func (c foldChip) define(b *board.Builder, bus *Bus) error {
 		rhs := pn[i].Add(bn.Mul(qn[i].Sub(pn[i])))
 		mm.AssertZero(notLast.Mul(lhs.Sub(rhs)))
 	}
-	bus.Read(foldMod, setupCol(foldMod, "addr_p"), cellOf(p...), active)
-	bus.Read(foldMod, setupCol(foldMod, "addr_q"), cellOf(q...), active)
-	bus.Read(foldMod, setupCol(foldMod, "addr_al"), cellOf(al...), notLast)
-	bus.Read(foldMod, setupCol(foldMod, "addr_xb"), cellOf(xi, bn), notLast)
-	bus.Read(foldMod, setupCol(foldMod, "addr_j"), cellOf(j...), notLast)
+	bus.Read(foldMod, setupCol(foldMod, foldAddrP), cellOf(p...), active)
+	bus.Read(foldMod, setupCol(foldMod, foldAddrQ), cellOf(q...), active)
+	bus.Read(foldMod, setupCol(foldMod, foldAddrAl), cellOf(al...), notLast)
+	bus.Read(foldMod, setupCol(foldMod, foldAddrXb), cellOf(xi, bn), notLast)
+	bus.Read(foldMod, setupCol(foldMod, foldAddrJ), cellOf(j...), notLast)
 	return nil
 }
 
 func (c foldChip) setup(cs *cols) {
-	cs.declare("active", "last", "addr_p", "addr_q", "addr_al", "addr_xb", "addr_j")
+	cs.declare(foldActive, foldLast, foldAddrP, foldAddrQ, foldAddrAl, foldAddrXb, foldAddrJ)
 	row := 0
 	for _, ch := range c.m.folds {
 		for _, r := range ch {
-			cs.set("active", row, 1)
-			cs.set("addr_p", row, uint64(r.p))
-			cs.set("addr_q", row, uint64(r.q))
+			cs.set(foldActive, row, 1)
+			cs.set(foldAddrP, row, uint64(r.p))
+			cs.set(foldAddrQ, row, uint64(r.q))
 			if r.alpha < 0 {
-				cs.set("last", row, 1)
+				cs.set(foldLast, row, 1)
 			} else {
-				cs.set("addr_al", row, uint64(r.alpha))
-				cs.set("addr_xb", row, uint64(r.xb))
-				cs.set("addr_j", row, uint64(r.inj))
+				cs.set(foldAddrAl, row, uint64(r.alpha))
+				cs.set(foldAddrXb, row, uint64(r.xb))
+				cs.set(foldAddrJ, row, uint64(r.inj))
 			}
 			row++
 		}
@@ -123,20 +144,20 @@ func (c foldChip) setup(cs *cols) {
 }
 
 func (c foldChip) trace(cs *cols, r *Run) error {
-	cs.declare("xi", "bn")
-	for _, x := range []string{"p", "q", "al", "j"} {
+	cs.declare(foldXi, foldBn)
+	for _, x := range []string{foldP, foldQ, foldAl, foldJ} {
 		cs.declareLanes(x, 6)
 	}
 	row := 0
 	for _, ch := range c.m.folds {
 		for _, fr := range ch {
-			cs.setE6("p", row, CellE6(r.values[fr.p]))
-			cs.setE6("q", row, CellE6(r.values[fr.q]))
+			cs.setE6(foldP, row, CellE6(r.values[fr.p]))
+			cs.setE6(foldQ, row, CellE6(r.values[fr.q]))
 			if fr.alpha >= 0 {
-				cs.setE6("al", row, CellE6(r.values[fr.alpha]))
-				cs.setE6("j", row, CellE6(r.values[fr.inj]))
-				cs.setElem("xi", row, r.values[fr.xb][0])
-				cs.setElem("bn", row, r.values[fr.xb][1])
+				cs.setE6(foldAl, row, CellE6(r.values[fr.alpha]))
+				cs.setE6(foldJ, row, CellE6(r.values[fr.inj]))
+				cs.setElem(foldXi, row, r.values[fr.xb][0])
+				cs.setElem(foldBn, row, r.values[fr.xb][1])
 			}
 			row++
 		}

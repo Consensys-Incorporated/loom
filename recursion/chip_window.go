@@ -21,6 +21,24 @@ import (
 	"github.com/consensys/loom/expr"
 )
 
+// Setup columns of the window chip.
+const (
+	windowActive = "active"
+	windowAddrP  = "addr_p"
+	windowAddrQ  = "addr_q"
+	windowSelQ   = "sel_q"
+	windowAddrI  = "addr_i"
+	windowOff    = "off" // lanes
+	windowLen    = "len" // lanes
+)
+
+// Witness columns of the window chip.
+const (
+	windowP = "p" // lanes
+	windowQ = "q" // lanes
+	windowI = "i" // lanes
+)
+
 type packInst struct {
 	items, kinds []int
 	stream       []int // the stream cells, written by the witness chip
@@ -107,7 +125,7 @@ func (m *Machine) Window(stream []int, g, kind, item int) {
 }
 
 func checkKind(k int) {
-	if k != KindScalar && k != KindE6 && k != KindDigest {
+	if k < 1 || k > CellWidth {
 		panic(fmt.Sprintf("item kind %d", k))
 	}
 }
@@ -116,13 +134,13 @@ func checkKind(k int) {
 //
 // Columns: p0..7, q0..7 (two consecutive stream cells, the window W = p‖q),
 // i0..7 (the item). Setup: active, addr_p, addr_q, sel_q (q is read), addr_i,
-// off0..7 (one-hot offset of the item in p), k6 (the item has at least 6
-// lanes), k8 (8 lanes). For each lane k of the item,
+// off0..7 (one-hot offset of the item in p), and len1..7 (len_k = 1 when the
+// item has more than k lanes). For each lane k of the item,
 //
-//	mask_k·(i_k − Σ_o off_o·W_{o+k}) = 0,
+//	len_k·(i_k − Σ_o off_o·W_{o+k}) = 0,
 //
-// with mask_0 = 1, mask_1..5 = k6, mask_6,7 = k8. The item's other lanes are
-// left to its readers, whose tuples fix them to zero.
+// with len_0 = 1. The item's other lanes are left to its readers: their
+// tuples fix them to zero, or they do not use them.
 type windowChip struct{ m *Machine }
 
 func (c windowChip) name() string { return windowMod }
@@ -131,67 +149,62 @@ func (c windowChip) rows() int { return len(c.m.windows) }
 
 func (c windowChip) define(b *board.Builder, bus *Bus) error {
 	mm := b.Modules[windowMod]
-	active := setupCol(windowMod, "active")
-	bus.Read(windowMod, setupCol(windowMod, "addr_p"), cellCols(windowMod, "p", 0), active)
-	bus.Read(windowMod, setupCol(windowMod, "addr_q"), cellCols(windowMod, "q", 0), setupCol(windowMod, "sel_q"))
-	bus.Read(windowMod, setupCol(windowMod, "addr_i"), cellCols(windowMod, "i", 0), active)
+	active := setupCol(windowMod, windowActive)
+	bus.Read(windowMod, setupCol(windowMod, windowAddrP), cellCols(windowMod, windowP, 0), active)
+	bus.Read(windowMod, setupCol(windowMod, windowAddrQ), cellCols(windowMod, windowQ, 0), setupCol(windowMod, windowSelQ))
+	bus.Read(windowMod, setupCol(windowMod, windowAddrI), cellCols(windowMod, windowI, 0), active)
 
 	window := func(j int) expr.Expr {
 		if j < CellWidth {
-			return col(windowMod, fmt.Sprintf("p%d", j))
+			return col(windowMod, laneName(windowP, j))
 		}
-		return col(windowMod, fmt.Sprintf("q%d", j-CellWidth))
+		return col(windowMod, laneName(windowQ, j-CellWidth))
 	}
 	for k := range CellWidth {
-		var mask expr.Expr
-		switch {
-		case k == 0:
-			mask = one()
-		case k < KindE6:
-			mask = setupCol(windowMod, "k6")
-		default:
-			mask = setupCol(windowMod, "k8")
+		mask := one()
+		if k > 0 {
+			mask = setupCol(windowMod, laneName(windowLen, k))
 		}
 		var sum expr.Expr = zero()
 		for o := range CellWidth {
-			sum = sum.Add(setupCol(windowMod, fmt.Sprintf("off%d", o)).Mul(window(o + k)))
+			sum = sum.Add(setupCol(windowMod, laneName(windowOff, o)).Mul(window(o + k)))
 		}
-		mm.AssertZero(mask.Mul(col(windowMod, fmt.Sprintf("i%d", k)).Sub(sum)))
+		mm.AssertZero(mask.Mul(col(windowMod, laneName(windowI, k)).Sub(sum)))
 	}
 	return nil
 }
 
 func (c windowChip) setup(cs *cols) {
-	cs.declare("active", "addr_p", "addr_q", "sel_q", "addr_i", "k6", "k8")
-	cs.declareLanes("off", CellWidth)
+	cs.declare(windowActive, windowAddrP, windowAddrQ, windowSelQ, windowAddrI)
+	cs.declareLanes(windowOff, CellWidth)
+	for k := 1; k < CellWidth; k++ {
+		cs.declare(laneName(windowLen, k))
+	}
 	for row, w := range c.m.windows {
-		cs.set("active", row, 1)
-		cs.set("addr_p", row, uint64(w.p))
+		cs.set(windowActive, row, 1)
+		cs.set(windowAddrP, row, uint64(w.p))
 		if w.q >= 0 {
-			cs.set("addr_q", row, uint64(w.q))
-			cs.set("sel_q", row, 1)
+			cs.set(windowAddrQ, row, uint64(w.q))
+			cs.set(windowSelQ, row, 1)
 		}
-		cs.set("addr_i", row, uint64(w.item))
-		cs.set(fmt.Sprintf("off%d", w.off), row, 1)
-		if w.kind >= KindE6 {
-			cs.set("k6", row, 1)
-		}
-		if w.kind == KindDigest {
-			cs.set("k8", row, 1)
+		cs.set(windowAddrI, row, uint64(w.item))
+		cs.set(laneName(windowOff, w.off), row, 1)
+		for k := 1; k < w.kind; k++ {
+			cs.set(laneName(windowLen, k), row, 1)
 		}
 	}
 }
 
 func (c windowChip) trace(cs *cols, r *Run) error {
-	cs.declareLanes("p", CellWidth)
-	cs.declareLanes("q", CellWidth)
-	cs.declareLanes("i", CellWidth)
+	cs.declareLanes(windowP, CellWidth)
+	cs.declareLanes(windowQ, CellWidth)
+	cs.declareLanes(windowI, CellWidth)
 	for row, w := range c.m.windows {
-		cs.setCell("p", row, r.values[w.p])
+		cs.setCell(windowP, row, r.values[w.p])
 		if w.q >= 0 {
-			cs.setCell("q", row, r.values[w.q])
+			cs.setCell(windowQ, row, r.values[w.q])
 		}
-		cs.setCell("i", row, r.values[w.item])
+		cs.setCell(windowI, row, r.values[w.item])
 	}
 	return nil
 }

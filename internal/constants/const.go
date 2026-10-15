@@ -26,6 +26,13 @@ import (
 const RATE = 4
 const NUM_QUERIES = 32
 
+// MAX_LOG_MODULE_SIZE bounds the size of every module: N ≤ 2^MAX_LOG_MODULE_SIZE.
+// FRI always runs over the domain of that size, RATE·2^MAX_LOG_MODULE_SIZE
+// (2^24, KoalaBear's 2-adicity), whatever the actual module sizes: its round
+// count, transcript shape and query width are then fixed, which is what a
+// recursive verifier needs to verify proofs of any module sizes.
+const MAX_LOG_MODULE_SIZE = 22
+
 const RANGE_MODULE = "range"
 const FINAL_EVALUATION_POINT = "__zeta"
 const DEEP_ALPHA = "alpha_DEEP"

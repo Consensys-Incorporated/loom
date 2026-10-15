@@ -15,6 +15,7 @@ package recursion
 
 import (
 	"fmt"
+	"github.com/consensys/gnark-crypto/field/koalabear"
 	"strings"
 
 	"github.com/consensys/gnark-crypto/field/koalabear/poseidon2"
@@ -23,8 +24,16 @@ import (
 	"github.com/consensys/loom/trace"
 )
 
-// numPerms is the number of Poseidon2 permutations: one per sponge block and
-// one per Merkle level.
+// Witness columns of the p2 chip.
+const (
+	p2S = "s" // lanes
+	p2R = "r" // lanes
+)
+
+// numPerms is the number of rows of the P2 core: one per sponge block and
+// one per Merkle level, and for a dynamic path an upper bound, H + G (its rows
+// before its first leaf do not hash; the unused rows permute zero, and no
+// lookup reads them).
 func (m *Machine) numPerms() int {
 	n := 0
 	for _, s := range m.sponges {
@@ -33,13 +42,16 @@ func (m *Machine) numPerms() int {
 	for _, p := range m.paths {
 		n += len(p.steps)
 	}
+	for _, d := range m.dpaths {
+		n += d.p.Siblings.Len() + d.p.Order.Len()
+	}
 	return n
 }
 
 func p2Ins() []string {
 	res := make([]string, width)
 	for i := range res {
-		res[i] = fmt.Sprintf("%s.s%d", p2Mod, i)
+		res[i] = p2Mod + "." + laneName(p2S, i)
 	}
 	return res
 }
@@ -47,7 +59,7 @@ func p2Ins() []string {
 func p2Outs() []string {
 	res := make([]string, width)
 	for i := range res {
-		res[i] = fmt.Sprintf("%s.r%d", p2Mod, i)
+		res[i] = p2Mod + "." + laneName(p2R, i)
 	}
 	return res
 }
@@ -71,11 +83,14 @@ func (c p2Chip) setup(*cols) {}
 // trace fills the permutations recorded by the sponge and Merkle traces, then
 // the AIR's round columns.
 func (c p2Chip) trace(cs *cols, r *Run) error {
-	if len(r.p2) != c.rows() {
-		return fmt.Errorf("%d permutations recorded, want %d", len(r.p2), c.rows())
+	if len(r.p2) > c.rows() {
+		return fmt.Errorf("%d permutations recorded, at most %d", len(r.p2), c.rows())
 	}
-	cs.declareLanes("s", width)
-	cs.declareLanes("r", width)
+	for len(r.p2) < c.rows() {
+		r.p2 = append(r.p2, [width]koalabear.Element{})
+	}
+	cs.declareLanes(p2S, width)
+	cs.declareLanes(p2R, width)
 	perm := newPerm()
 	for row, in := range r.p2 {
 		out := in
@@ -83,8 +98,8 @@ func (c p2Chip) trace(cs *cols, r *Run) error {
 			return err
 		}
 		for i := range width {
-			cs.setElem(fmt.Sprintf("s%d", i), row, in[i])
-			cs.setElem(fmt.Sprintf("r%d", i), row, out[i])
+			cs.setElem(laneName(p2S, i), row, in[i])
+			cs.setElem(laneName(p2R, i), row, out[i])
 		}
 	}
 	// The AIR fills its columns from a trace: run it on these columns and
@@ -105,10 +120,10 @@ func (c p2Chip) trace(cs *cols, r *Run) error {
 func p2Table(nOut int) board.Table {
 	t := board.NewTable(p2Mod, width+nOut)
 	for i := range width {
-		t.In[i] = col(p2Mod, fmt.Sprintf("s%d", i))
+		t.In[i] = col(p2Mod, laneName(p2S, i))
 	}
 	for i := range nOut {
-		t.In[width+i] = col(p2Mod, fmt.Sprintf("r%d", i))
+		t.In[width+i] = col(p2Mod, laneName(p2R, i))
 	}
 	return t
 }

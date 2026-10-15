@@ -22,6 +22,33 @@ import (
 	"github.com/consensys/loom/expr"
 )
 
+// Setup columns of the merkle chip.
+const (
+	merkleFirst    = "first"
+	merkleLast     = "last"
+	merkleActive   = "active"
+	merkleInj      = "inj"
+	merkleLvl0     = "lvl0"
+	merkleLeafAddr = "leaf_addr"
+	merkleIdxAddr  = "idx_addr"
+	merkleSibAddr  = "sib_addr"
+	merkleRootAddr = "root_addr"
+	merkleG        = "g"
+	merkleXbAddr   = "xb_addr"
+	merkleXbMult   = "xb_mult"
+)
+
+// Witness columns of the merkle chip.
+const (
+	merkleB   = "b"
+	merkleIdx = "idx"
+	merkleX   = "x"
+	merkleB0  = "b0"
+	merkleCur = "cur" // lanes
+	merkleS   = "s"   // lanes
+	merkleOut = "out" // lanes
+)
+
 type pathInst struct {
 	leaf, index, root int
 	siblings          []int // one per level, leaf level first
@@ -176,32 +203,32 @@ func (c merkleChip) rows() int {
 
 func (c merkleChip) define(b *board.Builder, bus *Bus) error {
 	mm := b.Modules[merkleMod]
-	first, last, active := setupCol(merkleMod, "first"), setupCol(merkleMod, "last"), setupCol(merkleMod, "active")
-	inj, lvl0 := setupCol(merkleMod, "inj"), setupCol(merkleMod, "lvl0")
-	bit, idx := col(merkleMod, "b"), col(merkleMod, "idx")
+	first, last, active := setupCol(merkleMod, merkleFirst), setupCol(merkleMod, merkleLast), setupCol(merkleMod, merkleActive)
+	inj, lvl0 := setupCol(merkleMod, merkleInj), setupCol(merkleMod, merkleLvl0)
+	bit, idx := col(merkleMod, merkleB), col(merkleMod, merkleIdx)
 	mm.AssertZero(bit.Mul(bit.Sub(one())))
 	mm.AssertZero(inj.Mul(bit))
 	// (active − last) is 1 on every path row but the last, 0 elsewhere, so the
 	// recurrence never reads across a path end or the wrap-around.
-	mm.AssertZero(idx.Sub(bit).Sub(active.Sub(last).Mul(constE(2).Sub(inj)).Mul(colShift(merkleMod, "idx", 1))))
+	mm.AssertZero(idx.Sub(bit).Sub(active.Sub(last).Mul(constE(2).Sub(inj)).Mul(colShift(merkleMod, merkleIdx, 1))))
 	for i := range digest {
-		cur, prev := col(merkleMod, fmt.Sprintf("cur%d", i)), colShift(merkleMod, fmt.Sprintf("out%d", i), -1)
+		cur, prev := col(merkleMod, laneName(merkleCur, i)), colShift(merkleMod, laneName(merkleOut, i), -1)
 		mm.AssertZero(one().Sub(first).Mul(cur.Sub(prev)))
 	}
 	// x⁻¹ = Π_lvl (b_lvl ? g_lvl : 1), with g_lvl = gInv^(2^(depth−1−lvl)).
-	x, b0 := col(merkleMod, "x"), col(merkleMod, "b0")
-	factor := one().Add(bit.Mul(setupCol(merkleMod, "g").Sub(one())))
+	x, b0 := col(merkleMod, merkleX), col(merkleMod, merkleB0)
+	factor := one().Add(bit.Mul(setupCol(merkleMod, merkleG).Sub(one())))
 	notFirst := active.Sub(first)
 	mm.AssertZero(first.Mul(x.Sub(factor)))
-	mm.AssertZero(notFirst.Mul(x.Sub(colShift(merkleMod, "x", -1).Mul(factor))))
+	mm.AssertZero(notFirst.Mul(x.Sub(colShift(merkleMod, merkleX, -1).Mul(factor))))
 	mm.AssertZero(lvl0.Mul(b0.Sub(bit)))
-	mm.AssertZero(notFirst.Mul(one().Sub(lvl0)).Mul(b0.Sub(colShift(merkleMod, "b0", -1))))
+	mm.AssertZero(notFirst.Mul(one().Sub(lvl0)).Mul(b0.Sub(colShift(merkleMod, merkleB0, -1))))
 
-	bus.Read(merkleMod, setupCol(merkleMod, "leaf_addr"), cellCols(merkleMod, "cur", 0), first)
-	bus.Read(merkleMod, setupCol(merkleMod, "idx_addr"), cellOf(idx), first)
-	bus.Read(merkleMod, setupCol(merkleMod, "sib_addr"), cellCols(merkleMod, "s", 0), active)
-	bus.Read(merkleMod, setupCol(merkleMod, "root_addr"), cellCols(merkleMod, "out", 0), last)
-	bus.Write(merkleMod, setupCol(merkleMod, "xb_addr"), cellOf(x, b0), setupCol(merkleMod, "xb_mult"))
+	bus.Read(merkleMod, setupCol(merkleMod, merkleLeafAddr), cellCols(merkleMod, merkleCur, 0), first)
+	bus.Read(merkleMod, setupCol(merkleMod, merkleIdxAddr), cellOf(idx), first)
+	bus.Read(merkleMod, setupCol(merkleMod, merkleSibAddr), cellCols(merkleMod, merkleS, 0), active)
+	bus.Read(merkleMod, setupCol(merkleMod, merkleRootAddr), cellCols(merkleMod, merkleOut, 0), last)
+	bus.Write(merkleMod, setupCol(merkleMod, merkleXbAddr), cellOf(x, b0), setupCol(merkleMod, merkleXbMult))
 
 	src := board.NewTable(merkleMod, width+digest)
 	src.In[0] = constE(nodeTag)
@@ -209,44 +236,44 @@ func (c merkleChip) define(b *board.Builder, bus *Bus) error {
 		src.In[i] = expr.Const(koalabear.Element{})
 	}
 	for i := range digest {
-		cur, sib := col(merkleMod, fmt.Sprintf("cur%d", i)), col(merkleMod, fmt.Sprintf("s%d", i))
+		cur, sib := col(merkleMod, laneName(merkleCur, i)), col(merkleMod, laneName(merkleS, i))
 		src.In[digest+i] = cur.Add(bit.Mul(sib.Sub(cur)))
 		src.In[2*digest+i] = sib.Add(bit.Mul(cur.Sub(sib)))
-		src.In[width+i] = col(merkleMod, fmt.Sprintf("out%d", i))
+		src.In[width+i] = col(merkleMod, laneName(merkleOut, i))
 	}
 	return arguments.CLookupTuple(b, src, p2Table(digest), active, one())
 }
 
 func (c merkleChip) setup(cs *cols) {
-	cs.declare("first", "last", "active", "inj", "lvl0", "leaf_addr", "idx_addr", "sib_addr", "root_addr", "g", "xb_addr", "xb_mult")
+	cs.declare(merkleFirst, merkleLast, merkleActive, merkleInj, merkleLvl0, merkleLeafAddr, merkleIdxAddr, merkleSibAddr, merkleRootAddr, merkleG, merkleXbAddr, merkleXbMult)
 	row := 0
 	for _, p := range c.m.paths {
 		for k, st := range p.steps {
-			cs.set("active", row, 1)
-			cs.set("sib_addr", row, uint64(st.sib))
+			cs.set(merkleActive, row, 1)
+			cs.set(merkleSibAddr, row, uint64(st.sib))
 			if k == 0 {
-				cs.set("first", row, 1)
-				cs.set("leaf_addr", row, uint64(p.leaf))
-				cs.set("idx_addr", row, uint64(p.index))
+				cs.set(merkleFirst, row, 1)
+				cs.set(merkleLeafAddr, row, uint64(p.leaf))
+				cs.set(merkleIdxAddr, row, uint64(p.index))
 			}
 			g := koalabear.One()
 			if st.inj {
-				cs.set("inj", row, 1)
+				cs.set(merkleInj, row, 1)
 			} else {
 				if st.lvl == 0 {
-					cs.set("lvl0", row, 1)
+					cs.set(merkleLvl0, row, 1)
 				}
 				if p.gens != nil {
 					g = p.gens[st.lvl]
 				}
 			}
-			cs.setElem("g", row, g)
+			cs.setElem(merkleG, row, g)
 			if k == len(p.steps)-1 {
-				cs.set("last", row, 1)
-				cs.set("root_addr", row, uint64(p.root))
+				cs.set(merkleLast, row, 1)
+				cs.set(merkleRootAddr, row, uint64(p.root))
 				if p.gens != nil {
-					cs.set("xb_addr", row, uint64(p.xb))
-					cs.set("xb_mult", row, uint64(c.m.reads[p.xb]))
+					cs.set(merkleXbAddr, row, uint64(p.xb))
+					cs.set(merkleXbMult, row, uint64(c.m.reads[p.xb]))
 				}
 			}
 			row++
@@ -256,10 +283,10 @@ func (c merkleChip) setup(cs *cols) {
 
 // trace fills the steps, and records the compressions for the P2 core.
 func (c merkleChip) trace(cs *cols, r *Run) error {
-	cs.declare("b", "idx", "x", "b0")
-	cs.declareLanes("cur", digest)
-	cs.declareLanes("s", digest)
-	cs.declareLanes("out", digest)
+	cs.declare(merkleB, merkleIdx, merkleX, merkleB0)
+	cs.declareLanes(merkleCur, digest)
+	cs.declareLanes(merkleS, digest)
+	cs.declareLanes(merkleOut, digest)
 	perm := newPerm()
 	row := 0
 	var prevOut Cell
@@ -275,9 +302,9 @@ func (c merkleChip) trace(cs *cols, r *Run) error {
 			if st.inj {
 				bitV = 0
 			}
-			cs.set("b", row, bitV)
-			cs.set("idx", row, index)
-			cs.set("b0", row, b0)
+			cs.set(merkleB, row, bitV)
+			cs.set(merkleIdx, row, index)
+			cs.set(merkleB0, row, b0)
 			if bitV == 1 {
 				g := koalabear.One()
 				if p.gens != nil {
@@ -285,7 +312,7 @@ func (c merkleChip) trace(cs *cols, r *Run) error {
 				}
 				x.Mul(&x, &g)
 			}
-			cs.setElem("x", row, x)
+			cs.setElem(merkleX, row, x)
 			var in [width]koalabear.Element
 			in[0].SetUint64(nodeTag)
 			left, right := cur, sib
@@ -300,9 +327,9 @@ func (c merkleChip) trace(cs *cols, r *Run) error {
 				return err
 			}
 			for i := range digest {
-				cs.setElem(fmt.Sprintf("cur%d", i), row, cur[i])
-				cs.setElem(fmt.Sprintf("s%d", i), row, sib[i])
-				cs.setElem(fmt.Sprintf("out%d", i), row, out[i])
+				cs.setElem(laneName(merkleCur, i), row, cur[i])
+				cs.setElem(laneName(merkleS, i), row, sib[i])
+				cs.setElem(laneName(merkleOut, i), row, out[i])
 			}
 			copy(prevOut[:], out[:digest])
 			copy(cur[:], out[:digest])
@@ -315,7 +342,7 @@ func (c merkleChip) trace(cs *cols, r *Run) error {
 	// Padding rows keep cur = out[−1] (their outputs stay zero).
 	for ; row < cs.n; row++ {
 		for i := range digest {
-			cs.setElem(fmt.Sprintf("cur%d", i), row, prevOut[i])
+			cs.setElem(laneName(merkleCur, i), row, prevOut[i])
 		}
 		prevOut = Cell{}
 	}

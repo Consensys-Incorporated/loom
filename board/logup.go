@@ -33,7 +33,7 @@ type LogupTerm struct {
 
 // MaxLogupDegree bounds the degree of the constraint of a batched logup
 // column, see LogupConstraintDegree.
-const MaxLogupDegree = 4
+const MaxLogupDegree = 5
 
 // LogupConstraintDegree returns the degree of the constraint of a cyclic logup
 // column batching terms:

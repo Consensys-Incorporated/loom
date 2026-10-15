@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/consensys/gnark-crypto/field/koalabear"
+	ext "github.com/consensys/gnark-crypto/field/koalabear/extensions"
 	"github.com/consensys/loom"
 	"github.com/consensys/loom/arguments"
 	"github.com/consensys/loom/board"
@@ -116,7 +117,7 @@ func vmProofs(t *testing.T, seeds ...uint64) []innerProof {
 // challenge it computed with loom's verifier's.
 func checkChallenges(t *testing.T, v *Verifier, p *Program, ip innerProof) *Run {
 	t.Helper()
-	in, err := v.Inputs(ip.prf, ip.pi)
+	in, err := v.Inputs(ip.prf, ip.pi, SizesOf(ip.program))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,11 +142,28 @@ func checkChallenges(t *testing.T, v *Verifier, p *Program, ip innerProof) *Run 
 			}
 		}
 	}
-	// The query rows, as FRI recorded them.
+	// The DEEP quotients at every query, as the FRI levels open them.
+	fp := ip.prf.Opening.FRIProof
+	for k := range v.DEEP {
+		for c, dq := range v.DEEP[k] {
+			lvl := v.fri.levelOf[c]
+			layer := fp.FRIQueries[k].Layers[0]
+			if lvl > 0 {
+				layer = fp.LevelQueries[lvl-1][k]
+			}
+			for side, want := range []ext.E6{layer.LeafPExt, layer.LeafQExt} {
+				if got := CellE6(r.Value(dq[side])); !got.Equal(&want) {
+					t.Fatalf("query %d, class %d (level %d), side %d: DQ = %s, want %s", k, c, lvl, side, got.String(), want.String())
+				}
+			}
+		}
+	}
+	// The query rows, as FRI recorded them: the full-domain row s, whose
+	// first recorded layer is round first, at row s >> first.
 	for k, q := range v.Queries {
-		got := r.Value(q.Shr[0])
+		got := r.Value(q.Shr[v.fri.first])
 		if want := ip.prf.Opening.FRIProof.FRIQueries[k].Layers[0].Row; got[0].Uint64() != uint64(want) {
-			t.Fatalf("query %d: row %d, want %d", k, got[0].Uint64(), want)
+			t.Fatalf("query %d: row %d at round %d, want %d", k, got[0].Uint64(), v.fri.first, want)
 		}
 	}
 	return r
@@ -187,6 +205,126 @@ func TestVerifierTranscript(t *testing.T) {
 			checkChallenges(t, v, p, ip2)
 			t.Logf("%d rounds, %d challenges, %d FRI levels, %d FRI rounds, %d queries, %d inputs",
 				len(ip.program.Rounds), len(v.Challenges), v.fri.numLevels, v.fri.numRounds, len(v.Queries), p.NumInputs())
+		})
+	}
+}
+
+// TestVerifierOpenings: the circuit accepts the commitment openings of real
+// proofs (TestVerifierTranscript proves them), and rejects tampered ones.
+func TestVerifierOpenings(t *testing.T) {
+	// The trace round 0 tree of the Fibonacci program has two groups: range
+	// (N = 8, the leaves) and fibonacci (N = 4, an injection).
+	const tree = 0
+	cases := map[string]func(prf *proof.Proof){
+		"top row value": func(prf *proof.Proof) {
+			v := &prf.Opening.PointSamplings[3][tree].TopRows.Lo.RawRowBase[0]
+			v.SetUint64(v.Uint64() + 1)
+		},
+		"injected row value": func(prf *proof.Proof) {
+			v := &prf.Opening.PointSamplings[5][tree].Injections[0].Rows.Hi.RawRowBase[0]
+			v.SetUint64(v.Uint64() + 1)
+		},
+		"sibling": func(prf *proof.Proof) {
+			prf.Opening.PointSamplings[7][tree].Path.Siblings[1][2].SetUint64(9)
+		},
+		// a valid opening, at another query's position: query 0's and that of
+		// the first query opening another leaf (two queries may open the same
+		// pair of rows, whose openings are then equal)
+		"other position": func(prf *proof.Proof) {
+			ps := prf.Opening.PointSamplings
+			for k := 1; k < len(ps); k++ {
+				if ps[k][tree].Path.LeafIdx != ps[0][tree].Path.LeafIdx {
+					ps[0][tree], ps[k][tree] = ps[k][tree], ps[0][tree]
+					return
+				}
+			}
+			panic("every query opens the same leaf")
+		},
+	}
+	for name, tamper := range cases {
+		t.Run(name, func(t *testing.T) {
+			ip := fiboProofs(t, [2]uint64{0, 1})[0]
+			if got := len(ip.prf.Opening.PointSamplings[0][tree].Injections); got != 1 {
+				t.Fatalf("tree %d has %d injected groups, want 1", tree, got)
+			}
+			v, err := NewVerifier(ip.program, ip.vk, ShapeOf(ip.prf, ip.pi))
+			if err != nil {
+				t.Fatal(err)
+			}
+			p, err := v.M.Compile()
+			if err != nil {
+				t.Fatal(err)
+			}
+			tamper(&ip.prf)
+			in, err := v.Inputs(ip.prf, ip.pi, SizesOf(ip.program))
+			if err != nil {
+				t.Fatal(err)
+			}
+			r, err := p.Execute(in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := prove(t, p, r); err == nil {
+				t.Fatal("tampered opening accepted")
+			}
+		})
+	}
+}
+
+// TestVerifierFRI: the circuit rejects tampered FRI openings, final
+// polynomials and claimed values (the DEEP quotients are now authenticated in
+// the levels tree).
+func TestVerifierFRI(t *testing.T) {
+	cases := map[string]func(prf *proof.Proof){
+		"layer value": func(prf *proof.Proof) {
+			v := &prf.Opening.FRIProof.FRIQueries[2].Layers[1].LeafPExt
+			v.B0.A0.SetUint64(v.B0.A0.Uint64() + 1)
+		},
+		"layer sibling": func(prf *proof.Proof) {
+			prf.Opening.FRIProof.FRIQueries[4].Layers[1].Path.Siblings[0][3].SetUint64(9)
+		},
+		"levels tree sibling": func(prf *proof.Proof) {
+			prf.Opening.FRIProof.FRIQueries[6].Layers[0].Path.Siblings[1][0].SetUint64(9)
+		},
+		"final polynomial": func(prf *proof.Proof) {
+			v := &prf.Opening.FRIProof.FinalPolyExt[1]
+			v.B1.A1.SetUint64(v.B1.A1.Uint64() + 1)
+		},
+		// the first base claimed value of the first trace round tree
+		"claimed value": func(prf *proof.Proof) {
+			for _, g := range prf.Opening.ClaimedValues[0] {
+				if len(g.Base) > 0 {
+					v := &g.Base[0][0]
+					v.B0.A0.SetUint64(v.B0.A0.Uint64() + 1)
+					return
+				}
+			}
+			panic("no base claimed value")
+		},
+	}
+	for name, tamper := range cases {
+		t.Run(name, func(t *testing.T) {
+			ip := fiboProofs(t, [2]uint64{0, 1})[0]
+			v, err := NewVerifier(ip.program, ip.vk, ShapeOf(ip.prf, ip.pi))
+			if err != nil {
+				t.Fatal(err)
+			}
+			p, err := v.M.Compile()
+			if err != nil {
+				t.Fatal(err)
+			}
+			tamper(&ip.prf)
+			in, err := v.Inputs(ip.prf, ip.pi, SizesOf(ip.program))
+			if err != nil {
+				t.Fatal(err)
+			}
+			r, err := p.Execute(in)
+			if err != nil {
+				return // e.g. an index out of a table: the tamper is caught at execution
+			}
+			if err := prove(t, p, r); err == nil {
+				t.Fatal("tampered proof accepted")
+			}
 		})
 	}
 }
