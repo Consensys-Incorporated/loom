@@ -14,51 +14,77 @@ import (
 	"github.com/consensys/loom/public"
 )
 
-// bridgeMachine models the E6 work of the DEEP bridge: for each query and
-// each shift, one Horner accumulation of the opened base values with
-// alpha_DEEP, a subtraction and a division; then the fold chain of the query.
-//
-// useBase picks the Horner chip (base coefficients) over the e6 chip's
-// generic Horner. Both variants allocate the same number of input cells, so
-// the witness chip is identical and only the accumulation differs.
-func bridgeMachine(nQueries, nPolys, nShifts int, useBase bool) *builder {
-	r := rand.New(rand.NewPCG(11, 12))
-	b := &builder{}
-	e6 := func() int { return b.input(E6Cell(randE6(r))) }
+// lanesE6 asks for the e6 chip's generic Horner instead of the Horner chip.
+const lanesE6 = 0
 
+// randCoeffs returns n random base coefficients.
+func randCoeffs(r *rand.Rand, n int) []koalabear.Element {
+	res := make([]koalabear.Element, n)
+	for i := range res {
+		res[i].SetUint64(r.Uint64())
+	}
+	return res
+}
+
+// hornerChain records one accumulation of n base coefficients with y, either
+// on the e6 chip (lanes == lanesE6, one E6 input cell per coefficient, as
+// Machine.Horner needs) or on the Horner chip at the given lane count (the
+// coefficients packed lanes per cell, as they arrive from an opened leaf row).
+func hornerChain(b *builder, r *rand.Rand, y, n, lanes int) int {
+	coeffs := randCoeffs(r, n)
+	if lanes == lanesE6 {
+		addrs := make([]int, n)
+		for i, c := range coeffs {
+			var e ext.E6
+			e.B0.A0 = c
+			addrs[i] = b.input(E6Cell(e))
+		}
+		return b.Horner(y, addrs)
+	}
+	return b.HornerPacked(y, packCoeffs(b, coeffs, lanes))
+}
+
+func newBuilder(lanes int) *builder {
+	b := &builder{}
+	if lanes != lanesE6 {
+		b.HornerLanes = lanes
+	}
+	return b
+}
+
+// bridgeMachine models the E6 work of the DEEP bridge: per query and shift,
+// one accumulation of the opened base values with alpha_DEEP, a subtraction
+// and a division.
+func bridgeMachine(nQueries, nPolys, nShifts, lanes int) *builder {
+	r := rand.New(rand.NewPCG(11, 12))
+	b := newBuilder(lanes)
+	e6 := func() int { return b.input(E6Cell(randE6(r))) }
 	alpha := e6()
 	for range nQueries {
 		var terms []int
 		for range nShifts {
-			coeffs := make([]int, nPolys)
-			for i := range coeffs {
-				if useBase {
-					var c koalabear.Element
-					c.SetUint64(r.Uint64())
-					coeffs[i] = b.input(ScalarCell(c))
-				} else {
-					// the same opened base value, lifted into an E6 cell
-					var e ext.E6
-					e.B0.A0.SetUint64(r.Uint64())
-					coeffs[i] = b.input(E6Cell(e))
-				}
-			}
-			var num int
-			if useBase {
-				num = b.HornerBase(alpha, coeffs)
-			} else {
-				num = b.Horner(alpha, coeffs)
-			}
+			num := hornerChain(b, r, alpha, nPolys, lanes)
 			terms = append(terms, b.Div(b.Sub(num, e6()), e6()))
 		}
 		acc := terms[0]
 		for _, x := range terms[1:] {
 			acc = b.Add(acc, x)
 		}
-		// The fold chain is identical in both variants and needs a consistent
-		// witness, so it is left out of the comparison; _ = acc keeps the
-		// accumulated DEEP term read.
+		// The fold chain is identical in every variant and needs a consistent
+		// witness, so it is left out; this keeps the DEEP term read.
 		b.AssertEq(acc, acc)
+	}
+	return b
+}
+
+// hornerOnlyMachine builds nChains accumulations of coeffs coefficients and
+// nothing else.
+func hornerOnlyMachine(nChains, coeffs, lanes int) *builder {
+	r := rand.New(rand.NewPCG(21, 22))
+	b := newBuilder(lanes)
+	alpha := b.input(E6Cell(randE6(r)))
+	for range nChains {
+		hornerChain(b, r, alpha, coeffs, lanes)
 	}
 	return b
 }
@@ -84,7 +110,7 @@ func nextPow2(n int) int {
 	return p
 }
 
-func costsOf(p *Program, r *Run) []chipCost {
+func costsOf(p *Program) []chipCost {
 	var res []chipCost
 	for mod, m := range p.Loom.Modules {
 		c := chipCost{module: mod, n: m.N}
@@ -97,11 +123,11 @@ func costsOf(p *Program, r *Run) []chipCost {
 			}
 		}
 		for _, round := range p.Loom.Rounds {
-			for _, col := range round.Staged {
-				if col.Module != mod {
+			for _, colRef := range round.Staged {
+				if colRef.Module != mod {
 					continue
 				}
-				if col.Field == loomfield.Ext {
+				if colRef.Field == loomfield.Ext {
 					c.extW++
 				} else {
 					c.baseW++
@@ -153,89 +179,82 @@ func proveTime(t *testing.T, p *Program, r *Run, n int) time.Duration {
 	return best
 }
 
-// TestHornerBaseSaving compares the two variants on the same workload.
-func TestHornerBaseSaving(t *testing.T) {
+func laneLabel(lanes int) string {
+	if lanes == lanesE6 {
+		return "e6 Horner (baseline)"
+	}
+	return fmt.Sprintf("horner chip, %d lane(s)/row", lanes)
+}
+
+var laneSweep = []int{lanesE6, 1, 2, 4, 8}
+
+// TestHornerSweepIsolated reports the accumulation chip's own cost at every
+// lane count, with 8192 coefficients spread over 64 chains.
+func TestHornerSweepIsolated(t *testing.T) {
+	const (
+		nChains = 64
+		coeffs  = 128
+		reps    = 3
+	)
+	type row struct {
+		lanes, acc, total int
+		rows              int
+		wall              time.Duration
+	}
+	var out []row
+	for _, lanes := range laneSweep {
+		p, r := hornerOnlyMachine(nChains, coeffs, lanes).run(t)
+		cs := costsOf(p)
+		total := reportCosts(laneLabel(lanes), cs)
+		rec := row{lanes: lanes, total: total}
+		mod := hornerMod
+		if lanes == lanesE6 {
+			mod = e6Mod
+		}
+		for _, c := range cs {
+			if c.module == mod {
+				rec.acc, rec.rows = c.total(), c.n
+			}
+		}
+		rec.wall = proveTime(t, p, r, reps)
+		fmt.Printf("prove+verify (best of %d): %v\n", reps, rec.wall)
+		out = append(out, rec)
+	}
+	fmt.Printf("\n=== %d coefficients, accumulation chip + witness chip\n", nChains*coeffs)
+	fmt.Printf("%-30s %7s %10s %10s %10s %9s\n", "variant", "rows", "chip cost", "per coeff", "total", "wall")
+	for _, x := range out {
+		fmt.Printf("%-30s %7d %10d %10.1f %10d %9v  (%+.1f%% total)\n",
+			laneLabel(x.lanes), x.rows, x.acc, float64(x.acc)/float64(nChains*coeffs), x.total, x.wall.Round(time.Millisecond),
+			100*float64(x.total-out[0].total)/float64(out[0].total))
+	}
+}
+
+// TestHornerSweepBridge reports the same sweep on the DEEP-bridge workload.
+func TestHornerSweepBridge(t *testing.T) {
 	const (
 		nQueries = 32
 		nPolys   = 72
 		nShifts  = 2
 		reps     = 3
 	)
-	var cost [2]int
-	var wall [2]time.Duration
-	for i, useBase := range []bool{false, true} {
-		b := bridgeMachine(nQueries, nPolys, nShifts, useBase)
-		p, r := b.run(t)
-		label := "e6 Horner (baseline)"
-		if useBase {
-			label = "HornerBase chip"
-		}
-		cost[i] = reportCosts(label, costsOf(p, r))
-		wall[i] = proveTime(t, p, r, reps)
-		fmt.Printf("prove+verify (best of %d): %v\n", reps, wall[i])
+	type row struct {
+		lanes, total int
+		wall         time.Duration
 	}
-	fmt.Printf("\n=== cost  %d -> %d  (%.1f%%)\n", cost[0], cost[1],
-		100*float64(cost[1]-cost[0])/float64(cost[0]))
-	fmt.Printf("=== wall  %v -> %v  (%.1f%%)\n", wall[0], wall[1],
-		100*float64(wall[1]-wall[0])/float64(wall[0]))
-}
-
-// hornerOnlyMachine builds nChains Horner chains of length coeffs and nothing
-// else, so the accumulation chip is the only difference between variants.
-func hornerOnlyMachine(nChains, coeffs int, useBase bool) *builder {
-	r := rand.New(rand.NewPCG(21, 22))
-	b := &builder{}
-	alpha := b.input(E6Cell(randE6(r)))
-	for range nChains {
-		addrs := make([]int, coeffs)
-		for i := range addrs {
-			var c koalabear.Element
-			c.SetUint64(r.Uint64())
-			if useBase {
-				addrs[i] = b.input(ScalarCell(c))
-			} else {
-				var e ext.E6
-				e.B0.A0 = c
-				addrs[i] = b.input(E6Cell(e))
-			}
-		}
-		if useBase {
-			b.HornerBase(alpha, addrs)
-		} else {
-			b.Horner(alpha, addrs)
-		}
+	var out []row
+	for _, lanes := range laneSweep {
+		p, r := bridgeMachine(nQueries, nPolys, nShifts, lanes).run(t)
+		total := reportCosts(laneLabel(lanes), costsOf(p))
+		wall := proveTime(t, p, r, reps)
+		fmt.Printf("prove+verify (best of %d): %v\n", reps, wall)
+		out = append(out, row{lanes, total, wall})
 	}
-	return b
-}
-
-// TestHornerBaseIsolated reports the accumulation chip's own cost, with the
-// chains sized to fill the module exactly (no padding on either side).
-func TestHornerBaseIsolated(t *testing.T) {
-	const (
-		nChains = 64
-		coeffs  = 128 // 64*128 = 8192 rows exactly
-		reps    = 3
-	)
-	var acc [2]int
-	var wall [2]time.Duration
-	for i, useBase := range []bool{false, true} {
-		p, r := hornerOnlyMachine(nChains, coeffs, useBase).run(t)
-		label, mod := "e6 Horner (baseline)", e6Mod
-		if useBase {
-			label, mod = "HornerBase chip", hornerMod
-		}
-		cs := costsOf(p, r)
-		reportCosts(label, cs)
-		for _, c := range cs {
-			if c.module == mod {
-				acc[i] = c.total()
-			}
-		}
-		wall[i] = proveTime(t, p, r, reps)
-		fmt.Printf("prove+verify (best of %d): %v\n", reps, wall[i])
+	fmt.Printf("\n=== DEEP bridge: %d queries x %d polys x %d shifts\n", nQueries, nPolys, nShifts)
+	fmt.Printf("%-30s %10s %9s %9s %8s\n", "variant", "total", "vs base", "wall", "vs base")
+	for _, x := range out {
+		fmt.Printf("%-30s %10d %8.1f%% %9v %7.1f%%\n", laneLabel(x.lanes), x.total,
+			100*float64(x.total-out[0].total)/float64(out[0].total),
+			x.wall.Round(time.Millisecond),
+			100*float64(x.wall-out[0].wall)/float64(out[0].wall))
 	}
-	fmt.Printf("\n=== accumulation chip  %d -> %d  (%.1f%%)\n", acc[0], acc[1],
-		100*float64(acc[1]-acc[0])/float64(acc[0]))
-	fmt.Printf("=== wall (incl. unchanged witness chip)  %v -> %v  (%.1f%%)\n", wall[0], wall[1],
-		100*float64(wall[1]-wall[0])/float64(wall[0]))
 }
