@@ -46,6 +46,7 @@ const (
 	tableMod   = "table"
 	lookupMod  = "lookup"
 	p2Mod      = "p2"
+	sumMod     = "sum"
 )
 
 // Cell is the value of a memory cell.
@@ -66,6 +67,10 @@ type Machine struct {
 	constList []int        // addresses written by the const chip
 	constVal  map[int]Cell // value of every constant
 
+	// SumLanes is the number of terms one Sum row adds; 0 means
+	// DefaultSumLanes. Set it before recording any instruction.
+	SumLanes int
+
 	instrs  []instr // every instruction, in execution order
 	packs   []packInst
 	lanes   []lanesInst
@@ -76,6 +81,7 @@ type Machine struct {
 	windows []windowInst
 	bits    []bitsInst
 	e6Insts []e6Inst
+	sums    []sumInst
 	deeps   []deepInst
 	folds   [][]foldRow
 	tables  []tableInst
@@ -98,6 +104,7 @@ const (
 	instrBits
 	instrE6
 	instrDeep
+	instrSum
 	instrTable
 	instrLookup
 )
@@ -201,7 +208,7 @@ type chip interface {
 
 func (m *Machine) chips() []chip {
 	return []chip{witnessChip{m}, constChip{m}, spongeChip{m}, merkleChip{m}, dpathChip{m}, selectChip{m},
-		windowChip{m}, bitsChip{m}, e6Chip{m}, deepChip{m}, foldChip{m}, tableChip{m}, lookupChip{m}, p2Chip{m}}
+		windowChip{m}, bitsChip{m}, e6Chip{m}, sumChip{m}, deepChip{m}, foldChip{m}, tableChip{m}, lookupChip{m}, p2Chip{m}}
 }
 
 type chipHeight struct {
@@ -299,6 +306,8 @@ func (m *Machine) exec(in instr, r *Run) error {
 		m.execBits(m.bits[in.idx], r)
 	case instrE6:
 		return m.execE6(m.e6Insts[in.idx], r)
+	case instrSum:
+		m.execSum(m.sums[in.idx], r)
 	case instrDeep:
 		m.execDeep(m.deeps[in.idx], r)
 	case instrTable:
