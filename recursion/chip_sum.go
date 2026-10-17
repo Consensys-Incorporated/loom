@@ -25,8 +25,6 @@ import (
 const (
 	sumActive = "active"
 	sumFirst  = "first"
-	sumLast   = "last"
-	sumSel    = "sel"   // sel<j>, lane j carries a term
 	sumAddrX  = "addr_" // addr_<j>, the cell of lane j
 	sumAddrO  = "addr_o"
 	sumMO     = "m_o"
@@ -48,7 +46,7 @@ const DefaultSumLanes = 8
 const SumMinTerms = 4
 
 type sumInst struct {
-	terms []int
+	terms []int // the terms, padded with the zero constant to whole rows
 	out   int
 }
 
@@ -70,11 +68,19 @@ func (m *Machine) Sum(terms []int) int {
 	if len(terms) < 2 {
 		panic(fmt.Sprintf("Sum: %d terms, want at least 2", len(terms)))
 	}
-	for _, t := range terms {
+	k := m.sumLanes()
+	padded := append([]int(nil), terms...)
+	if rem := len(terms) % k; rem != 0 {
+		zero := m.Const(Cell{})
+		for range k - rem {
+			padded = append(padded, zero)
+		}
+	}
+	for _, t := range padded {
 		m.read(t)
 	}
 	out := m.alloc()
-	m.sums = append(m.sums, sumInst{terms: terms, out: out})
+	m.sums = append(m.sums, sumInst{terms: padded, out: out})
 	m.record(instrSum, len(m.sums)-1)
 	return out
 }
@@ -94,16 +100,19 @@ func sumRows(n, k int) int { return (n + k - 1) / k }
 // sumChip: one row per group of k = SumLanes terms of a Sum chain.
 //
 // Columns: o0..5 (the running total after this row) and x<j>_0..5 for j < k
-// (the terms). Setup: first, last, active, sel<j> (lane j carries a term),
-// addr_<j> (its cell), addr_o and m_o (the result, written on the last row).
+// (the terms). Setup: first, active, addr_<j> (the cell of lane j), addr_o and
+// m_o (the result, written on the last row).
 //
-//	o = Σ_j sel_j·x_j             on the first row of a chain
-//	o = o[−1] + Σ_j sel_j·x_j     on the others
+//	o = (active − first)·o[−1] + Σ_j x_j
 //
-// A lane with sel_j = 0 reads nothing and contributes nothing, so the last
-// row of a chain may be partly empty. The running total is not written to
-// memory between rows: only the last row writes, which is what keeps the
-// memory traffic at one access per term plus one.
+// that is o = Σ_j x_j on the first row of a chain, o = o[−1] + Σ_j x_j on the
+// others (active − first is 0 on chain starts and on padding rows, so the
+// recurrence never reads across a chain start or the wrap-around). Every lane
+// of an active row reads its cell: the unused lanes of a chain's last row
+// read the zero constant, so they contribute nothing and no selector column
+// is needed. The running total is not written to memory between rows: only
+// the last row writes, which is what keeps the memory traffic at one access
+// per term plus one.
 type sumChip struct{ m *Machine }
 
 func (c sumChip) name() string { return sumMod }
@@ -128,7 +137,6 @@ func sumXCols(j int) []expr.Expr {
 	return res
 }
 
-func sumSelName(j int) string  { return fmt.Sprintf("%s%d", sumSel, j) }
 func sumAddrName(j int) string { return fmt.Sprintf("%s%d", sumAddrX, j) }
 
 func (c sumChip) define(b *board.Builder, bus *Bus) error {
@@ -137,31 +145,26 @@ func (c sumChip) define(b *board.Builder, bus *Bus) error {
 	first, active := setupCol(sumMod, sumFirst), setupCol(sumMod, sumActive)
 	o := e6Cols(sumMod, sumO, 0)
 
-	// Σ_j sel_j·x_j, lane by lane.
+	// Σ_j x_j, lane by lane.
 	sum := make([]expr.Expr, 6)
 	for l := range sum {
 		sum[l] = zero()
 	}
 	for j := range k {
-		sel := setupCol(sumMod, sumSelName(j))
 		x := sumXCols(j)
 		for l := range 6 {
-			sum[l] = sum[l].Add(sel.Mul(x[l]))
+			sum[l] = sum[l].Add(x[l])
 		}
 	}
 
-	// (active − first) is 1 on every chain row but the first and 0 on padding,
-	// so the recurrence never reads across a chain start or the wrap-around.
 	notFirst := active.Sub(first)
 	prev := e6Cols(sumMod, sumO, -1)
 	for l := range 6 {
-		mm.AssertZero(first.Mul(o[l].Sub(sum[l])))
-		mm.AssertZero(notFirst.Mul(o[l].Sub(prev[l]).Sub(sum[l])))
+		mm.AssertZero(o[l].Sub(notFirst.Mul(prev[l])).Sub(sum[l]))
 	}
 
 	for j := range k {
-		bus.Read(sumMod, setupCol(sumMod, sumAddrName(j)), cellOf(sumXCols(j)...),
-			setupCol(sumMod, sumSelName(j)))
+		bus.Read(sumMod, setupCol(sumMod, sumAddrName(j)), cellOf(sumXCols(j)...), active)
 	}
 	bus.Write(sumMod, setupCol(sumMod, sumAddrO), cellOf(o...), setupCol(sumMod, sumMO))
 	return nil
@@ -169,9 +172,9 @@ func (c sumChip) define(b *board.Builder, bus *Bus) error {
 
 func (c sumChip) setup(cs *cols) {
 	k := c.m.sumLanes()
-	cs.declare(sumFirst, sumLast, sumActive, sumAddrO, sumMO)
+	cs.declare(sumFirst, sumActive, sumAddrO, sumMO)
 	for j := range k {
-		cs.declare(sumSelName(j), sumAddrName(j))
+		cs.declare(sumAddrName(j))
 	}
 	row := 0
 	for _, s := range c.m.sums {
@@ -182,13 +185,9 @@ func (c sumChip) setup(cs *cols) {
 				cs.set(sumFirst, row, 1)
 			}
 			for j := range k {
-				if t := i*k + j; t < len(s.terms) {
-					cs.set(sumSelName(j), row, 1)
-					cs.set(sumAddrName(j), row, uint64(s.terms[t]))
-				}
+				cs.set(sumAddrName(j), row, uint64(s.terms[i*k+j]))
 			}
 			if i == nRows-1 {
-				cs.set(sumLast, row, 1)
 				cs.set(sumAddrO, row, uint64(s.out))
 				cs.set(sumMO, row, uint64(c.m.reads[s.out]))
 			}
@@ -211,11 +210,7 @@ func (c sumChip) trace(cs *cols, r *Run) error {
 		nRows := sumRows(len(s.terms), k)
 		for i := range nRows {
 			for j := range k {
-				t := i*k + j
-				if t >= len(s.terms) {
-					continue
-				}
-				v := CellE6(r.values[s.terms[t]])
+				v := CellE6(r.values[s.terms[i*k+j]])
 				acc.Add(&acc, &v)
 				for l, e := range E6Cell(v) {
 					if l < 6 {
@@ -226,18 +221,9 @@ func (c sumChip) trace(cs *cols, r *Run) error {
 			cs.setE6(sumO, row, acc)
 			row++
 		}
-		if !E6Cell(acc).equalCell(r.values[s.out]) {
+		if E6Cell(acc) != r.values[s.out] {
 			return fmt.Errorf("sum to cell %d: traced value differs from the executed one", s.out)
 		}
 	}
 	return nil
-}
-
-func (c Cell) equalCell(o Cell) bool {
-	for i := range c {
-		if !c[i].Equal(&o[i]) {
-			return false
-		}
-	}
-	return true
 }

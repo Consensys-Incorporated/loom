@@ -5,6 +5,7 @@ import (
 	"math/rand/v2"
 	"testing"
 
+	"github.com/consensys/gnark-crypto/field/koalabear"
 	ext "github.com/consensys/gnark-crypto/field/koalabear/extensions"
 	"github.com/consensys/loom/trace"
 )
@@ -97,21 +98,49 @@ func TestSumMatchesE6(t *testing.T) {
 	}
 }
 
-// TestSumPartialLastRow covers a chain whose last row is partly empty, where
-// the unused lanes must read nothing and contribute nothing.
+// TestSumPartialLastRow covers a chain whose last row is partly empty: the
+// unused lanes read the zero constant, so they contribute nothing, and a
+// prover cannot put a value there.
 func TestSumPartialLastRow(t *testing.T) {
-	// 9 terms at 8 lanes: the second row carries one term and 7 empty lanes.
+	// 9 terms at 8 lanes: the second row carries one term and 7 zero lanes.
 	b := sumMachine(8, 9)
 	p, r := b.run(t)
 	if got := (sumChip{&b.Machine}).rows(); got != 2 {
 		t.Fatalf("rows = %d, want 2", got)
 	}
+	var zero koalabear.Element
+	zero.SetUint64(uint64(b.Const(Cell{})))
 	for j := 1; j < 8; j++ {
-		if v := p.Setup.Base[fmt.Sprintf("sum.%s", sumSelName(j))][1]; !v.IsZero() {
-			t.Fatalf("lane %d of the partial row is selected", j)
+		if v := p.Setup.Base[fmt.Sprintf("sum.%s", sumAddrName(j))][1]; !v.Equal(&zero) {
+			t.Fatalf("lane %d of the partial row does not read the zero constant", j)
 		}
 	}
 	if err := prove(t, p, r); err != nil {
 		t.Fatalf("partial last row rejected: %v", err)
+	}
+
+	// a value on an unused lane, with the running total adjusted to it: the
+	// recurrence holds, and nothing reads the result, but the lane's read of
+	// the zero constant does not balance
+	unread := &builder{}
+	unread.SumLanes = 8
+	rnd := rand.New(rand.NewPCG(23, 29))
+	terms := make([]int, 9)
+	for i := range terms {
+		terms[i] = unread.input(E6Cell(randE6(rnd)))
+	}
+	unread.Sum(terms)
+	if err := compileAndProve(t, unread, nil); err != nil {
+		t.Fatalf("unread sum rejected: %v", err)
+	}
+	tamper := func(tr trace.Trace) {
+		tr.Base["sum.x3_0"][1].SetUint64(5)
+		o := tr.Base["sum.o0"]
+		var five koalabear.Element
+		five.SetUint64(5)
+		o[1].Add(&o[1], &five)
+	}
+	if err := compileAndProve(t, unread, witnessOnly(tamper)); err == nil {
+		t.Fatal("a value on an unused lane accepted")
 	}
 }
