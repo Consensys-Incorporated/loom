@@ -67,7 +67,15 @@ func Compile(b *Builder) (Program, error) {
 		cm.N = m.N
 		cm.D = fft.NewDomain(uint64(m.N))
 		foldedRelation := expr.Fold(foldingChallenge, m.Relations)
-		cm.VanishingRelation = dag.ExprToDAGWithColumnFields(foldedRelation, res.ColumnFields)
+		// Flatten collapses the chains of binary Add and Mul nodes the tree
+		// builder emits into n-ary ones. It does not change what the relation
+		// evaluates to, only how few nodes say it: a sum of many terms becomes
+		// one node instead of one per term. Consumers that walk Children
+		// generically (Eval, Degree, ComputeQuotient, the recursion verifier's
+		// evalDAG) handle any arity, and the n-ary form is what lets the
+		// verifier circuit spend one row per group of terms rather than per
+		// term.
+		cm.VanishingRelation = dag.ExprToDAGWithColumnFields(foldedRelation, res.ColumnFields).Flatten()
 		res.Modules[k] = cm
 	}
 

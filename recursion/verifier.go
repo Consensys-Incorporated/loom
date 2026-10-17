@@ -1983,14 +1983,26 @@ func (v *Verifier) evalDAG(d *dag.DAG, vals map[string]int) (int, error) {
 				return 0, fmt.Errorf("no value at zeta for %s", n.Leaf.String())
 			}
 			cell[n] = c
-		case dag.KindAdd, dag.KindMul:
+		case dag.KindAdd:
+			// From SumMinTerms terms up, one sum row per SumLanes of them
+			// beats one e6 row per addition; below it the e6 chip is cheaper.
+			if len(n.Children) >= SumMinTerms {
+				terms := make([]int, len(n.Children))
+				for i, ch := range n.Children {
+					terms[i] = cell[ch]
+				}
+				cell[n] = m.Sum(terms)
+				break
+			}
 			acc := cell[n.Children[0]]
 			for _, ch := range n.Children[1:] {
-				if n.Kind == dag.KindAdd {
-					acc = m.Add(acc, cell[ch])
-				} else {
-					acc = m.Mul(acc, cell[ch])
-				}
+				acc = m.Add(acc, cell[ch])
+			}
+			cell[n] = acc
+		case dag.KindMul:
+			acc := cell[n.Children[0]]
+			for _, ch := range n.Children[1:] {
+				acc = m.Mul(acc, cell[ch])
 			}
 			cell[n] = acc
 		case dag.KindSub:
