@@ -119,17 +119,20 @@ func dpathCircuit(v dpathValues) *builder {
 	b := &builder{}
 	in := v.cells()
 	next := 0
-	inputs := func(n int) []int {
+	// explicit kinds: the circuit is executed on other trees, whose unused
+	// siblings (zero here) may be digests there
+	inputs := func(n, kind int) []int {
 		res := make([]int, n)
 		for i := range res {
-			res[i] = b.input(in[next])
+			res[i] = b.inputKind(in[next], kind)
 			next++
 		}
 		return res
 	}
-	leaves, heights, order := b.Table(inputs(dpG)), b.Table(inputs(dpG)), b.Table(inputs(dpG))
-	sibs, bits := b.Table(inputs(dpH)), b.Table(inputs(dpL))
-	root := inputs(1)[0]
+	leaves := b.Table(inputs(dpG, KindDigest))
+	heights, order := b.Table(inputs(dpG, KindScalar)), b.Table(inputs(dpG, KindScalar))
+	sibs, bits := b.Table(inputs(dpH, KindDigest)), b.Table(inputs(dpL, KindScalar))
+	root := inputs(1, KindDigest)[0]
 	b.MerklePathDynamic(DynamicPath{Leaves: leaves, Heights: heights, Order: order, Siblings: sibs, Bits: bits, L: dpL, Root: root})
 	return b
 }

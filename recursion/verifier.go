@@ -288,10 +288,19 @@ func (v *Verifier) statementGroupPos(st *statement, t int) []int {
 	return pos
 }
 
-// input allocates an input cell whose value extract reads from each statement.
-func (v *Verifier) input(extract func(st *statement) (Cell, error)) int {
+// input allocates an input cell of the given kind whose value extract reads
+// from each statement.
+func (v *Verifier) input(kind int, extract func(st *statement) (Cell, error)) int {
 	v.extract = append(v.extract, extract)
-	return v.M.Input()
+	return v.M.Input(kind)
+}
+
+// fieldKind returns the kind of the cell of a value of field f.
+func fieldKind(f field.Kind) int {
+	if f == field.Ext {
+		return KindE6
+	}
+	return KindScalar
 }
 
 // Inputs returns the input cells' values for a statement — a proof, its public
@@ -349,7 +358,7 @@ func (v *Verifier) buildTranscript() error {
 	}
 	for t := l.SetupEnd; t < l.NumTrees; t++ {
 		i := t - l.SetupEnd
-		v.roots[t] = v.input(func(st *statement) (Cell, error) {
+		v.roots[t] = v.input(KindDigest, func(st *statement) (Cell, error) {
 			prf := st.prf
 			if i >= len(prf.Commitments) {
 				return Cell{}, fmt.Errorf("proof has %d commitments, want more than %d", len(prf.Commitments), i)
@@ -416,14 +425,14 @@ func (v *Verifier) bindPublicInputs(name string) {
 				}
 				return es[k], nil
 			}
-			idx := v.input(func(st *statement) (Cell, error) {
+			idx := v.input(KindScalar, func(st *statement) (Cell, error) {
 				pi := st.pi
 				e, err := entry(pi)
 				return ScalarCell(koalabear.NewElement(uint64(e.Idx))), err
 			})
 			v.tr.Bind(name, Scalar(idx))
 			v.tr.BindElements(name, []koalabear.Element{hash.NewElement(uint64(f))})
-			val := v.input(func(st *statement) (Cell, error) {
+			val := v.input(fieldKind(f), func(st *statement) (Cell, error) {
 				pi := st.pi
 				e, err := entry(pi)
 				if f == field.Ext {
@@ -456,12 +465,12 @@ func (v *Verifier) bindExposedValue(challenge, name string) error {
 			}
 			return ev.Entries[k], nil
 		}
-		idx := v.input(func(st *statement) (Cell, error) {
+		idx := v.input(KindScalar, func(st *statement) (Cell, error) {
 			prf := st.prf
 			e, err := entry(prf)
 			return ScalarCell(koalabear.NewElement(uint64(e.Idx))), err
 		})
-		val := v.input(func(st *statement) (Cell, error) {
+		val := v.input(KindE6, func(st *statement) (Cell, error) {
 			prf := st.prf
 			e, err := entry(prf)
 			return E6Cell(e.ExtValue()), err
@@ -585,7 +594,7 @@ func (v *Verifier) buildPCSTranscript() error {
 		}
 		return fp, nil
 	}
-	v.LevelsRoot = v.input(func(st *statement) (Cell, error) {
+	v.LevelsRoot = v.input(KindDigest, func(st *statement) (Cell, error) {
 		fp, err := friProof(st)
 		return digestCell(fp.LevelsRoot), err
 	})
@@ -613,7 +622,7 @@ func (v *Verifier) buildPCSTranscript() error {
 			root = zeroDigest
 		case j > v.fri.first:
 			i := j - v.fri.first - 1
-			root = v.input(func(st *statement) (Cell, error) {
+			root = v.input(KindDigest, func(st *statement) (Cell, error) {
 				fp, err := friProof(st)
 				if err != nil {
 					return Cell{}, err
@@ -630,7 +639,7 @@ func (v *Verifier) buildPCSTranscript() error {
 	nFinal := 1 << (v.fri.logN - v.fri.numRounds)
 	v.tr.BindElements(fri.QueryName(0), []koalabear.Element{hash.NewElement(fri.ExtPolyDomainTag), hash.NewElement(uint64(nFinal))})
 	for i := range nFinal {
-		c := v.input(func(st *statement) (Cell, error) {
+		c := v.input(KindE6, func(st *statement) (Cell, error) {
 			fp, err := friProof(st)
 			if err != nil {
 				return Cell{}, err
@@ -739,7 +748,7 @@ func (v *Verifier) buildFoldTranscriptDynamic(friProof func(*statement) (fri.Pro
 	zero := m.Const(Cell{})
 	for j := range v.fri.numRounds {
 		d.bInputs = append(d.bInputs, len(v.extract))
-		b := v.input(func(st *statement) (Cell, error) {
+		b := v.input(KindScalar, func(st *statement) (Cell, error) {
 			entered := 0
 			for _, mod := range v.fri.classMod {
 				if MaxLogModuleSize-log2(v.statementModuleSize(st, mod)) <= j {
@@ -766,7 +775,7 @@ func (v *Verifier) buildFoldTranscriptDynamic(friProof func(*statement) (fri.Pro
 				d.rootInputs = append(d.rootInputs, -1)
 			}
 			d.rootInputs = append(d.rootInputs, len(v.extract))
-			layer := v.input(func(st *statement) (Cell, error) {
+			layer := v.input(KindDigest, func(st *statement) (Cell, error) {
 				fp, err := friProof(st)
 				if err != nil {
 					return Cell{}, err
@@ -796,7 +805,7 @@ func (v *Verifier) claimedInputs(t, g int, extRail bool, shifts [][]int) [][]int
 	res := make([][]int, len(shifts))
 	for i, ss := range shifts {
 		for k := range ss {
-			res[i] = append(res[i], v.input(func(st *statement) (Cell, error) {
+			res[i] = append(res[i], v.input(KindE6, func(st *statement) (Cell, error) {
 				prf := st.prf
 				cv := prf.Opening.ClaimedValues
 				if t >= len(cv) || g >= len(cv[t]) {
@@ -869,7 +878,7 @@ func (v *Verifier) buildOpenings() {
 			depth := log2(topRows / 2)
 			sibs := make([]int, depth)
 			for i := range sibs {
-				sibs[i] = v.input(func(st *statement) (Cell, error) {
+				sibs[i] = v.input(KindDigest, func(st *statement) (Cell, error) {
 					prf := st.prf
 					sib := prf.Opening.PointSamplings[k][t].Path.Siblings
 					if len(sib) != depth {
@@ -965,7 +974,7 @@ func (v *Verifier) dynamicOrder(key string, modules []string) dynOrder {
 	}
 	for k := range G {
 		v.orderInputs[key] = append(v.orderInputs[key], len(v.extract))
-		o.pi = append(o.pi, v.input(func(st *statement) (Cell, error) {
+		o.pi = append(o.pi, v.input(KindScalar, func(st *statement) (Cell, error) {
 			return ScalarCell(koalabear.NewElement(uint64(v.statementOrder(st, key, modules)[k]))), nil
 		}))
 	}
@@ -1014,7 +1023,7 @@ func (v *Verifier) dynamicOpening(k, t int, leaves []int) {
 	heights, order := v.dynamicTreeOrder(t)
 	sibs := make([]int, maxTreeHeight)
 	for h := 1; h <= maxTreeHeight; h++ {
-		sibs[h-1] = v.input(func(st *statement) (Cell, error) {
+		sibs[h-1] = v.input(KindDigest, func(st *statement) (Cell, error) {
 			top := 0
 			for _, grp := range v.layout.TreeGroups[t] {
 				top = max(top, log2(v.statementModuleSize(st, grp.Module))+treeHeightOffset)
@@ -1104,7 +1113,7 @@ func (v *Verifier) allocOpenings() {
 				row := func(hi bool) Row {
 					res := Row{NBase: nb}
 					for c := 0; c < nb; c += CellWidth {
-						res.Base = append(res.Base, v.input(func(st *statement) (Cell, error) {
+						res.Base = append(res.Base, v.input(KindDigest, func(st *statement) (Cell, error) {
 							rp, err := rows(st)
 							r := rp.Lo
 							if hi {
@@ -1119,7 +1128,7 @@ func (v *Verifier) allocOpenings() {
 						}))
 					}
 					for i := range ne {
-						res.Ext = append(res.Ext, v.input(func(st *statement) (Cell, error) {
+						res.Ext = append(res.Ext, v.input(KindE6, func(st *statement) (Cell, error) {
 							rp, err := rows(st)
 							r := rp.Lo
 							if hi {
@@ -1608,7 +1617,7 @@ func (v *Verifier) buildFRIDynamic() {
 		// The levels tree, its path from the opening of round first.
 		sibs := make([]int, maxTreeHeight)
 		for h := 1; h <= maxTreeHeight; h++ {
-			sibs[h-1] = v.input(func(st *statement) (Cell, error) {
+			sibs[h-1] = v.input(KindDigest, func(st *statement) (Cell, error) {
 				l, err := layer(st, k, v.statementFirst(st))
 				if err != nil {
 					return Cell{}, err
@@ -1642,7 +1651,7 @@ func (v *Verifier) buildFRIDynamic() {
 		var rounds []FoldRound
 		for j := range numRounds {
 			value := func(qside bool) int {
-				return v.input(func(st *statement) (Cell, error) {
+				return v.input(KindE6, func(st *statement) (Cell, error) {
 					l, err := layer(st, k, j)
 					if err != nil || l == nil || j == v.statementFirst(st) {
 						return Cell{}, err
@@ -1657,7 +1666,7 @@ func (v *Verifier) buildFRIDynamic() {
 			depth := logN - j - 1
 			path := make([]int, depth)
 			for i := range path {
-				path[i] = v.input(func(st *statement) (Cell, error) {
+				path[i] = v.input(KindDigest, func(st *statement) (Cell, error) {
 					l, err := layer(st, k, j)
 					if err != nil {
 						return Cell{}, err
@@ -1694,12 +1703,12 @@ func (v *Verifier) friLayerValues(k, j int) (int, int) {
 		}
 		return fq[k].Layers[j], nil
 	}
-	p := v.input(func(st *statement) (Cell, error) {
+	p := v.input(KindE6, func(st *statement) (Cell, error) {
 		prf := st.prf
 		l, err := layer(prf)
 		return E6Cell(l.LeafPExt), err
 	})
-	q := v.input(func(st *statement) (Cell, error) {
+	q := v.input(KindE6, func(st *statement) (Cell, error) {
 		prf := st.prf
 		l, err := layer(prf)
 		return E6Cell(l.LeafQExt), err
@@ -1712,7 +1721,7 @@ func (v *Verifier) friLayerValues(k, j int) (int, int) {
 func (v *Verifier) friSiblings(k, j, depth int) []int {
 	sibs := make([]int, depth)
 	for i := range sibs {
-		sibs[i] = v.input(func(st *statement) (Cell, error) {
+		sibs[i] = v.input(KindDigest, func(st *statement) (Cell, error) {
 			prf := st.prf
 			fq := prf.Opening.FRIProof.FRIQueries
 			if k >= len(fq) || j >= len(fq[k].Layers) || len(fq[k].Layers[j].Path.Siblings) != depth {

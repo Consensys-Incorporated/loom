@@ -28,6 +28,7 @@ const (
 	windowAddrQ  = "addr_q"
 	windowSelQ   = "sel_q"
 	windowAddrI  = "addr_i"
+	windowMultI  = "m_i" // −1 for a Pack item (read), the read count for a Lanes output (write)
 	windowOff    = "off" // lanes
 	windowLen    = "len" // lanes
 )
@@ -45,15 +46,18 @@ type packInst struct {
 }
 
 type windowInst struct {
-	p, q, item int // q < 0 when the item fits in p
-	off, kind  int
+	p, q      int  // q < 0 when the item fits in p
+	item      slot // read (a Pack item) or written (a Lanes output)
+	off, kind int
 }
 
 // Pack lays the items (cells of the given kinds) out contiguously as a stream
 // of cells, zero padded to whole sponge blocks and written by the witness
 // chip, checks every item against its window of the stream, and returns the
 // stream cells and its length in elements. Hashing the stream with Sponge
-// hashes the items.
+// hashes the items. An item's kind must cover its cell's kind (KindE6 for an
+// E6 cell, not KindScalar): its window reads it with zero lanes beyond the
+// item's kind, which are not hashed, so proving fails otherwise.
 func (m *Machine) Pack(items, kinds []int) ([]int, int) {
 	if len(items) != len(kinds) {
 		panic(fmt.Sprintf("Pack: %d items, %d kinds", len(items), len(kinds)))
@@ -65,14 +69,13 @@ func (m *Machine) Pack(items, kinds []int) ([]int, int) {
 	}
 	stream := make([]int, streamCells(length))
 	for i := range stream {
-		stream[i] = m.alloc()
+		stream[i] = m.hint(KindDigest)
 	}
-	m.hints = append(m.hints, stream...)
 	m.packs = append(m.packs, packInst{items: items, kinds: kinds, stream: stream})
 	m.record(instrPack, len(m.packs)-1)
 	g := 0
 	for i, it := range items {
-		m.Window(stream, g, kinds[i], it)
+		m.window(stream, g, kinds[i], m.rd(it))
 		g += kinds[i]
 	}
 	return stream, length
@@ -92,26 +95,26 @@ type lanesInst struct {
 	src, off, kind, out int
 }
 
-// Lanes returns a cell holding lanes off..off+kind−1 of the cell src, in its
-// lanes 0..kind−1 and zero elsewhere: for instance the E6 value of a
-// challenge digest (Lanes(d, 0, KindE6)), or one of its lanes as a scalar.
-// The witness chip writes it, and a window checks it against src.
+// Lanes returns a cell of the given kind (scalar or E6) holding lanes
+// off..off+kind−1 of the cell src, in its lanes 0..kind−1 and zero elsewhere:
+// for instance the E6 value of a challenge digest (Lanes(d, 0, KindE6)), or
+// one of its lanes as a scalar. A window row reads src and writes it, zero
+// beyond its kind.
 func (m *Machine) Lanes(src, off, kind int) int {
-	checkKind(kind)
+	checkCellKind(kind)
 	if off < 0 || off+kind > CellWidth {
 		panic(fmt.Sprintf("Lanes: lanes %d..%d out of a cell", off, off+kind-1))
 	}
-	out := m.alloc()
-	m.hints = append(m.hints, out)
-	m.lanes = append(m.lanes, lanesInst{src, off, kind, out})
+	out := m.wr()
+	m.lanes = append(m.lanes, lanesInst{src, off, kind, out.addr})
 	m.record(instrLanes, len(m.lanes)-1)
-	m.Window([]int{src}, off, kind, out)
-	return out
+	m.window([]int{src}, off, kind, out)
+	return out.addr
 }
 
-// Window checks that item is the kind elements of the stream starting at
-// element offset g.
-func (m *Machine) Window(stream []int, g, kind, item int) {
+// window adds a window row: the item (read, or written) is the kind elements
+// of the stream starting at element offset g, and zero beyond.
+func (m *Machine) window(stream []int, g, kind int, item slot) {
 	checkKind(kind)
 	c, off := g/CellWidth, g%CellWidth
 	w := windowInst{p: stream[c], q: -1, item: item, off: off, kind: kind}
@@ -120,7 +123,6 @@ func (m *Machine) Window(stream []int, g, kind, item int) {
 		w.q = stream[c+1]
 		m.read(w.q)
 	}
-	m.read(item)
 	m.windows = append(m.windows, w)
 }
 
@@ -130,17 +132,20 @@ func checkKind(k int) {
 	}
 }
 
-// windowChip: one row per item of a packed stream.
+// windowChip: one row per item of a packed stream (read), and per Lanes
+// output (written).
 //
 // Columns: p0..7, q0..7 (two consecutive stream cells, the window W = p‖q),
 // i0..7 (the item). Setup: active, addr_p, addr_q, sel_q (q is read), addr_i,
-// off0..7 (one-hot offset of the item in p), and len1..7 (len_k = 1 when the
-// item has more than k lanes). For each lane k of the item,
+// m_i (the item's signed multiplicity: −1 for a read, the read count for a
+// write), off0..7 (one-hot offset of the item in p), and len1..7 (len_k = 1
+// when the item has more than k lanes). For each lane k of the item,
 //
-//	len_k·(i_k − Σ_o off_o·W_{o+k}) = 0,
+//	i_k = len_k·Σ_o off_o·W_{o+k},
 //
-// with len_0 = 1. The item's other lanes are left to its readers: their
-// tuples fix them to zero, or they do not use them.
+// with len_0 = 1: the item's lanes beyond its kind are zero, so a Lanes output
+// is typed by its row, and a Pack item must have no lane beyond the kind it is
+// packed with.
 type windowChip struct{ m *Machine }
 
 func (c windowChip) name() string { return windowMod }
@@ -152,7 +157,7 @@ func (c windowChip) define(b *board.Builder, bus *Bus) error {
 	active := setupCol(windowMod, windowActive)
 	bus.Read(windowMod, setupCol(windowMod, windowAddrP), cellCols(windowMod, windowP, 0), active)
 	bus.Read(windowMod, setupCol(windowMod, windowAddrQ), cellCols(windowMod, windowQ, 0), setupCol(windowMod, windowSelQ))
-	bus.Read(windowMod, setupCol(windowMod, windowAddrI), cellCols(windowMod, windowI, 0), active)
+	bus.Write(windowMod, setupCol(windowMod, windowAddrI), cellCols(windowMod, windowI, 0), setupCol(windowMod, windowMultI))
 
 	window := func(j int) expr.Expr {
 		if j < CellWidth {
@@ -169,13 +174,13 @@ func (c windowChip) define(b *board.Builder, bus *Bus) error {
 		for o := range CellWidth {
 			sum = sum.Add(setupCol(windowMod, laneName(windowOff, o)).Mul(window(o + k)))
 		}
-		mm.AssertZero(mask.Mul(col(windowMod, laneName(windowI, k)).Sub(sum)))
+		mm.AssertZero(col(windowMod, laneName(windowI, k)).Sub(mask.Mul(sum)))
 	}
 	return nil
 }
 
 func (c windowChip) setup(cs *cols) {
-	cs.declare(windowActive, windowAddrP, windowAddrQ, windowSelQ, windowAddrI)
+	cs.declare(windowActive, windowAddrP, windowAddrQ, windowSelQ, windowAddrI, windowMultI)
 	cs.declareLanes(windowOff, CellWidth)
 	for k := 1; k < CellWidth; k++ {
 		cs.declare(laneName(windowLen, k))
@@ -187,7 +192,8 @@ func (c windowChip) setup(cs *cols) {
 			cs.set(windowAddrQ, row, uint64(w.q))
 			cs.set(windowSelQ, row, 1)
 		}
-		cs.set(windowAddrI, row, uint64(w.item))
+		cs.set(windowAddrI, row, uint64(w.item.addr))
+		cs.setInt(windowMultI, row, c.m.mult(w.item))
 		cs.set(laneName(windowOff, w.off), row, 1)
 		for k := 1; k < w.kind; k++ {
 			cs.set(laneName(windowLen, k), row, 1)
@@ -204,7 +210,7 @@ func (c windowChip) trace(cs *cols, r *Run) error {
 		if w.q >= 0 {
 			cs.setCell(windowQ, row, r.values[w.q])
 		}
-		cs.setCell(windowI, row, r.values[w.item])
+		cs.setCell(windowI, row, r.values[w.item.addr])
 	}
 	return nil
 }

@@ -18,10 +18,17 @@ type builder struct {
 	in []Cell
 }
 
-// input allocates an input cell of value v.
+// input allocates an input cell of value v, of the narrowest kind holding v.
+// A program executed on other inputs should use inputKind: another value
+// may need a wider kind.
 func (b *builder) input(v Cell) int {
+	return b.inputKind(v, cellKindOf(v))
+}
+
+// inputKind allocates an input cell of the given kind and value v.
+func (b *builder) inputKind(v Cell, kind int) int {
 	b.in = append(b.in, v)
-	return b.Input()
+	return b.Input(kind)
 }
 
 // inputStream allocates the input stream of xs.
@@ -85,7 +92,7 @@ func compileAndProve(t *testing.T, b *builder, tamper func(setup, witness trace.
 // inputValue returns the value given to the input cell at addr.
 func (b *builder) inputValue(addr int) Cell {
 	for i, a := range b.inputs {
-		if a == addr {
+		if a.addr == addr {
 			return b.in[i]
 		}
 	}

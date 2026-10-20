@@ -164,7 +164,7 @@ func (v *Verifier) sizeInput(module string, minLog int) int {
 		v.sizeInputs = map[int]string{}
 	}
 	v.sizeInputs[len(v.extract)] = module
-	return v.input(func(st *statement) (Cell, error) {
+	return v.input(KindScalar, func(st *statement) (Cell, error) {
 		return statementSize(st.sizes, module, minLog)
 	})
 }
