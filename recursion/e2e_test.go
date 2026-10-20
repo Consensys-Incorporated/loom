@@ -8,6 +8,7 @@ import (
 
 	"github.com/consensys/gnark-crypto/field/koalabear"
 	"github.com/consensys/loom"
+	"github.com/consensys/loom/arguments"
 	"github.com/consensys/loom/board"
 	"github.com/consensys/loom/expr"
 	"github.com/consensys/loom/proof"
@@ -55,6 +56,108 @@ func exposeProofs(t *testing.T, seeds ...uint64) []innerProof {
 		res = append(res, innerProof{program: program, pi: public.Inputs{}, prf: prf})
 	}
 	return res
+}
+
+// busProofs proves a message bus (arguments.Bus): module "a" sends (x, y) on
+// three ports, two messages each, module "b" receives the six messages on
+// one port, in another order. The three sends of "a" take two running-ratio
+// columns (two factors of degree 2 per column), the receive one.
+func busProofs(t *testing.T, seeds ...uint64) []innerProof {
+	t.Helper()
+	const n = 8
+	b := board.NewBuilder()
+	for _, name := range []string{"a", "b"} {
+		m := board.NewModule(name)
+		m.N = n
+		b.AddModule(m)
+	}
+	table := func(module string, k int) board.Table {
+		tb := board.NewTable(module, 2)
+		tb.In[0], tb.In[1] = expr.Col(fmt.Sprintf("%s.x%d", module, k)), expr.Col(fmt.Sprintf("%s.y%d", module, k))
+		return tb
+	}
+	sel := func(module string, k int) expr.Expr { return expr.Col(fmt.Sprintf("%s.s%d", module, k)) }
+	var S []board.Table
+	var selS []expr.Expr
+	for k := range 3 {
+		S, selS = append(S, table("a", k)), append(selS, sel("a", k))
+	}
+	if err := arguments.Bus(&b, selS, []expr.Expr{sel("b", 0)}, S, []board.Table{table("b", 0)}); err != nil {
+		t.Fatal(err)
+	}
+	program, err := board.Compile(&b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var res []innerProof
+	for _, seed := range seeds {
+		col := func(f func(i int) uint64) []koalabear.Element {
+			c := make([]koalabear.Element, n)
+			for i := range c {
+				c[i].SetUint64(f(i))
+			}
+			return c
+		}
+		msg := func(k, i int) (uint64, uint64) { return seed*100 + uint64(10*k+i), seed + uint64(k*n+i) }
+		tr := trace.New()
+		var recv [][2]uint64
+		for k := range 3 {
+			// port k sends on rows k and k+4
+			selected := func(i int) bool { return i == k || i == k+4 }
+			tr.SetBase(fmt.Sprintf("a.x%d", k), col(func(i int) uint64 { x, _ := msg(k, i); return x }))
+			tr.SetBase(fmt.Sprintf("a.y%d", k), col(func(i int) uint64 { _, y := msg(k, i); return y }))
+			tr.SetBase(fmt.Sprintf("a.s%d", k), col(func(i int) uint64 {
+				if selected(i) {
+					return 1
+				}
+				return 0
+			}))
+			for i := range n {
+				if selected(i) {
+					x, y := msg(k, i)
+					recv = append(recv, [2]uint64{x, y})
+				}
+			}
+		}
+		// b receives them in reverse order, on its rows 1..6
+		get := func(i, j int) uint64 {
+			if i < 1 || i > len(recv) {
+				return 0
+			}
+			return recv[len(recv)-i][j]
+		}
+		tr.SetBase("b.x0", col(func(i int) uint64 { return get(i, 0) }))
+		tr.SetBase("b.y0", col(func(i int) uint64 { return get(i, 1) }))
+		tr.SetBase("b.s0", col(func(i int) uint64 {
+			if i >= 1 && i <= len(recv) {
+				return 1
+			}
+			return 0
+		}))
+		prf, err := prover.Prove(tr, setup.ProvingKey{}, public.Inputs{}, program)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res = append(res, innerProof{program: program, pi: public.Inputs{}, prf: prf})
+	}
+	return res
+}
+
+// TestVerifierBus verifies, in circuit, proofs of a message bus, and checks
+// the challenges and DEEP values against Go.
+func TestVerifierBus(t *testing.T) {
+	ips := busProofs(t, 1, 2)
+	if got := len(ips[0].program.ProductBus); got != 1 {
+		t.Fatalf("%d product buses, want 1", got)
+	}
+	if bus := ips[0].program.ProductBus[0]; len(bus.Ends) != 3 {
+		t.Fatalf("bus with %d running-ratio columns, want 3", len(bus.Ends))
+	}
+	v, p, r := verifierRun(t, ips[0])
+	if err := prove(t, p, r); err != nil {
+		t.Fatalf("valid verifier execution rejected: %v", err)
+	}
+	checkChallenges(t, v, p, ips[1])
 }
 
 // verifierRun builds the verifier of ip's program and executes it on ip.
@@ -116,6 +219,16 @@ func TestVerifierRejects(t *testing.T) {
 				ip.prf.ExposedValues[name] = proof.ExposedValue{Entries: []proof.ExposedEntry{e}}
 				break
 			}
+			return ip
+		},
+		"running-ratio end": func(t *testing.T) innerProof {
+			ip := busProofs(t, 1)[0]
+			name := ip.program.ProductBus[0].Ends[0]
+			e := ip.prf.ExposedValues[name].Entries[0]
+			val := e.ExtValue()
+			val.B0.A0.SetUint64(val.B0.A0.Uint64() + 1)
+			e.SetExt(val)
+			ip.prf.ExposedValues[name] = proof.ExposedValue{Entries: []proof.ExposedEntry{e}}
 			return ip
 		},
 		"exposed column entry": func(t *testing.T) innerProof {

@@ -60,3 +60,11 @@ type ExposedValues map[string]ExposedValue
 type LogupBus struct {
 	Totals []string // Totals[i] = name of the exposed total of the i-th logup column (proof.ExposedValues[name], one entry)
 }
+
+// ProductBus balances the running ratios of a multiplicative interaction (a
+// message bus): each column multiplies the factors of the messages sent over
+// those of the messages received, so the bus holds if the ends multiply to
+// one: Π_i Ends_i = 1 (which also makes every end nonzero).
+type ProductBus struct {
+	Ends []string // Ends[i] = name of the exposed end of the i-th running-ratio column (proof.ExposedValues[name], one entry)
+}

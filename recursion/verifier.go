@@ -1942,6 +1942,24 @@ func (v *Verifier) buildAIR() error {
 		m.AssertEq(acc, zero)
 	}
 
+	// The product buses: the running-ratio ends multiply to one.
+	for _, bus := range v.program.ProductBus {
+		one := m.Const(ScalarCell(koalabear.One()))
+		acc := one
+		for _, name := range bus.Ends {
+			entries := v.exposedEntries[name]
+			if len(entries) != 1 {
+				return fmt.Errorf("NewVerifier: running-ratio end %q must have one entry", name)
+			}
+			if acc == one {
+				acc = entries[0].val
+			} else {
+				acc = m.Mul(acc, entries[0].val)
+			}
+		}
+		m.AssertEq(acc, one)
+	}
+
 	// Every module's relation at zeta against its quotient.
 	for _, name := range modules {
 		mod := v.program.Modules[name]

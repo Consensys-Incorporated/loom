@@ -188,7 +188,7 @@ func CyclicLogUpStep(ins []expr.Expr, outs []string, t trace.Trace, prog *Progra
 // proof.
 func (ps ProverStep) ExposedOutputs() []string {
 	switch ps.Ctx.(type) {
-	case CyclicLogUpCtx:
+	case CyclicLogUpCtx, RunningRatioCtx:
 		return ps.Outs[1:2]
 	case ExposeEntriesCtx, ExposeIthValueCtx, ExposeRelativeIthValueCtx:
 		return ps.Outs[:1]

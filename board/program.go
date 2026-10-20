@@ -19,6 +19,7 @@ type Program struct {
 	SetupColumns []ColumnRef // setup columns, precommitted (ex: ql, qr, etc in plonk)
 	ColumnFields map[string]field.Kind
 	LogupBus     []LogupBus
+	ProductBus   []ProductBus
 	// Rounds are the Fiat-Shamir rounds, in order. The last one is the folding
 	// round: Coin(len(Rounds)-1) folds the per-module relations.
 	Rounds []ProverRound
@@ -81,6 +82,8 @@ func Compile(b *Builder) (Program, error) {
 
 	res.LogupBus = make([]LogupBus, len(b.LogupBus))
 	copy(res.LogupBus, b.LogupBus)
+	res.ProductBus = make([]ProductBus, len(b.ProductBus))
+	copy(res.ProductBus, b.ProductBus)
 
 	return res, nil
 }
@@ -203,6 +206,10 @@ func inferStepOutputFields(step ProverStep, columnFields map[string]field.Kind) 
 	case LMCtx:
 		for i := range res {
 			res[i] = field.Base
+		}
+	case RunningRatioCtx: // RunningRatioStep writes extension columns
+		for i := range res {
+			res[i] = field.Ext
 		}
 	default:
 		f := fieldOfInputs(step.Ins)

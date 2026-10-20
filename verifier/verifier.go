@@ -380,6 +380,28 @@ func (vr *verifierRunTime) checkLogupBus() error {
 	return nil
 }
 
+// checkProductBus checks that the running-ratio ends of each product bus
+// multiply to one.
+func (vr *verifierRunTime) checkProductBus() error {
+	for _, bus := range vr.program.ProductBus {
+		var prod ext.E6
+		prod.SetOne()
+		for _, name := range bus.Ends {
+			if len(vr.proof.ExposedValues[name].Entries) != 1 {
+				return fmt.Errorf("the end of running ratio %s should have exactly one entry", name)
+			}
+			value := vr.proof.ExposedValues[name].Entries[0].ExtValue()
+			prod.Mul(&prod, &value)
+		}
+		var one ext.E6
+		one.SetOne()
+		if !prod.Equal(&one) {
+			return fmt.Errorf("the running ratios of the bus do not multiply to one")
+		}
+	}
+	return nil
+}
+
 // checkAIRRelations checks the air relations per module.
 func (vr *verifierRunTime) checkAIRRelations() error {
 	// EvalExt expects the full claimed-values map.
@@ -488,7 +510,10 @@ func Verify(publicInputs public.Inputs, verificationKey setup.VerificationKey, p
 		return err
 	}
 
-	// 3 - check logup buses (multi-set equality from cumulative sums).
+	// 3 - check the product and logup buses (multiset equalities).
+	if err := vr.checkProductBus(); err != nil {
+		return err
+	}
 	if err := vr.checkLogupBus(); err != nil {
 		return err
 	}

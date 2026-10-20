@@ -24,6 +24,9 @@ import (
 )
 
 type LogupBus = proof.LogupBus
+
+// ProductBus asserts that the exposed running-ratio ends multiply to one.
+type ProductBus = proof.ProductBus
 type Proof = proof.Proof
 
 type ExposedEntry = proof.ExposedEntry
@@ -47,9 +50,10 @@ type ColumnRef struct {
 // Builder accumulates the modules, their relations, and the rounds of the
 // protocol (see rounds.go).
 type Builder struct {
-	Modules  map[string]*Module
-	LogupBus []LogupBus
-	rounds   []builderRound
+	Modules    map[string]*Module
+	LogupBus   []LogupBus
+	ProductBus []ProductBus
+	rounds     []builderRound
 }
 
 func NewBuilder() Builder {
@@ -65,6 +69,10 @@ func (b *Builder) AddModule(m Module) {
 
 func (b *Builder) AddLogupBus(cm LogupBus) {
 	b.LogupBus = append(b.LogupBus, cm)
+}
+
+func (b *Builder) AddProductBus(pb ProductBus) {
+	b.ProductBus = append(b.ProductBus, pb)
 }
 
 func (b *Builder) AssertEqualAt(module string, A, B expr.Expr, i int) error {
