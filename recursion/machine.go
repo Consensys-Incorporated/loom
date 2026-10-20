@@ -105,7 +105,6 @@ const (
 	instrE6
 	instrDeep
 	instrSum
-	instrTable
 	instrLookup
 )
 
@@ -342,8 +341,6 @@ func (m *Machine) exec(in instr, r *Run) error {
 		m.execSum(m.sums[in.idx], r)
 	case instrDeep:
 		m.execDeep(m.deeps[in.idx], r)
-	case instrTable:
-		m.execTable(m.tables[in.idx], r)
 	case instrLookup:
 		return m.execLookup(m.lookups[in.idx], r)
 	}

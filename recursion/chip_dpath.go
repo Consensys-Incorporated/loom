@@ -24,17 +24,18 @@ import (
 
 // Setup columns of the dpath chip.
 const (
-	dpathFirst       = "first"
-	dpathLast        = "last"
-	dpathActive      = "active"
-	dpathHMax        = "hmax"   // H, on a path's first row
-	dpathGroups      = "groups" // G, on a path's last row
-	dpathLeafBase    = "leaf_base"
-	dpathOrderBase   = "order_base"
-	dpathHeightsBase = "heights_base"
-	dpathSibBase     = "sib_base"
-	dpathBitsTop     = "bits_top" // the bits table's base + L
-	dpathRootAddr    = "root_addr"
+	dpathFirst      = "first"
+	dpathLast       = "last"
+	dpathActive     = "active"
+	dpathHMax       = "hmax"     // H, on a path's first row
+	dpathGroups     = "groups"   // G, on a path's last row
+	dpathLeafTag    = "leaf_tag" // the tables' tags
+	dpathOrderTag   = "order_tag"
+	dpathHeightsTag = "heights_tag"
+	dpathSibTag     = "sib_tag"
+	dpathBitsTag    = "bits_tag"
+	dpathL          = "l" // L, the number of bits of the row
+	dpathRootAddr   = "root_addr"
 )
 
 // Witness columns of the dpath chip.
@@ -65,8 +66,8 @@ type DynamicPath struct {
 	Leaves, Heights Table
 	// Order[k] is the k-th group folded: the groups by decreasing height,
 	// equal heights by increasing index. The chip relies on it: the caller
-	// checks that it is that permutation (an index past G would read outside
-	// Leaves and Heights).
+	// checks that it is that permutation (an index past G reads no entry of
+	// Leaves and Heights, so it cannot verify, but a repeated group could).
 	Order Table
 	// Siblings[h−1] is the sibling at height h (h = 1..H), zero above the
 	// path's top height; H = Siblings.Len().
@@ -96,15 +97,6 @@ type dpathRow struct {
 	p2Inputs [width]koalabear.Element
 }
 
-func (m *Machine) tableIndex(t Table) int {
-	for i, ti := range m.tables {
-		if ti.entries[0] == t.base {
-			return i
-		}
-	}
-	panic("unknown table")
-}
-
 // MerklePathDynamic checks a DynamicPath: that the path from the groups'
 // leaves, at their heights, through the siblings, is the root. One row per
 // height (H) and per group (G), whatever the heights.
@@ -132,7 +124,7 @@ func (m *Machine) execDPath(idx int, r *Run) error {
 	d := m.dpaths[idx]
 	p := d.p
 	H, G := p.Siblings.Len(), p.Order.Len()
-	entry := func(t Table, i int) Cell { return r.values[t.entries[i]] }
+	entry := func(t Table, i int) Cell { return m.entryValue(r, t.tag, i) }
 	scalar := func(t Table, i int) int {
 		c := entry(t, i)
 		return int(c[0].Uint64())
@@ -142,7 +134,7 @@ func (m *Machine) execDPath(idx int, r *Run) error {
 			r.tableReads = map[int][]uint64{}
 		}
 		if r.tableReads[table] == nil {
-			r.tableReads[table] = make([]uint64, len(m.tables[table].entries))
+			r.tableReads[table] = make([]uint64, len(m.tables[table].src))
 		}
 		r.tableReads[table][i]++
 	}
@@ -243,12 +235,14 @@ func compressCell(perm interface {
 //	                                        before a leaf: copy; the first leaf
 //
 // and, when started, out = compress(b ? (op, cur) : (cur, op)), looked up in
-// the P2 core (a fold row has b = 0: its leaf on the right). Reads: the leaf
-// at leaf_base + pi, pi at order_base + fc and hg at heights_base + pi (fold
-// rows); the sibling at sib_base + hc − 1 and b at bits_top − hc (compress
-// rows); the root, with out, on the last row. Counted, hc stays in [1, H] on
-// compress rows and fc below G on fold rows, so these reads stay in their
-// tables; pi does if the order is a permutation (the caller's check).
+// the P2 core (a fold row has b = 0: its leaf on the right). Reads, on the
+// tables bus (see Table): the leaf, entry pi of Leaves, pi, entry fc of
+// Order, and hg, entry pi of Heights (fold rows); the sibling, entry hc − 1 of
+// Siblings, and b, entry L − hc of Bits (compress rows). On the memory bus:
+// the root, with out, on the last row. Each table read is tagged by its
+// table, so an index out of a table matches no entry: these reads cannot reach
+// another table's entries whatever the indices. That the order is the
+// permutation folding each group once remains the caller's check.
 type dpathChip struct{ m *Machine }
 
 func (c dpathChip) name() string { return dpathMod }
@@ -292,11 +286,11 @@ func (c dpathChip) define(b *board.Builder, bus *Bus) error {
 	}
 
 	cur, op, out := cellCols(dpathMod, dpathCur, 0), cellCols(dpathMod, dpathOp, 0), cellCols(dpathMod, dpathOut, 0)
-	bus.Read(dpathMod, s(dpathLeafBase).Add(pi), op, kind)
-	bus.Read(dpathMod, s(dpathSibBase).Add(hc).Sub(one()), op, active.Sub(kind))
-	bus.Read(dpathMod, s(dpathOrderBase).Add(fc), cellOf(pi), kind)
-	bus.Read(dpathMod, s(dpathHeightsBase).Add(pi), cellOf(hg), kind)
-	bus.Read(dpathMod, s(dpathBitsTop).Sub(hc), cellOf(bit), active.Sub(kind))
+	bus.ReadEntry(dpathMod, s(dpathLeafTag), pi, op, kind)
+	bus.ReadEntry(dpathMod, s(dpathSibTag), hc.Sub(one()), op, active.Sub(kind))
+	bus.ReadEntry(dpathMod, s(dpathOrderTag), fc, cellOf(pi), kind)
+	bus.ReadEntry(dpathMod, s(dpathHeightsTag), pi, cellOf(hg), kind)
+	bus.ReadEntry(dpathMod, s(dpathBitsTag), s(dpathL).Sub(hc), cellOf(bit), active.Sub(kind))
 	bus.Read(dpathMod, s(dpathRootAddr), out, last)
 
 	src := board.NewTable(dpathMod, width+digest)
@@ -313,19 +307,20 @@ func (c dpathChip) define(b *board.Builder, bus *Bus) error {
 }
 
 func (c dpathChip) setup(cs *cols) {
-	cs.declare(dpathFirst, dpathLast, dpathActive, dpathHMax, dpathGroups, dpathLeafBase, dpathOrderBase,
-		dpathHeightsBase, dpathSibBase, dpathBitsTop, dpathRootAddr)
+	cs.declare(dpathFirst, dpathLast, dpathActive, dpathHMax, dpathGroups, dpathLeafTag, dpathOrderTag,
+		dpathHeightsTag, dpathSibTag, dpathBitsTag, dpathL, dpathRootAddr)
 	row := 0
 	for _, d := range c.m.dpaths {
 		p := d.p
 		n := p.Siblings.Len() + p.Order.Len()
 		for k := range n {
 			cs.set(dpathActive, row, 1)
-			cs.set(dpathLeafBase, row, uint64(p.Leaves.base))
-			cs.set(dpathOrderBase, row, uint64(p.Order.base))
-			cs.set(dpathHeightsBase, row, uint64(p.Heights.base))
-			cs.set(dpathSibBase, row, uint64(p.Siblings.base))
-			cs.set(dpathBitsTop, row, uint64(p.Bits.base+p.L))
+			cs.set(dpathLeafTag, row, uint64(d.leaves))
+			cs.set(dpathOrderTag, row, uint64(d.order))
+			cs.set(dpathHeightsTag, row, uint64(d.heights))
+			cs.set(dpathSibTag, row, uint64(d.siblings))
+			cs.set(dpathBitsTag, row, uint64(d.bit))
+			cs.set(dpathL, row, uint64(p.L))
 			if k == 0 {
 				cs.set(dpathFirst, row, 1)
 				cs.set(dpathHMax, row, uint64(p.Siblings.Len()))

@@ -104,3 +104,76 @@ func moveLookup(tr trace.Trace, row, from, to int) {
 	tr.Base["table.cnt"][from].Sub(&tr.Base["table.cnt"][from], &one)
 	tr.Base["table.cnt"][to].Add(&tr.Base["table.cnt"][to], &one)
 }
+
+// tableCheatMachine builds two tables, A (8 E6 entries) and B (4), and one
+// lookup into A at the index input idx (the last input: witness row 12), its
+// result unread, so that only the tables bus checks it. Table rows: A's
+// entries 0..7, B's 8..11, padding 12..15.
+func tableCheatMachine(idx uint64) *builder {
+	r := rand.New(rand.NewPCG(13, 14))
+	b := &builder{}
+	cellsA, cellsB := make([]int, 8), make([]int, 4)
+	for i := range cellsA {
+		cellsA[i] = b.inputKind(E6Cell(randE6(r)), KindE6)
+	}
+	for i := range cellsB {
+		cellsB[i] = b.inputKind(E6Cell(randE6(r)), KindE6)
+	}
+	tabA := b.Table(cellsA)
+	b.Table(cellsB)
+	b.Lookup(tabA, b.inputKind(ScalarCell(koalabear.NewElement(idx)), KindScalar))
+	return b
+}
+
+func addTo(e *koalabear.Element, d int64) {
+	var x koalabear.Element
+	x.SetInt64(d)
+	e.Add(e, &x)
+}
+
+// TestLookupOutOfTable (recursion_bugs.txt, 2): a lookup into A at index 8,
+// one past its end, returning B[0], with A[1]'s count lowered and B[0]'s
+// raised. The index input holds 8, so the memory balances; with entries at
+// consecutive addresses (A's base + 8 is B's base), the read would balance
+// against B[0]. Tagged by its table, it matches no entry.
+func TestLookupOutOfTable(t *testing.T) {
+	if err := compileAndProve(t, tableCheatMachine(1), nil); err != nil {
+		t.Fatalf("honest lookup of A[1] rejected: %v", err)
+	}
+	tamper := func(tr trace.Trace) {
+		addTo(&tr.Base["witness.v0"][12], 7) // the index input: 1 → 8
+		addTo(&tr.Base["lookup.idx"][0], 7)
+		for j := range CellWidth {
+			lane := laneName("v", j)
+			tr.Base["lookup."+lane][0] = tr.Base["table."+lane][8] // B[0]
+		}
+		addTo(&tr.Base["table.cnt"][1], -1)
+		addTo(&tr.Base["table.cnt"][8], 1)
+	}
+	if err := compileAndProve(t, tableCheatMachine(1), witnessOnly(tamper)); err == nil {
+		t.Fatal("A[8] read as B[0] accepted")
+	}
+}
+
+// TestTablePaddingEntry (recursion_bugs.txt, 3): a lookup of A[0] returning a
+// forged value, A[0]'s count moved to padding row 12 of the table module,
+// which writes the forged value as the entry (tag 0, idx 0): its setup is
+// zero, so its source read is off and its value is free. The entries'
+// multiplicity is gated by active: rejected.
+func TestTablePaddingEntry(t *testing.T) {
+	if err := compileAndProve(t, tableCheatMachine(0), nil); err != nil {
+		t.Fatalf("honest lookup of A[0] rejected: %v", err)
+	}
+	tamper := func(tr trace.Trace) {
+		addTo(&tr.Base["lookup.v3"][0], 5)
+		for j := range CellWidth {
+			lane := laneName("v", j)
+			tr.Base["table."+lane][12] = tr.Base["lookup."+lane][0]
+		}
+		addTo(&tr.Base["table.cnt"][0], -1)
+		addTo(&tr.Base["table.cnt"][12], 1)
+	}
+	if err := compileAndProve(t, tableCheatMachine(0), witnessOnly(tamper)); err == nil {
+		t.Fatal("a forged entry on a padding row accepted")
+	}
+}
