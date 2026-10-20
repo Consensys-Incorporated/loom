@@ -15,22 +15,23 @@ package zkc
 
 import (
 	"errors"
-	"fmt"
+	"flag"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"testing"
 
+	"github.com/LFDT-Lineth/zkc/pkg/util/field"
+	gocorset_kb "github.com/LFDT-Lineth/zkc/pkg/util/field/koalabear"
+	"github.com/LFDT-Lineth/zkc/pkg/util/source"
+	zkc_compiler "github.com/LFDT-Lineth/zkc/pkg/zkc/compiler"
+	"github.com/LFDT-Lineth/zkc/pkg/zkc/compiler/ast"
+	"github.com/LFDT-Lineth/zkc/pkg/zkc/compiler/codegen"
+	zkc_constraints "github.com/LFDT-Lineth/zkc/pkg/zkc/constraints"
+	zkc_util "github.com/LFDT-Lineth/zkc/pkg/zkc/util"
+	zkc_vm "github.com/LFDT-Lineth/zkc/pkg/zkc/vm"
 	gnark_kb "github.com/consensys/gnark-crypto/field/koalabear"
-	"github.com/consensys/go-corset/pkg/util/field"
-	gocorset_kb "github.com/consensys/go-corset/pkg/util/field/koalabear"
-	"github.com/consensys/go-corset/pkg/util/source"
-	zkc_compiler "github.com/consensys/go-corset/pkg/zkc/compiler"
-	"github.com/consensys/go-corset/pkg/zkc/compiler/codegen"
-	zkc_constraints "github.com/consensys/go-corset/pkg/zkc/constraints"
-	zkc_util "github.com/consensys/go-corset/pkg/zkc/util"
-	zkc_vm "github.com/consensys/go-corset/pkg/zkc/vm"
 	"github.com/consensys/loom"
 	"github.com/consensys/loom/board"
 	gocorset "github.com/consensys/loom/integration_test/go_corset"
@@ -81,10 +82,24 @@ var zkcAllPass = zkcExpectedBehavior{
 	Verifier: zkcExpectPass,
 }
 
+// updateBinaries regenerates the testdata binaries from their sources (after a
+// zkc upgrade changes the binary format): go test -run FromBinary -update
+var updateBinaries = flag.Bool("update", false, "regenerate the zkc testdata binaries")
+
 func TestZkcIntegrationFromBinary(t *testing.T) {
 	for _, tc := range zkcIntegrationCases {
 		t.Run(tc.name, func(t *testing.T) {
-			binf := readZkcBinary(t, filepath.Join("testdata", tc.name+".bin"))
+			binPath := filepath.Join("testdata", tc.name+".bin")
+			if *updateBinaries {
+				data, err := compileZkcSource(t, filepath.Join("testdata", tc.name+".zkc")).MarshalBinary()
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(binPath, data, 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			binf := readZkcBinary(t, binPath)
 			runZkcIntegration(t, binf, tc.inputs, tc.expected)
 		})
 	}
@@ -99,7 +114,7 @@ func TestZkcIntegrationFromSource(t *testing.T) {
 	}
 }
 
-func readZkcBinary(t *testing.T, filename string) *zkc_constraints.BinaryFile[gocorset_kb.Element] {
+func readZkcBinary(t *testing.T, filename string) *gocorset.BinaryFile {
 	t.Helper()
 
 	data, err := os.ReadFile(filename)
@@ -107,7 +122,7 @@ func readZkcBinary(t *testing.T, filename string) *zkc_constraints.BinaryFile[go
 		t.Fatalf("read %s: %v", filename, err)
 	}
 
-	var binf zkc_constraints.BinaryFile[gocorset_kb.Element]
+	var binf gocorset.BinaryFile
 	if err := binf.UnmarshalBinary(data); err != nil {
 		t.Fatalf("unmarshal %s: %v", filename, err)
 	}
@@ -115,15 +130,15 @@ func readZkcBinary(t *testing.T, filename string) *zkc_constraints.BinaryFile[go
 	return &binf
 }
 
-func compileZkcSource(t *testing.T, filename string) *zkc_constraints.BinaryFile[gocorset_kb.Element] {
-	return compileZkcSourceWithConfig(t, filename, codegen.DEFAULT_CONFIG.Field(field.KOALABEAR_16))
+func compileZkcSource(t *testing.T, filename string) *gocorset.BinaryFile {
+	return compileZkcSourceWithConfig(t, filename, codegen.DEFAULT_CONFIG)
 }
 
 func compileZkcSourceWithConfig(
 	t *testing.T,
 	filename string,
 	config codegen.Config,
-) *zkc_constraints.BinaryFile[gocorset_kb.Element] {
+) *gocorset.BinaryFile {
 	t.Helper()
 
 	data, err := os.ReadFile(filename)
@@ -132,22 +147,22 @@ func compileZkcSourceWithConfig(
 	}
 
 	srcfile := *source.NewSourceFile(filename, data)
-	program, _, syntaxErrors := zkc_compiler.Compile(field.KOALABEAR_16, srcfile)
+	program, _, syntaxErrors := zkc_compiler.Compile(field.KOALABEAR_16, config.GetMaxStaticHeight(), srcfile)
 	if len(syntaxErrors) > 0 {
 		t.Fatalf("compile %s: %s", filename, formatSyntaxErrors(syntaxErrors))
 	}
 
-	machine, syntaxErrors := program.Compile(config)
+	machine, syntaxErrors := ast.Compile(program, config)
 	if len(syntaxErrors) > 0 {
 		t.Fatalf("codegen %s: %s", filename, formatSyntaxErrors(syntaxErrors))
 	}
 
-	return zkc_constraints.NewBinaryFile[gocorset_kb.Element](nil, nil, field.KOALABEAR_16, *machine)
+	return zkc_constraints.NewBinaryFile[gocorset_kb.Element, zkc_vm.Uint32](nil, nil, machine)
 }
 
 func runZkcIntegration(
 	t *testing.T,
-	binf *zkc_constraints.BinaryFile[gocorset_kb.Element],
+	binf *gocorset.BinaryFile,
 	inputs []string,
 	expected zkcExpectedBehavior,
 ) {
@@ -172,33 +187,40 @@ func runZkcIntegration(
 		t.Fatalf("board.Compile: %v", err)
 	}
 
-	const defensivePadding = false
-	traceConfig := zkc_constraints.DEFAULT_TRACE_CONFIG.
-		WithDefensivePadding(defensivePadding).
-		WithParallelism(false)
+	traceConfig := zkc_vm.DEFAULT_TRACE_CONFIG.WithParallelism(false)
 
 	for i, rawInput := range inputs {
 		input, err := zkc_util.ParseJsonInputFile([]byte(rawInput))
 		if err != nil {
 			t.Fatalf("input[%d]: %v", i, err)
 		}
-		traceInput := filterZkcTraceInput(binf, input)
-		publicInputs, err := manifest.PublicInputsFromZkcInput(traceInput)
-		if err != nil {
-			t.Fatalf("public inputs[%d]: %v", i, err)
-		}
+		traceInput, _ := zkc_vm.FilterInputs(binf.TracingProgram(), input)
 
-		expandedTrace, errs := binf.Trace(traceInput, traceConfig)
+		_, lazyTrace, errs := binf.Trace(traceInput, traceConfig)
+		if len(errs) > 0 {
+			t.Fatalf("trace[%d]: %v", i, errors.Join(errs...))
+		}
+		if failures, errs := binf.Check(traceConfig, lazyTrace.Unwrap()); len(failures) > 0 || len(errs) > 0 {
+			t.Fatalf("zkc check[%d]: %v %v", i, failures, errs)
+		}
+		if n := lazyTrace.Unwrap().Len(); n != 1 {
+			t.Fatalf("trace[%d]: %d shards, want 1", i, n)
+		}
+		shard, errs := lazyTrace.Unwrap().Get(0)
 		if len(errs) > 0 {
 			t.Fatalf("trace[%d]: %v", i, errors.Join(errs...))
 		}
 
-		loomTrace, err := gocorset.ExpandedTraceToLoom(expandedTrace, &airSchema, defensivePadding)
+		loomTrace, err := gocorset.ShardToLoom(shard.Unwrap(), &airSchema)
 		if err != nil {
 			t.Fatalf("convert trace[%d]: %v", i, err)
 		}
 
 		gocorset.SetSize(&pg, loomTrace)
+		publicInputs, err := manifest.PublicInputsOf(traceInput, pg)
+		if err != nil {
+			t.Fatalf("public inputs[%d]: %v", i, err)
+		}
 		provingKey, verificationKey, err := loom.Setup(loomTrace, pg)
 		if !checkZkcExpectedOutcome(t, "setup", i, err, expected.Setup) {
 			continue
@@ -231,37 +253,6 @@ func runZkcIntegration(
 			}
 		}
 	}
-}
-
-func filterZkcTraceInput(
-	binf *zkc_constraints.BinaryFile[gocorset_kb.Element],
-	input map[string][]byte,
-) map[string][]byte {
-	machine := binf.WordMachine()
-	filtered := make(map[string][]byte)
-
-	for _, module := range machine.Modules() {
-		mem, ok := module.(zkc_vm.InputOutputMemory[zkc_vm.Uint])
-		if !ok || !mem.IsReadOnly() || mem.IsStatic() {
-			continue
-		}
-		if value, ok := input[module.Name()]; ok {
-			filtered[module.Name()] = value
-		}
-	}
-
-	return filtered
-}
-
-func zkcAirConstraintsIssue(binf *zkc_constraints.BinaryFile[gocorset_kb.Element]) (issue string) {
-	defer func() {
-		if r := recover(); r != nil {
-			issue = fmt.Sprint(r)
-		}
-	}()
-
-	_ = binf.AirConstraints()
-	return ""
 }
 
 func validateZkcExpectedBehavior(t *testing.T, expected zkcExpectedBehavior) {

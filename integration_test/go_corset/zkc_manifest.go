@@ -18,155 +18,95 @@ import (
 	"math/big"
 	"sort"
 
+	"github.com/LFDT-Lineth/zkc/pkg/schema/register"
+	gocorset_kb "github.com/LFDT-Lineth/zkc/pkg/util/field/koalabear"
+	zkc_constraints "github.com/LFDT-Lineth/zkc/pkg/zkc/constraints"
+	"github.com/LFDT-Lineth/zkc/pkg/zkc/vm"
 	gnark_kb "github.com/consensys/gnark-crypto/field/koalabear"
-	corsetmodule "github.com/consensys/go-corset/pkg/schema/module"
-	"github.com/consensys/go-corset/pkg/schema/register"
-	corsettrace "github.com/consensys/go-corset/pkg/trace"
-	gocorset_kb "github.com/consensys/go-corset/pkg/util/field/koalabear"
-	zkc_constraints "github.com/consensys/go-corset/pkg/zkc/constraints"
-	"github.com/consensys/go-corset/pkg/zkc/vm"
 	"github.com/consensys/loom/board"
 	"github.com/consensys/loom/expr"
-	loomfield "github.com/consensys/loom/field"
 	"github.com/consensys/loom/public"
-	loomtrace "github.com/consensys/loom/trace"
 )
+
+// BinaryFile is a zkc binary over koalabear, traced with 32-bit words.
+type BinaryFile = zkc_constraints.BinaryFile[gocorset_kb.Element, vm.Uint32]
+
+type memory = vm.Memory[vm.Uint32]
 
 const zkcPublicInputPrefix = "__public__."
 
 // FrontendManifest carries frontend-level information that is not explicit in
-// air.Schema, such as public input memories and static setup tables.
+// air.Schema: the public input memories, which become loom public inputs.
 type FrontendManifest struct {
-	StaticModules map[string]StaticModule
-	PublicInputs  map[string]PublicValueSpec
-	PublicOutputs map[string]PublicValueSpec
-	ExposedValues map[string]ExposedValueSpec
-	TraceModules  map[string]TraceModuleSpec
+	PublicInputs map[string]PublicValueSpec
 
 	publicInputMemories map[string]publicInputMemorySpec
 }
 
-// StaticModule describes a fixed table that can be moved to Loom setup.
-type StaticModule struct {
-	Columns []string
-	Values  [][]gnark_kb.Element
-}
-
-// PublicValueSpec describes one concrete AIR limb column backing a frontend
-// public value. Column is the Loom virtual public-input column name;
-// TraceColumn is the committed zkc trace column it must equal on real rows.
+// PublicValueSpec describes one AIR limb column of a public input memory.
+// Column is the loom public-input column; TraceColumn is the committed zkc
+// trace column it equals.
 type PublicValueSpec struct {
-	Module        string
-	Column        string
-	TraceColumn   string
-	Memory        string
-	Register      string
-	RegisterIndex int
-	AddressLine   int
-	DataLine      int
-	LimbIndex     int
-	LimbShift     uint
-	LimbWidth     uint
-	Field         loomfield.Kind
-}
-
-// ExposedValueSpec reserves manifest space for prover-exposed local values.
-type ExposedValueSpec struct {
-	Module string
-	Column string
-	Index  int
-	Field  loomfield.Kind
-}
-
-// TraceModuleSpec records frontend trace-shape metadata.
-type TraceModuleSpec struct {
-	HasFrontPadding  bool
-	DefensivePadding bool
-	OriginalName     string
+	Module      string
+	Column      string
+	TraceColumn string
+	Register    int // index of the register in the memory
+	LimbShift   uint
+	LimbWidth   uint
 }
 
 type publicInputMemorySpec struct {
-	Name             string
-	Module           string
-	AddressRegisters []register.Register
-	DataRegisters    []register.Register
-	Specs            []PublicValueSpec
+	mem   memory
+	specs []PublicValueSpec
 }
 
-// NewZkcManifest builds a manifest from a zkc binary. Public input memories are
-// represented as Loom public-input columns with bridge constraints tying them
-// to the committed zkc memory trace columns.
-func NewZkcManifest(binf *zkc_constraints.BinaryFile[gocorset_kb.Element]) (*FrontendManifest, error) {
+// NewZkcManifest builds a manifest from a zkc binary.
+func NewZkcManifest(binf *BinaryFile) (*FrontendManifest, error) {
 	if binf == nil {
 		return nil, fmt.Errorf("NewZkcManifest: nil binary file")
 	}
-
-	airSchema := binf.AirConstraints()
-	limbsMap := binf.LimbsMap()
 	manifest := &FrontendManifest{
-		StaticModules:       make(map[string]StaticModule),
 		PublicInputs:        make(map[string]PublicValueSpec),
-		PublicOutputs:       make(map[string]PublicValueSpec),
-		ExposedValues:       make(map[string]ExposedValueSpec),
-		TraceModules:        make(map[string]TraceModuleSpec),
 		publicInputMemories: make(map[string]publicInputMemorySpec),
 	}
-
-	for _, mod := range airSchema.Modules().Collect() {
-		if mod.Width() == 0 {
+	limbsMap := binf.LimbsMap()
+	program := binf.TracingProgram()
+	for it := program.Inputs(); it.HasNext(); {
+		mem := it.Next()
+		if !mem.IsPublic() || !mem.IsReadOnly() || mem.IsStatic() {
 			continue
 		}
-		modName := mod.Name().String()
-		manifest.TraceModules[modName] = TraceModuleSpec{
-			HasFrontPadding: mod.AllowPadding(),
-			OriginalName:    modName,
-		}
-		if mod.IsStatic() {
-			staticModule, err := buildStaticModule(modName, mod.Registers(), mod.StaticContents())
-			if err != nil {
-				return nil, err
+		mapping := limbsMap.ModuleOf(mem.Name())
+		var specs []PublicValueSpec
+		for i, reg := range mem.Registers() {
+			if !reg.Bitwidth().HasValue() {
+				return nil, fmt.Errorf("NewZkcManifest: memory %q register %q is native", mem.Name(), reg.Name())
 			}
-			manifest.StaticModules[modName] = staticModule
-		}
-	}
-
-	machine := binf.WordMachine()
-	for _, mod := range machine.Modules() {
-		mem, ok := mod.(vm.InputOutputMemory[vm.Uint])
-		if !ok || !mem.IsPublic() {
-			continue
-		}
-
-		specs, err := zkcMemoryValueSpecs(mem, limbsMap)
-		if err != nil {
-			return nil, err
-		}
-
-		switch {
-		case mem.IsReadOnly() && !mem.IsStatic():
-			for _, spec := range specs {
+			shift := uint(0)
+			for _, limbID := range mapping.LimbIds(register.NewId(uint(i))) {
+				limb := mapping.Limb(limbID)
+				traceColumn := qualifyColumnName(mem.Name(), limb.Name())
+				spec := PublicValueSpec{
+					Module:      mem.Name(),
+					Column:      zkcPublicInputPrefix + traceColumn,
+					TraceColumn: traceColumn,
+					Register:    i,
+					LimbShift:   shift,
+					LimbWidth:   limb.Width(),
+				}
+				specs = append(specs, spec)
 				manifest.PublicInputs[spec.Column] = spec
-			}
-			manifest.publicInputMemories[mem.Name()] = newPublicInputMemorySpec(mem, specs)
-
-		case mem.IsWriteOnly():
-			for _, spec := range specs {
-				manifest.PublicOutputs[spec.Column] = spec
+				shift += limb.Width()
 			}
 		}
+		manifest.publicInputMemories[mem.Name()] = publicInputMemorySpec{mem, specs}
 	}
-
 	return manifest, nil
 }
 
-// PublicInputColumnName returns the Loom virtual public-input column for a
-// committed zkc trace column.
-func PublicInputColumnName(traceColumn string) string {
-	return zkcPublicInputPrefix + traceColumn
-}
-
-// ApplyToBridge augments a CorsetBridge with manifest-driven bridge metadata
-// and constraints.
+// ApplyToBridge ties every public input memory's columns to their public
+// inputs, on all rows: zkc's padding rows included, whose public values are
+// the registers' padding.
 func (m *FrontendManifest) ApplyToBridge(bridge *CorsetBridge) error {
 	if m == nil {
 		return nil
@@ -174,309 +114,98 @@ func (m *FrontendManifest) ApplyToBridge(bridge *CorsetBridge) error {
 	if bridge == nil || bridge.Builder == nil {
 		return fmt.Errorf("FrontendManifest.ApplyToBridge: nil bridge")
 	}
-
-	publicInputs := sortedKeys(m.PublicInputs)
-	for _, name := range publicInputs {
+	for _, name := range sortedKeys(m.PublicInputs) {
 		spec := m.PublicInputs[name]
-		if spec.Field == loomfield.Ext {
-			return fmt.Errorf("FrontendManifest.ApplyToBridge: extension public input %q is not supported", spec.Column)
-		}
 		if _, ok := bridge.Builder.Modules[spec.Module]; !ok {
 			return fmt.Errorf("FrontendManifest.ApplyToBridge: public input module %q not found in builder", spec.Module)
 		}
 		relation := expr.Col(spec.TraceColumn).Sub(expr.PublicInput(spec.Column))
-		relation = relation.Mul(expr.Col(isRealColName(spec.Module)))
 		if err := bridge.Builder.AssertZero(spec.Module, relation); err != nil {
 			return err
 		}
 	}
-
 	return nil
 }
 
-// SetupTrace returns a trace containing only manifest static columns. The
-// program must already have module sizes set, because setup commitments are
-// grouped by those sizes.
-func (m *FrontendManifest) SetupTrace(program board.Program) (loomtrace.Trace, error) {
-	res := loomtrace.New()
-	if m == nil {
-		return res, nil
-	}
-
-	moduleNames := sortedKeys(m.StaticModules)
-	for _, moduleName := range moduleNames {
-		module, ok := program.Modules[moduleName]
-		if !ok {
-			return loomtrace.Trace{}, fmt.Errorf("FrontendManifest.SetupTrace: module %q not found in program", moduleName)
-		}
-		if module.N <= 0 {
-			return loomtrace.Trace{}, fmt.Errorf("FrontendManifest.SetupTrace: module %q has unset size", moduleName)
-		}
-
-		staticModule := m.StaticModules[moduleName]
-		rows := len(staticModule.Values)
-		if rows > module.N {
-			return loomtrace.Trace{}, fmt.Errorf(
-				"FrontendManifest.SetupTrace: static module %q has %d rows, program size is %d",
-				moduleName,
-				rows,
-				module.N,
-			)
-		}
-		for colIdx, colName := range staticModule.Columns {
-			poly := make([]gnark_kb.Element, module.N)
-			for row := range rows {
-				if colIdx >= len(staticModule.Values[row]) {
-					return loomtrace.Trace{}, fmt.Errorf("FrontendManifest.SetupTrace: static module %q row %d is missing column %d", moduleName, row, colIdx)
-				}
-				poly[row].Set(&staticModule.Values[row][colIdx])
-			}
-			if err := res.PutBase(colName, poly); err != nil {
-				return loomtrace.Trace{}, err
-			}
-		}
-	}
-
-	return res, nil
-}
-
-// PublicInputsFromZkcInput extracts Loom public inputs from the JSON-decoded
-// zkc input map. Public zkc input memories are packed byte arrays; their
-// addresses are implicit row indices.
-func (m *FrontendManifest) PublicInputsFromZkcInput(input map[string][]byte) (public.Inputs, error) {
+// PublicInputsOf returns the loom public inputs of a zkc input. A public input
+// memory of h words is traced as N − h padding rows followed by its words in
+// address order (address = row − (N − h)), N being its module's size in pg.
+func (m *FrontendManifest) PublicInputsOf(input map[string][]byte, pg board.Program) (public.Inputs, error) {
 	res := make(public.Inputs)
 	if m == nil {
 		return res, nil
 	}
-
-	memoryNames := sortedKeys(m.publicInputMemories)
-	for _, memoryName := range memoryNames {
-		mem := m.publicInputMemories[memoryName]
-		raw, ok := input[memoryName]
+	for _, name := range sortedKeys(m.publicInputMemories) {
+		spec := m.publicInputMemories[name]
+		mem := spec.mem
+		raw, ok := input[name]
 		if !ok {
-			return nil, fmt.Errorf("PublicInputsFromZkcInput: missing public input memory %q", memoryName)
+			return nil, fmt.Errorf("PublicInputs: missing public input memory %q", name)
 		}
-		if len(mem.DataRegisters) == 0 {
-			return nil, fmt.Errorf("PublicInputsFromZkcInput: public input memory %q has no data registers", memoryName)
+		module, ok := pg.Modules[name]
+		if !ok {
+			return nil, fmt.Errorf("PublicInputs: module %q not found in program", name)
 		}
-
-		decoded := vm.DecodeBytes[vm.Uint](raw, mem.DataRegisters)
-		if len(decoded)%len(mem.DataRegisters) != 0 {
-			return nil, fmt.Errorf(
-				"PublicInputsFromZkcInput: public input memory %q decodes to %d values, not a multiple of %d data registers",
-				memoryName,
-				len(decoded),
-				len(mem.DataRegisters),
-			)
+		nData := len(mem.DataRegisters())
+		words := vm.DecodeBytes[vm.Uint32](raw, mem)
+		if nData == 0 || len(words)%nData != 0 {
+			return nil, fmt.Errorf("PublicInputs: memory %q decodes to %d words, for %d data registers", name, len(words), nData)
 		}
-
-		rows := len(decoded) / len(mem.DataRegisters)
-		for _, spec := range mem.Specs {
-			entries := make([]public.Entry, rows)
-			for row := range rows {
-				value, err := publicInputMemoryValue(mem, decoded, row, spec)
-				if err != nil {
-					return nil, err
+		h, n := len(words)/nData, module.N
+		if h > n {
+			return nil, fmt.Errorf("PublicInputs: memory %q has %d rows, its module %d", name, h, n)
+		}
+		regs := mem.Registers()
+		nAddr := len(mem.AddressRegisters())
+		for _, s := range spec.specs {
+			entries := make([]public.Entry, n)
+			for row := range n {
+				var value *big.Int
+				switch a := row - (n - h); {
+				case a < 0:
+					value = regs[s.Register].Padding().BigInt()
+				case s.Register < nAddr:
+					v, err := addressLineValue(a, mem.AddressRegisters(), s.Register)
+					if err != nil {
+						return nil, fmt.Errorf("PublicInputs: memory %q: %w", name, err)
+					}
+					value = v
+				default:
+					value = words[a*nData+s.Register-nAddr].BigInt()
 				}
-				limb := limbValue(value, spec.LimbShift, spec.LimbWidth)
 				var elem gnark_kb.Element
-				elem.SetBigInt(limb)
+				elem.SetBigInt(limbValue(value, s.LimbShift, s.LimbWidth))
 				entries[row].Idx = row
 				entries[row].SetBase(elem)
 			}
-			res[spec.Column] = public.Input{Module: spec.Module, Entries: entries}
+			res[s.Column] = public.Input{Module: s.Module, Entries: entries}
 		}
 	}
-
 	return res, nil
 }
 
-func buildStaticModule(
-	moduleName string,
-	registers []register.Register,
-	contents []gocorset_kb.Element,
-) (StaticModule, error) {
-	width := len(registers)
-	if width == 0 {
-		return StaticModule{}, nil
-	}
-	if len(contents)%width != 0 {
-		return StaticModule{}, fmt.Errorf(
-			"buildStaticModule: static module %q has %d values, not a multiple of width %d",
-			moduleName,
-			len(contents),
-			width,
-		)
-	}
-
-	columns := make([]string, width)
-	for i, reg := range registers {
-		columns[i] = qualifyColumnName(moduleName, reg.Name())
-	}
-
-	rows := len(contents) / width
-	values := make([][]gnark_kb.Element, rows)
-	for row := range rows {
-		values[row] = make([]gnark_kb.Element, width)
-		for col := range width {
-			values[row][col] = toGnarkElement(contents[row*width+col])
+// addressLineValue returns line `line` of the address lines encoding address
+// a, the last line being the least significant.
+func addressLineValue(a int, lines []vm.Register[vm.Uint32], line int) (*big.Int, error) {
+	var total, shift uint
+	for i, r := range lines {
+		w := r.Bitwidth().Unwrap()
+		total += w
+		if i > line {
+			shift += w
 		}
 	}
-
-	return StaticModule{Columns: columns, Values: values}, nil
-}
-
-func zkcMemoryValueSpecs(
-	mem vm.InputOutputMemory[vm.Uint],
-	limbsMap corsetmodule.LimbsMap,
-) ([]PublicValueSpec, error) {
-	registers := mem.Registers()
-	addressLines := int(mem.Geometry().AddressLines())
-	dataLines := int(mem.Geometry().DataLines())
-	if len(registers) < addressLines+dataLines {
-		return nil, fmt.Errorf(
-			"zkcMemoryValueSpecs: memory %q has %d registers, expected at least %d address/data registers",
-			mem.Name(),
-			len(registers),
-			addressLines+dataLines,
-		)
+	addr := big.NewInt(int64(a))
+	if addr.BitLen() > int(total) {
+		return nil, fmt.Errorf("address %d does not fit in %d bits", a, total)
 	}
-
-	moduleMapping, ok := limbModule(limbsMap, mem.Name())
-	if !ok {
-		return nil, fmt.Errorf("zkcMemoryValueSpecs: memory module %q not found in limb map", mem.Name())
-	}
-
-	specs := make([]PublicValueSpec, 0, addressLines+dataLines)
-	for i := 0; i < addressLines+dataLines; i++ {
-		reg := registers[i]
-		if reg.IsNative() {
-			return nil, fmt.Errorf("zkcMemoryValueSpecs: memory %q register %q is native", mem.Name(), reg.Name())
-		}
-
-		limbIDs := moduleMapping.LimbIds(register.NewId(uint(i)))
-		shift := uint(0)
-		for limbIndex, limbID := range limbIDs {
-			limb := moduleMapping.Limb(limbID)
-			traceColumn := qualifyColumnName(mem.Name(), limb.Name())
-			spec := PublicValueSpec{
-				Module:        mem.Name(),
-				Column:        PublicInputColumnName(traceColumn),
-				TraceColumn:   traceColumn,
-				Memory:        mem.Name(),
-				Register:      reg.Name(),
-				RegisterIndex: i,
-				AddressLine:   -1,
-				DataLine:      -1,
-				LimbIndex:     limbIndex,
-				LimbShift:     shift,
-				LimbWidth:     limb.Width(),
-				Field:         loomfield.Base,
-			}
-			if i < addressLines {
-				spec.AddressLine = i
-			} else {
-				spec.DataLine = i - addressLines
-			}
-			specs = append(specs, spec)
-			shift += limb.Width()
-		}
-	}
-
-	return specs, nil
-}
-
-func newPublicInputMemorySpec(
-	mem vm.InputOutputMemory[vm.Uint],
-	specs []PublicValueSpec,
-) publicInputMemorySpec {
-	registers := mem.Registers()
-	addressLines := int(mem.Geometry().AddressLines())
-	dataLines := int(mem.Geometry().DataLines())
-
-	addressRegisters := append([]register.Register(nil), registers[:addressLines]...)
-	dataRegisters := append([]register.Register(nil), registers[addressLines:addressLines+dataLines]...)
-	specs = append([]PublicValueSpec(nil), specs...)
-
-	return publicInputMemorySpec{
-		Name:             mem.Name(),
-		Module:           mem.Name(),
-		AddressRegisters: addressRegisters,
-		DataRegisters:    dataRegisters,
-		Specs:            specs,
-	}
-}
-
-func publicInputMemoryValue(
-	mem publicInputMemorySpec,
-	decoded []vm.Uint,
-	row int,
-	spec PublicValueSpec,
-) (*big.Int, error) {
-	switch {
-	case spec.AddressLine >= 0:
-		return addressLineValue(row, mem.AddressRegisters, spec.AddressLine)
-	case spec.DataLine >= 0:
-		idx := row*len(mem.DataRegisters) + spec.DataLine
-		if idx < 0 || idx >= len(decoded) {
-			return nil, fmt.Errorf("publicInputMemoryValue: data index %d out of bounds for memory %q", idx, mem.Name)
-		}
-		return decoded[idx].BigInt(), nil
-	default:
-		return nil, fmt.Errorf("publicInputMemoryValue: spec %q is neither address nor data", spec.Column)
-	}
-}
-
-func addressLineValue(row int, addressRegisters []register.Register, line int) (*big.Int, error) {
-	if row < 0 {
-		return nil, fmt.Errorf("addressLineValue: negative row %d", row)
-	}
-	if line < 0 || line >= len(addressRegisters) {
-		return nil, fmt.Errorf("addressLineValue: address line %d out of bounds", line)
-	}
-
-	totalWidth := uint(0)
-	for _, reg := range addressRegisters {
-		if reg.IsNative() {
-			return nil, fmt.Errorf("addressLineValue: native address register %q", reg.Name())
-		}
-		totalWidth += reg.Width()
-	}
-
-	index := new(big.Int).SetUint64(uint64(row))
-	capacity := new(big.Int).Lsh(big.NewInt(1), totalWidth)
-	if index.Cmp(capacity) >= 0 {
-		return nil, fmt.Errorf("addressLineValue: row %d does not fit in %d address bits", row, totalWidth)
-	}
-
-	shift := uint(0)
-	for i := line + 1; i < len(addressRegisters); i++ {
-		shift += addressRegisters[i].Width()
-	}
-
-	width := addressRegisters[line].Width()
-	value := new(big.Int).Rsh(index, shift)
-	mask := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), width), big.NewInt(1))
-	value.And(value, mask)
-	return value, nil
+	return limbValue(addr, shift, lines[line].Bitwidth().Unwrap()), nil
 }
 
 func limbValue(value *big.Int, shift, width uint) *big.Int {
-	limb := new(big.Int).Rsh(new(big.Int).Set(value), shift)
+	limb := new(big.Int).Rsh(value, shift)
 	mask := new(big.Int).Sub(new(big.Int).Lsh(big.NewInt(1), width), big.NewInt(1))
-	limb.And(limb, mask)
-	return limb
-}
-
-func limbModule(mapping corsetmodule.LimbsMap, moduleName string) (register.LimbsMap, bool) {
-	target := corsettrace.ModuleName{Name: moduleName, Multiplier: 1}
-	for i := uint(0); i < mapping.Width(); i++ {
-		ith := mapping.Module(i)
-		if ith.Name() == target {
-			return ith, true
-		}
-	}
-	return nil, false
+	return limb.And(limb, mask)
 }
 
 func qualifyColumnName(moduleName, registerName string) string {
