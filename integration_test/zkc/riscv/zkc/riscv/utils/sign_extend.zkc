@@ -1,0 +1,119 @@
+include "../../common/constants.zkc"
+include "sign_bit.zkc"
+
+const SGNEXTMASK_U32:u64 = 0xFFFFFFFF_00000000
+
+// Upper 52 bits set; OR with zero-extended u21 when sign (bit 20) is 1.
+const SGNEXTMASK_U21:u64 = 0xFFFFFFFF_FFE00000
+
+// Upper 52 bits set; OR with zero-extended u12 when sign (bit 11) is 1.
+const SGNEXTMASK_U12:u64 = 0xFFFFFFFF_FFFFF000
+
+const SGNEXTMASK_U12_U32:u32 = 0xFFFFF000
+
+// Upper 56 bits set; OR with zero-extended u8 when sign (bit 7) is 1.
+const SGNEXTMASK_U8:u64 = 0xFFFFFFFF_FFFFFF00
+
+// Upper 48 bits set; OR with zero-extended u16 when sign (bit 15) is 1.
+const SGNEXTMASK_U16:u64 = 0xFFFFFFFF_FFFF0000
+
+// Sign extension functions are branch-free
+// Shift right extracts the sign bit
+// Use multiply as a switch to set or not upper bits
+
+//#[inline]
+fn sgn_extension_u32_u64(value:u32) -> (ext_value:u64) {
+    var sign:u1, tmp:u31
+    //
+    sign::tmp = value
+    //
+    if sign == 1 {
+        ext_value = (value as u64) + SGNEXTMASK_U32
+    } else {
+        ext_value = (value as u64)
+    }
+}
+
+// -- PREDECODING PROOF SECTION -- 
+//#[inline]
+// fn sgn_extension_u21_u64(value:u21) -> (ext_value:u64) {
+//     var sign:u1, tmp:u20
+//     //
+//     sign::tmp = value
+//     //
+//     if sign == 1 {
+//         ext_value = (value as u64) + SGNEXTMASK_U21
+//     } else {
+//         ext_value = (value as u64)
+//     }
+// }
+// -- PREDECODING PROOF SECTION END-- 
+
+//#[inline]
+fn sgn_extension_u16_u64(value:u16) -> (ext_value:u64) {
+    var sign:u1, tmp:u15
+    //
+    sign::tmp = value
+    //
+    if sign == 1 {
+        ext_value = (value as u64) + SGNEXTMASK_U16
+    } else {
+        ext_value = (value as u64)
+    }
+}
+
+// -- PREDECODING PROOF SECTION -- 
+//#[inline]
+// fn sgn_extension_u12_u64(value:u12) -> (ext_value:u64) {
+//     var sign:u1, tmp:u11
+//     //
+//     sign::tmp = value
+//     //
+//     if sign == 1 {
+//         ext_value = (value as u64) + SGNEXTMASK_U12
+//     } else {
+//         ext_value = (value as u64)
+//     }
+// }
+// -- PREDECODING PROOF SECTION END-- 
+
+//#[inline]
+fn sgn_extension_u8_u64(value:u8) -> (ext_value:u64) {
+    var sign:u1, tmp:u7
+    //
+    sign::tmp = value
+    //
+    if sign == 1 {
+        ext_value = (value as u64) + SGNEXTMASK_U8
+    } else {
+        ext_value = (value as u64)
+    }
+}
+
+// 64-bit arithmetic right shift
+//#[inline]
+fn _ashr_u64(value:DoubleWord, shamt:u6) -> (out:DoubleWord) {
+    var sign:SignBit = sign_bit_of_double_word(value)
+    var logical:DoubleWord = value >> shamt
+    if sign == 0 {
+        out = logical
+    } else {
+        var mask:DoubleWord = ~(MAX_UINT_64 >> shamt)
+        out = logical | mask
+    }
+}
+
+// 32-bit arithmetic right shift on low 32 bits of value
+//#[inline]
+fn _ashr_u32(value:DoubleWord, shamt:u5) -> (out:Word) {
+    var w:u32 = (value & MAX_UINT_32_AS_U64) as Word
+    var sign:SignBit = sign_bit_of_word(w)
+    var logical:u32 = w >> shamt
+    if sign == 0 {
+        out = logical
+    } else {
+        var mask:u32 = ~(MAX_UINT_32 >> shamt)
+        out = logical | mask
+    }
+}
+

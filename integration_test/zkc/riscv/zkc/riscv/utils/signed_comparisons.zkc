@@ -1,0 +1,30 @@
+include "sign_bit.zkc"
+include "../../common/type.zkc"
+
+// signed_LT should return true (i.e. 1) iff a < b where a and b are interpreted as signed i64's
+//#[inline]
+fn signed_LT(a:DoubleWord, b:DoubleWord) -> (comparison:u1) {
+    var a_sign:u1
+    var b_sign:u1
+    var a_suffix:u63
+    var b_suffix:u63
+    var tmp:u64
+    // extract sign bits
+    a_sign::a_suffix = a
+    b_sign::b_suffix = b
+    // parity check
+    if a_sign != b_sign {
+        // different signs case: a < b iff a is negative (a_sign == 1)
+        comparison = a_sign
+        // same signs case
+    } else {
+        // this applies both in the signed case as in the unsigned case, e.g.
+        // ∙  2^31 ≡ 0x80..00
+        // ∙  1    ≡ 0xff..ff
+        // we have both
+        // ∙  2^31 < -1
+        // ∙  0x80..00 < 0xff..ff
+        comparison::tmp = (a - b) as u65
+    }
+}
+

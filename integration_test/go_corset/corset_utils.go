@@ -290,9 +290,15 @@ func ScanConstraints(bridge *CorsetBridge) {
 
 // ====================== Trace loading =========================
 
+// MinModuleRows is the smallest module size: loom's FRI has no level of size 1.
+const MinModuleRows = 2
+
 // ShardToLoom converts a zkc trace shard into a loom trace. Dynamic modules
 // are taken from the shard, whose heights are powers of two (zkc's
-// next-power-of-two padding); an empty module becomes one row of zeros.
+// next-power-of-two padding). A module of fewer than MinModuleRows rows is
+// padded at the front by repeating its first row: a one-row module holds only
+// zkc's padding row (zkc pads at the front, with rows satisfying the module's
+// constraints), and an empty module becomes rows of zeros.
 // Static modules are not traced by zkc: their columns are built from the
 // schema (see StaticColumns), and are setup columns in loom.
 func ShardToLoom(
@@ -320,19 +326,17 @@ func ShardToLoom(
 			return trace.Trace{}, fmt.Errorf("ShardToLoom: shard module %d is %q, schema module is %q", i, mod.Name(), scMod.Name())
 		}
 		h := mod.Height()
-		n := h
-		if n == 0 {
-			n = 1
-		}
-		if ecc.NextPowerOfTwo(uint64(n)) != uint64(n) {
+		if ecc.NextPowerOfTwo(uint64(max(h, 1))) != uint64(max(h, 1)) {
 			return trace.Trace{}, fmt.Errorf("ShardToLoom: module %q has height %d, not a power of two", mod.Name(), h)
 		}
+		n := max(h, MinModuleRows)
+		pad := n - h // front rows repeating row 0
 		for j := range mod.Width() {
 			key := qualifyColumnName(mod.Name(), mod.Descriptor().Columns[j].Name)
 			poly := make([]gnark_kb.Element, n)
-			if col := mod.Column(j); col != nil {
-				for r := range h {
-					poly[r] = toGnarkElement(col.Get(r))
+			if col := mod.Column(j); col != nil && h > 0 {
+				for r := range n {
+					poly[r] = toGnarkElement(col.Get(max(r, pad) - pad))
 				}
 			}
 			t.SetBase(key, poly)

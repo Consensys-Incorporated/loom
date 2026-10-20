@@ -18,7 +18,6 @@ import (
 	"math/big"
 	"sort"
 
-	"github.com/LFDT-Lineth/zkc/pkg/schema/register"
 	gocorset_kb "github.com/LFDT-Lineth/zkc/pkg/util/field/koalabear"
 	zkc_constraints "github.com/LFDT-Lineth/zkc/pkg/zkc/constraints"
 	"github.com/LFDT-Lineth/zkc/pkg/zkc/vm"
@@ -43,16 +42,14 @@ type FrontendManifest struct {
 	publicInputMemories map[string]publicInputMemorySpec
 }
 
-// PublicValueSpec describes one AIR limb column of a public input memory.
-// Column is the loom public-input column; TraceColumn is the committed zkc
-// trace column it equals.
+// PublicValueSpec describes one column of a public input memory. Column is
+// the loom public-input column; TraceColumn is the committed zkc trace column
+// it equals.
 type PublicValueSpec struct {
 	Module      string
 	Column      string
 	TraceColumn string
 	Register    int // index of the register in the memory
-	LimbShift   uint
-	LimbWidth   uint
 }
 
 type publicInputMemorySpec struct {
@@ -60,7 +57,10 @@ type publicInputMemorySpec struct {
 	specs []PublicValueSpec
 }
 
-// NewZkcManifest builds a manifest from a zkc binary.
+// NewZkcManifest builds a manifest from a zkc binary. The memories are read
+// from the tracing program, whose registers are already split into the limbs
+// of the AIR (e.g. a u64 register x into x'3 … x'0 of 16 bits): each register
+// is one trace column.
 func NewZkcManifest(binf *BinaryFile) (*FrontendManifest, error) {
 	if binf == nil {
 		return nil, fmt.Errorf("NewZkcManifest: nil binary file")
@@ -69,35 +69,26 @@ func NewZkcManifest(binf *BinaryFile) (*FrontendManifest, error) {
 		PublicInputs:        make(map[string]PublicValueSpec),
 		publicInputMemories: make(map[string]publicInputMemorySpec),
 	}
-	limbsMap := binf.LimbsMap()
 	program := binf.TracingProgram()
 	for it := program.Inputs(); it.HasNext(); {
 		mem := it.Next()
 		if !mem.IsPublic() || !mem.IsReadOnly() || mem.IsStatic() {
 			continue
 		}
-		mapping := limbsMap.ModuleOf(mem.Name())
 		var specs []PublicValueSpec
 		for i, reg := range mem.Registers() {
 			if !reg.Bitwidth().HasValue() {
 				return nil, fmt.Errorf("NewZkcManifest: memory %q register %q is native", mem.Name(), reg.Name())
 			}
-			shift := uint(0)
-			for _, limbID := range mapping.LimbIds(register.NewId(uint(i))) {
-				limb := mapping.Limb(limbID)
-				traceColumn := qualifyColumnName(mem.Name(), limb.Name())
-				spec := PublicValueSpec{
-					Module:      mem.Name(),
-					Column:      zkcPublicInputPrefix + traceColumn,
-					TraceColumn: traceColumn,
-					Register:    i,
-					LimbShift:   shift,
-					LimbWidth:   limb.Width(),
-				}
-				specs = append(specs, spec)
-				manifest.PublicInputs[spec.Column] = spec
-				shift += limb.Width()
+			traceColumn := qualifyColumnName(mem.Name(), reg.Name())
+			spec := PublicValueSpec{
+				Module:      mem.Name(),
+				Column:      zkcPublicInputPrefix + traceColumn,
+				TraceColumn: traceColumn,
+				Register:    i,
 			}
+			specs = append(specs, spec)
+			manifest.PublicInputs[spec.Column] = spec
 		}
 		manifest.publicInputMemories[mem.Name()] = publicInputMemorySpec{mem, specs}
 	}
@@ -174,7 +165,7 @@ func (m *FrontendManifest) PublicInputsOf(input map[string][]byte, pg board.Prog
 					value = words[a*nData+s.Register-nAddr].BigInt()
 				}
 				var elem gnark_kb.Element
-				elem.SetBigInt(limbValue(value, s.LimbShift, s.LimbWidth))
+				elem.SetBigInt(value)
 				entries[row].Idx = row
 				entries[row].SetBase(elem)
 			}
