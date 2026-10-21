@@ -46,6 +46,21 @@ type VerifierOption func(*verifierConfig) error
 
 type verifierConfig struct {
 	dynamic map[string]bool
+	machine *Machine
+}
+
+// WithMachine builds the verifier into m instead of a new machine, after what
+// m already holds: several verifiers built into one machine verify several
+// proofs in one circuit, whose inputs are the verifiers' Inputs, concatenated
+// in the order the verifiers were built.
+func WithMachine(m *Machine) VerifierOption {
+	return func(c *verifierConfig) error {
+		if m == nil {
+			return fmt.Errorf("WithMachine: nil machine")
+		}
+		c.machine = m
+		return nil
+	}
 }
 
 // WithDynamicModules makes the sizes of the given modules inputs of the

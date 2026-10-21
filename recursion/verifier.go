@@ -220,8 +220,12 @@ func newVerifier(program board.Program, vk setup.VerificationKey, shape Shape, o
 	if backend.ID != fri.HashBackendPoseidon2 {
 		return nil, fmt.Errorf("NewVerifier: hash backend %q, the circuit hashes with %q", backend.ID, fri.HashBackendPoseidon2)
 	}
+	machine := cfg.machine
+	if machine == nil {
+		machine = &Machine{}
+	}
 	v := &Verifier{
-		M:          &Machine{},
+		M:          machine,
 		program:    program,
 		vk:         vk,
 		shape:      shape,

@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/LFDT-Lineth/zkc/pkg/ir"
 	"github.com/LFDT-Lineth/zkc/pkg/ir/air"
 	"github.com/LFDT-Lineth/zkc/pkg/schema"
 	"github.com/LFDT-Lineth/zkc/pkg/schema/constraint/bus"
@@ -300,6 +301,16 @@ func ScanConstraints(bridge *CorsetBridge) {
 }
 
 // ====================== Trace loading =========================
+
+// PaddingAtLeast returns zkc's next-power-of-two padding strategy with a
+// floor: every module is padded (at the front, with zkc's padding rows) to a
+// power of two of at least minRows rows. A size-oblivious verifier needs it,
+// whose dynamic modules must be larger than twice their largest shift.
+func PaddingAtLeast(minRows uint) ir.PaddingStrategy {
+	return func(height, multiplier uint) uint {
+		return max(uint(ecc.NextPowerOfTwo(uint64(height))), minRows) * multiplier
+	}
+}
 
 // MinModuleRows is the smallest module size: loom's FRI has no level of size 1.
 const MinModuleRows = 2
