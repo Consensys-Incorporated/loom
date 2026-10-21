@@ -17,7 +17,6 @@ import (
 	"fmt"
 
 	"github.com/consensys/gnark-crypto/field/koalabear"
-	"github.com/consensys/loom/arguments"
 	"github.com/consensys/loom/board"
 	"github.com/consensys/loom/expr"
 )
@@ -303,7 +302,7 @@ func (c dpathChip) define(b *board.Builder, bus *Bus) error {
 		src.In[2*digest+i] = op[i].Add(bit.Mul(cur[i].Sub(op[i])))
 		src.In[width+i] = out[i]
 	}
-	return arguments.CLookupTuple(b, src, p2Table(digest), started, one())
+	return bus.Lookup(board.CTable{Table: src, Sel: started}, board.CTable{Table: p2Table(digest)})
 }
 
 func (c dpathChip) setup(cs *cols) {

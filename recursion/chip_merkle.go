@@ -17,7 +17,6 @@ import (
 	"fmt"
 
 	"github.com/consensys/gnark-crypto/field/koalabear"
-	"github.com/consensys/loom/arguments"
 	"github.com/consensys/loom/board"
 	"github.com/consensys/loom/expr"
 )
@@ -241,7 +240,7 @@ func (c merkleChip) define(b *board.Builder, bus *Bus) error {
 		src.In[2*digest+i] = sib.Add(bit.Mul(cur.Sub(sib)))
 		src.In[width+i] = col(merkleMod, laneName(merkleOut, i))
 	}
-	return arguments.CLookupTuple(b, src, p2Table(digest), active, one())
+	return bus.Lookup(board.CTable{Table: src, Sel: active}, board.CTable{Table: p2Table(digest)})
 }
 
 func (c merkleChip) setup(cs *cols) {

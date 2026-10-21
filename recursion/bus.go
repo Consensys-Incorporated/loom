@@ -58,8 +58,19 @@ type access struct {
 // buses are kept apart by being checked against zero separately: a fraction
 // of one cannot balance a fraction of the other.
 type Bus struct {
-	accesses []access // the memory
-	entries  []access // the tables
+	accesses []access           // the memory
+	entries  []access           // the tables
+	lookups  *arguments.Lookups // the lookups (into the P2 core), grouped by target
+}
+
+// Lookup adds the lookup {row(source) | source.Sel ≠ 0} ⊂ {row(target) |
+// target.Sel ≠ 0}. The lookups into the same target share its multiplicity,
+// see arguments.Lookups.
+func (b *Bus) Lookup(source, target board.CTable) error {
+	if b.lookups == nil {
+		b.lookups = arguments.NewLookups()
+	}
+	return b.lookups.Add(source, target)
 }
 
 // Write adds a write of vals at addr with multiplicity mult.
@@ -91,20 +102,25 @@ func negate(e expr.Expr) expr.Expr {
 	return expr.Const(neg).Mul(e)
 }
 
-// Build adds the bus arguments, the memory's and (if any) the tables': the
-// accessed values are committed at RoundFold, tuples are folded with
-// Coin(RoundFold), and the accesses of each module are batched into cyclic
-// logup columns at RoundRunningSums, whose totals must sum to zero, for each
-// bus on its own.
+// Build adds the bus arguments, the memory's, the tables' and the lookups' (if
+// any). For the memory and the tables: the accessed values are committed at
+// RoundFold, tuples are folded with Coin(RoundFold), and the accesses of each
+// module are batched into cyclic logup columns at RoundRunningSums, whose
+// totals must sum to zero, for each bus on its own. The lookups are built by
+// arguments.Lookups, on their own bus.
 func (b *Bus) Build(builder *board.Builder) error {
 	if err := buildBus(builder, "bus", b.accesses); err != nil {
 		return fmt.Errorf("memory bus: %w", err)
 	}
-	if len(b.entries) == 0 {
-		return nil
+	if len(b.entries) > 0 {
+		if err := buildBus(builder, "tables", b.entries); err != nil {
+			return fmt.Errorf("tables bus: %w", err)
+		}
 	}
-	if err := buildBus(builder, "tables", b.entries); err != nil {
-		return fmt.Errorf("tables bus: %w", err)
+	if b.lookups != nil {
+		if err := b.lookups.Build(builder); err != nil {
+			return fmt.Errorf("lookups: %w", err)
+		}
 	}
 	return nil
 }

@@ -17,7 +17,6 @@ import (
 	"fmt"
 
 	"github.com/consensys/gnark-crypto/field/koalabear"
-	"github.com/consensys/loom/arguments"
 	"github.com/consensys/loom/board"
 )
 
@@ -128,7 +127,7 @@ func (c spongeChip) define(b *board.Builder, bus *Bus) error {
 		}
 		src.In[width+l] = col(spongeMod, laneName(spongeOut, l))
 	}
-	return arguments.CLookupTuple(b, src, p2Table(width), active, one())
+	return bus.Lookup(board.CTable{Table: src, Sel: active}, board.CTable{Table: p2Table(width)})
 }
 
 func (c spongeChip) setup(cs *cols) {
