@@ -26,9 +26,11 @@ import (
 	"github.com/consensys/loom/trace"
 )
 
-// LogupTerm is one fraction M/E of a logup column.
+// LogupTerm is one fraction M/E of a logup column of Module, which E and M
+// are expressions of.
 type LogupTerm struct {
-	E, M expr.Expr
+	Module string
+	E, M   expr.Expr
 }
 
 // MaxLogupDegree bounds the degree of the constraint of a batched logup
@@ -79,6 +81,11 @@ func LogupTotalName(output string) string {
 func (b *Builder) AddCyclicLogupStep(r int, module string, terms []LogupTerm, output string) (string, error) {
 	if len(terms) == 0 {
 		return "", fmt.Errorf("AddCyclicLogupStep %s: no terms", output)
+	}
+	for _, t := range terms {
+		if t.Module != module {
+			return "", fmt.Errorf("AddCyclicLogupStep %s: a term of module %q in a column of module %q", output, t.Module, module)
+		}
 	}
 	if d := LogupConstraintDegree(terms); d > MaxLogupDegree {
 		return "", fmt.Errorf("AddCyclicLogupStep %s: constraint degree %d exceeds %d", output, d, MaxLogupDegree)

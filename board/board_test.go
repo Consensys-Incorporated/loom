@@ -56,7 +56,7 @@ func TestCompileColumnFieldsForChallengeDerivedOutputs(t *testing.T) {
 
 	builder.StageColumns(RoundFold, "x", "y")
 	denominator := expr.Col("x").Sub(Coin(RoundLogDerivative))
-	if _, err := builder.AddCyclicLogupStep(RoundRunningSums, "m", []LogupTerm{{E: denominator, M: expr.Const(one)}}, "logup"); err != nil {
+	if _, err := builder.AddCyclicLogupStep(RoundRunningSums, "m", []LogupTerm{{Module: "m", E: denominator, M: expr.Const(one)}}, "logup"); err != nil {
 		t.Fatal(err)
 	}
 	builder.AddGrandProductStep(RoundRunningSums, "m", expr.Col("x").Add(Coin(RoundFold)), expr.Col("y"), "gp")
@@ -79,5 +79,24 @@ func TestCompileColumnFieldsForChallengeDerivedOutputs(t *testing.T) {
 				t.Fatalf("FS dependency logup field = %s, want %s", dep.Field, field.Ext)
 			}
 		}
+	}
+}
+
+// TestCyclicLogupStepRejectsOtherModule: a logup column holds the terms of its
+// own module only.
+func TestCyclicLogupStepRejectsOtherModule(t *testing.T) {
+	builder := NewBuilder()
+	for _, name := range []string{"m", "other"} {
+		module := NewModule(name)
+		module.N = 4
+		builder.AddModule(module)
+	}
+	one := expr.Const(koalabear.One())
+	terms := []LogupTerm{
+		{Module: "m", E: expr.Col("m.x").Sub(Coin(RoundLogDerivative)), M: one},
+		{Module: "other", E: expr.Col("other.y").Sub(Coin(RoundLogDerivative)), M: one},
+	}
+	if _, err := builder.AddCyclicLogupStep(RoundRunningSums, "m", terms, "m.logup"); err == nil {
+		t.Fatal("a term of module other accepted in a column of module m")
 	}
 }

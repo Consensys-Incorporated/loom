@@ -112,15 +112,13 @@ func (b *Bus) Build(builder *board.Builder) error {
 func buildBus(builder *board.Builder, name string, accesses []access) error {
 	alpha := board.Coin(board.RoundFold)
 	gamma := board.Coin(board.RoundLogDerivative)
-	var modules []string
 	var terms []board.LogupTerm
 	for _, a := range accesses {
 		builder.StageLeaves(board.RoundFold, a.tuple...)
 		builder.StageLeaves(board.RoundFold, a.mult)
-		modules = append(modules, a.module)
-		terms = append(terms, board.LogupTerm{E: expr.Fold(alpha, a.tuple).Sub(gamma), M: a.mult})
+		terms = append(terms, board.LogupTerm{Module: a.module, E: expr.Fold(alpha, a.tuple).Sub(gamma), M: a.mult})
 	}
-	totals, err := arguments.AddLogupColumns(builder, fmt.Sprintf("%s_%s_", constants.LOGUP, name), modules, terms)
+	totals, err := arguments.AddLogupColumns(builder, fmt.Sprintf("%s_%s_", constants.LOGUP, name), terms)
 	if err != nil {
 		return err
 	}

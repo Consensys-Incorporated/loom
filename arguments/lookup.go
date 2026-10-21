@@ -167,17 +167,14 @@ const MaxLogupBatch = 4
 func addLogups(builder *board.Builder, S, T []board.Column, numS, numT []expr.Expr) error {
 	gamma := board.Coin(board.RoundLogDerivative)
 	minusOne := expr.Const(*new(koalabear.Element).Neg(new(koalabear.Element).SetOne()))
-	var modules []string
 	var terms []board.LogupTerm
 	for i, s := range S {
-		modules = append(modules, s.Module)
-		terms = append(terms, board.LogupTerm{E: s.In.Sub(gamma), M: numS[i]})
+		terms = append(terms, board.LogupTerm{Module: s.Module, E: s.In.Sub(gamma), M: numS[i]})
 	}
 	for i, t := range T {
-		modules = append(modules, t.Module)
-		terms = append(terms, board.LogupTerm{E: t.In.Sub(gamma), M: minusOne.Mul(numT[i])})
+		terms = append(terms, board.LogupTerm{Module: t.Module, E: t.In.Sub(gamma), M: minusOne.Mul(numT[i])})
 	}
-	totals, err := AddLogupColumns(builder, fmt.Sprintf("%s_", constants.LOGUP), modules, terms)
+	totals, err := AddLogupColumns(builder, fmt.Sprintf("%s_", constants.LOGUP), terms)
 	if err != nil {
 		return err
 	}
@@ -185,23 +182,20 @@ func addLogups(builder *board.Builder, S, T []board.Column, numS, numT []expr.Ex
 	return nil
 }
 
-// AddLogupColumns groups the terms by module (modules[i] is the module of
-// terms[i]), in order of first appearance, into cyclic logup columns at
+// AddLogupColumns groups the terms by module, in order of first appearance,
+// into cyclic logup columns at
 // RoundRunningSums of at most MaxLogupBatch terms each, within
 // board.MaxLogupDegree, and returns the names of their exposed totals. The
 // column names are "<module>.<prefix><random>". The caller balances the totals
 // on a bus.
-func AddLogupColumns(builder *board.Builder, prefix string, modules []string, terms []board.LogupTerm) ([]string, error) {
-	if len(modules) != len(terms) {
-		return nil, fmt.Errorf("AddLogupColumns: %d modules for %d terms", len(modules), len(terms))
-	}
+func AddLogupColumns(builder *board.Builder, prefix string, terms []board.LogupTerm) ([]string, error) {
 	var order []string
 	byModule := map[string][]board.LogupTerm{}
-	for i, m := range modules {
-		if _, ok := byModule[m]; !ok {
-			order = append(order, m)
+	for _, t := range terms {
+		if _, ok := byModule[t.Module]; !ok {
+			order = append(order, t.Module)
 		}
-		byModule[m] = append(byModule[m], terms[i])
+		byModule[t.Module] = append(byModule[t.Module], t)
 	}
 	var totals []string
 	for _, module := range order {

@@ -88,7 +88,6 @@ func (l *Lookups) build(builder *board.Builder, tagged bool) error {
 	alpha := board.Coin(board.RoundFold)
 	gamma := board.Coin(board.RoundLogDerivative)
 	minusOne := expr.Const(*new(koalabear.Element).Neg(new(koalabear.Element).SetOne()))
-	var modules []string
 	var terms []board.LogupTerm
 	for k, g := range l.groups {
 		selS, S := make([]expr.Expr, len(g.sources)), make([]board.Table, len(g.sources))
@@ -109,14 +108,12 @@ func (l *Lookups) build(builder *board.Builder, tagged bool) error {
 			return expr.Fold(alpha, cols).Sub(gamma)
 		}
 		for i, s := range S {
-			modules = append(modules, s.Module)
-			terms = append(terms, board.LogupTerm{E: fold(s), M: selS[i]})
+			terms = append(terms, board.LogupTerm{Module: s.Module, E: fold(s), M: selS[i]})
 		}
 		m := expr.Col(constants.MultiplicityChunkName(mult, 0)).Mul(selT[0])
-		modules = append(modules, g.target.Module)
-		terms = append(terms, board.LogupTerm{E: fold(T[0]), M: minusOne.Mul(m)})
+		terms = append(terms, board.LogupTerm{Module: g.target.Module, E: fold(T[0]), M: minusOne.Mul(m)})
 	}
-	totals, err := AddLogupColumns(builder, fmt.Sprintf("%s_", constants.LOGUP), modules, terms)
+	totals, err := AddLogupColumns(builder, fmt.Sprintf("%s_", constants.LOGUP), terms)
 	if err != nil {
 		return err
 	}
