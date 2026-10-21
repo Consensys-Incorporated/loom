@@ -47,6 +47,9 @@ import (
 type CorsetBridge struct {
 	Builder *board.Builder
 	Schema  *air.Schema[gocorset_kb.Element]
+	// Lookups collects the lookup constraints, built together by
+	// BuildLookups, grouped by target.
+	Lookups *arguments.Lookups
 }
 
 // NewCorsetBridge initialises a bridge.
@@ -54,7 +57,7 @@ func NewCorsetBridge(
 	builder *board.Builder,
 	s *air.Schema[gocorset_kb.Element],
 ) *CorsetBridge {
-	return &CorsetBridge{Builder: builder, Schema: s}
+	return &CorsetBridge{Builder: builder, Schema: s, Lookups: arguments.NewLookups()}
 }
 
 // SetupModules creates one loom Module per zkc schema module and registers it
@@ -159,17 +162,17 @@ func (b *CorsetBridge) termToExpr(t air.Term[gocorset_kb.Element], moduleID uint
 	}
 }
 
-// vectorTable returns the loom table of a lookup vector, and its selector (1
-// when the vector has none).
-func (b *CorsetBridge) vectorTable(v lookup.Vector) (board.Table, expr.Expr) {
-	t := board.NewTable(b.loomModuleName(v.Module), len(v.Registers))
+// vectorTable returns the loom table of a lookup vector, with its selector
+// (none when the vector has none).
+func (b *CorsetBridge) vectorTable(v lookup.Vector) board.CTable {
+	t := board.CTable{Table: board.NewTable(b.loomModuleName(v.Module), len(v.Registers))}
 	for j, r := range v.Registers {
 		t.In[j] = b.regExpr(v.Module, r, 0)
 	}
 	if v.HasSelector() {
-		return t, b.regExpr(v.Module, v.Selector.Unwrap(), 0)
+		t.Sel = b.regExpr(v.Module, v.Selector.Unwrap(), 0)
 	}
-	return t, expr.Const(gnark_kb.One())
+	return t
 }
 
 // AddConstraintInLoom translates a single zkc constraint into the loom
@@ -214,22 +217,18 @@ func (b *CorsetBridge) AddConstraintInLoom(name string, corsetCS schema.Constrai
 		return nil
 
 	// ── Lookup (subset argument) ──────────────────────────────────────────
+	// Collected, and built by BuildLookups with the others into its target.
 	case *air.LookupConstraint[gocorset_kb.Element]:
-		if len(cs.Sources) == 0 || len(cs.Targets) == 0 {
-			return fmt.Errorf("constraint %q: empty lookup", name)
+		if len(cs.Sources) != 1 || len(cs.Targets) != 1 {
+			return fmt.Errorf("constraint %q: lookup of %d sources into %d targets, want 1 and 1", name, len(cs.Sources), len(cs.Targets))
 		}
 		if cs.Sources[0].Len() == 0 {
 			return fmt.Errorf("constraint %q: empty lookup vector", name)
 		}
-		S, selS := make([]board.Table, len(cs.Sources)), make([]expr.Expr, len(cs.Sources))
-		for i, v := range cs.Sources {
-			S[i], selS[i] = b.vectorTable(v)
+		if err := b.Lookups.Add(b.vectorTable(cs.Sources[0]), b.vectorTable(cs.Targets[0])); err != nil {
+			return fmt.Errorf("constraint %q: %w", name, err)
 		}
-		T, selT := make([]board.Table, len(cs.Targets)), make([]expr.Expr, len(cs.Targets))
-		for i, v := range cs.Targets {
-			T[i], selT[i] = b.vectorTable(v)
-		}
-		return arguments.CLookupUnionTuple(b.Builder, selS, selT, S, T)
+		return nil
 
 	// ── Bus (multiset balance) ────────────────────────────────────────────
 	case *air.BusConstraint[gocorset_kb.Element]:
@@ -239,7 +238,8 @@ func (b *CorsetBridge) AddConstraintInLoom(name string, corsetCS schema.Constrai
 		ports := func(ps []bus.Port) ([]board.Table, []expr.Expr) {
 			tables, sels := make([]board.Table, len(ps)), make([]expr.Expr, len(ps))
 			for i, p := range ps {
-				tables[i], sels[i] = b.vectorTable(lookup.FilteredVector(p.Module, p.Selector, p.Registers...))
+				t := b.vectorTable(lookup.FilteredVector(p.Module, p.Selector, p.Registers...))
+				tables[i], sels[i] = t.Table, t.Sel
 			}
 			return tables, sels
 		}
@@ -260,9 +260,17 @@ func (b *CorsetBridge) AddConstraintInLoom(name string, corsetCS schema.Constrai
 
 // ====================== Scanning =========================
 
+// BuildLookups adds the collected lookups to the builder, grouped by target.
+// ScanConstraints calls it; call it once after adding constraints one by one
+// with AddConstraintInLoom.
+func (b *CorsetBridge) BuildLookups() error {
+	return b.Lookups.Build(b.Builder)
+}
+
 // ScanConstraints translates all constraints in the air schema into the loom
-// builder attached to bridge. Constraints are processed in deterministic
-// (lexicographic Lisp-name) order. Panics on the first error.
+// builder attached to bridge, then builds the collected lookups. Constraints
+// are processed in deterministic (lexicographic Lisp-name) order. Panics on
+// the first error.
 func ScanConstraints(bridge *CorsetBridge) {
 	s := bridge.Schema
 	corsetCSS := s.Constraints().Collect()
@@ -285,6 +293,9 @@ func ScanConstraints(bridge *CorsetBridge) {
 		if err := bridge.AddConstraintInLoom(names[idx], corsetCSS[idx]); err != nil {
 			panic(fmt.Sprintf("ScanConstraints: %v", err))
 		}
+	}
+	if err := bridge.BuildLookups(); err != nil {
+		panic(fmt.Sprintf("ScanConstraints: %v", err))
 	}
 }
 
