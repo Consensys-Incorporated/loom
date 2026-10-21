@@ -17,16 +17,24 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/consensys/gnark-crypto/field/koalabear"
 	"github.com/consensys/loom/board"
 	"github.com/consensys/loom/expr"
+	"github.com/consensys/loom/internal/constants"
 )
 
 // Lookups collects lookups and builds them grouped by target: the lookups
 // into the same target (the same table, selector and module) share one
-// multiplicity column, counted over all their sources, and one logup bus, on
-// which the sources of a module are batched together. Building each lookup on
+// multiplicity column, counted over all their sources. Building each lookup on
 // its own (CLookupTuple) would instead add a multiplicity column and a
 // target-side fraction per lookup.
+//
+// All the lookups share one logup bus. Each target k has a constant tag, k,
+// folded in front of its tuples: fold(α, [k, c_1, …, c_w]) = k + α·c_1 + … +
+// α^w·c_w, whose constant coefficient is k whatever the width, so tuples of
+// different targets are distinct polynomials in α, and their fractions
+// cannot cancel each other. The fractions of a module, whatever their
+// targets, are then batched into the same logup columns.
 //
 // Register the lookups with Add, then call Build once.
 type Lookups struct {
@@ -64,19 +72,55 @@ func (l *Lookups) Add(source, target board.CTable) error {
 // NumTargets returns the number of distinct targets registered.
 func (l *Lookups) NumTargets() int { return len(l.groups) }
 
-// Build adds the lookups to the builder, one argument per target, in the
-// order the targets were first registered.
+// Build adds the lookups to the builder: per target, in the order the
+// targets were first registered, its multiplicity column; then the logup
+// columns of all the fractions, per module, and their bus.
 func (l *Lookups) Build(builder *board.Builder) error {
-	for _, g := range l.groups {
+	return l.build(builder, true)
+}
+
+// build is Build, with the targets' tags when tagged (false only to test
+// that the tags are what keeps the targets apart).
+func (l *Lookups) build(builder *board.Builder, tagged bool) error {
+	if len(l.groups) == 0 {
+		return nil
+	}
+	alpha := board.Coin(board.RoundFold)
+	gamma := board.Coin(board.RoundLogDerivative)
+	minusOne := expr.Const(*new(koalabear.Element).Neg(new(koalabear.Element).SetOne()))
+	var modules []string
+	var terms []board.LogupTerm
+	for k, g := range l.groups {
 		selS, S := make([]expr.Expr, len(g.sources)), make([]board.Table, len(g.sources))
 		for i, s := range g.sources {
 			selS[i], S[i] = s.Selector(), s.Table
 		}
 		selT, T := []expr.Expr{g.target.Selector()}, []board.Table{g.target.Table}
-		if err := CLookupUnionTuple(builder, selS, selT, S, T); err != nil {
+		mult, err := stageLookup(builder, selS, selT, S, T)
+		if err != nil {
 			return err
 		}
+
+		fold := func(t board.Table) expr.Expr {
+			cols := t.In
+			if tagged {
+				cols = append([]expr.Expr{expr.Const(koalabear.NewElement(uint64(k)))}, cols...)
+			}
+			return expr.Fold(alpha, cols).Sub(gamma)
+		}
+		for i, s := range S {
+			modules = append(modules, s.Module)
+			terms = append(terms, board.LogupTerm{E: fold(s), M: selS[i]})
+		}
+		m := expr.Col(constants.MultiplicityChunkName(mult, 0)).Mul(selT[0])
+		modules = append(modules, g.target.Module)
+		terms = append(terms, board.LogupTerm{E: fold(T[0]), M: minusOne.Mul(m)})
 	}
+	totals, err := AddLogupColumns(builder, fmt.Sprintf("%s_", constants.LOGUP), modules, terms)
+	if err != nil {
+		return err
+	}
+	builder.AddLogupBus(board.NewLogupBus(totals))
 	return nil
 }
 
