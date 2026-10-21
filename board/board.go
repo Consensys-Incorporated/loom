@@ -104,6 +104,21 @@ func NewTable(module string, size int) Table {
 	return Table{Module: module, In: make([]expr.Expr, size)}
 }
 
+// CTable is a conditional table: the rows of Table where Sel is nonzero. A
+// nil Sel selects every row.
+type CTable struct {
+	Table
+	Sel expr.Expr
+}
+
+// Selector returns Sel, or the constant 1 when Sel is nil.
+func (t CTable) Selector() expr.Expr {
+	if t.Sel == nil {
+		return expr.Const(koalabear.One())
+	}
+	return t.Sel
+}
+
 type Column struct {
 	Module string
 	In     expr.Expr
