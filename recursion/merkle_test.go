@@ -113,11 +113,11 @@ func TestMerkleInjections(t *testing.T) {
 			}
 		}},
 		// a direction bit set on an injection row
-		"injection bit": {tamper: func(tr trace.Trace) { tr.Base["merkle.b"][stepsPerPath+4].SetOne() }},
+		"injection bit": {tamper: func(tr trace.Trace) { tr.Base["p2m.b"][stepsPerPath+4].SetOne() }},
 		// an injection row of leaf 13's path (0b1101) that consumes an index
 		// bit: after two levels the index left is 3, it becomes 6
 		"injection index": {tamper: func(tr trace.Trace) {
-			idx := &tr.Base["merkle.idx"][13*stepsPerPath+4]
+			idx := &tr.Base["p2m.idx"][13*stepsPerPath+4]
 			if idx.Uint64() != 3 {
 				panic(fmt.Sprintf("index left = %d, want 3", idx.Uint64()))
 			}

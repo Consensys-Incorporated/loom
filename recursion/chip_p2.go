@@ -14,8 +14,6 @@
 package recursion
 
 import (
-	"fmt"
-	"github.com/consensys/gnark-crypto/field/koalabear"
 	"strings"
 
 	"github.com/consensys/gnark-crypto/field/koalabear/poseidon2"
@@ -24,108 +22,65 @@ import (
 	"github.com/consensys/loom/trace"
 )
 
-// Witness columns of the p2 chip.
+// Witness columns of a P2 core: the permutation's input and output lanes. The
+// AIR's round columns sit next to them, see poseidon2AIR.
 const (
 	p2S = "s" // lanes
 	p2R = "r" // lanes
 )
 
-// numPerms is the number of rows of the P2 core: one per sponge block and
-// one per Merkle level, and for a dynamic path an upper bound, H + G (its rows
-// before its first leaf do not hash; the unused rows permute zero, and no
-// lookup reads them).
-func (m *Machine) numPerms() int {
-	n := 0
-	for _, s := range m.sponges {
-		n += len(s.data) / 2
-	}
-	for _, p := range m.paths {
-		n += len(p.steps)
-	}
-	for _, d := range m.dpaths {
-		n += d.p.Siblings.Len() + d.p.Order.Len()
-	}
-	return n
-}
+// There are two P2 cores, each carrying poseidon2AIR on its own module and
+// the control of the single chip that feeds it: the sponge's chaining (p2s)
+// and the Merkle path's (p2m). Keeping them apart is what makes merging pay:
+// one core holding both chips' control would pay the union of their setup and
+// witness columns on all of its rows, instead of each on its own rows.
+//
+// p2m is also the lookup target of the dynamic-path chip, whose compressions
+// occupy the rows after the Merkle paths', with the Merkle control inactive.
 
-func p2Ins() []string {
+func p2Ins(module string) []string {
 	res := make([]string, width)
 	for i := range res {
-		res[i] = p2Mod + "." + laneName(p2S, i)
+		res[i] = module + "." + laneName(p2S, i)
 	}
 	return res
 }
 
-func p2Outs() []string {
+func p2Outs(module string) []string {
 	res := make([]string, width)
 	for i := range res {
-		res[i] = p2Mod + "." + laneName(p2R, i)
+		res[i] = module + "." + laneName(p2R, i)
 	}
 	return res
 }
 
-// p2Chip: the P2 core, one row per Poseidon2 permutation of the sponge and
-// Merkle chips (their lookup target), constrained by poseidon2AIR. Columns:
-// s0..23 (input), r0..23 (output), and the AIR's round columns. No setup, no
-// memory access.
-type p2Chip struct{ m *Machine }
-
-func (c p2Chip) name() string { return p2Mod }
-
-func (c p2Chip) rows() int { return c.m.numPerms() }
-
-func (c p2Chip) define(b *board.Builder, bus *Bus) error {
-	return (poseidon2AIR{}).Define(b, p2Mod, p2Ins(), p2Outs())
+// p2Table returns a core's lookup target (inputs, then the first nOut
+// outputs).
+func p2Table(module string, nOut int) board.Table {
+	t := board.NewTable(module, width+nOut)
+	for i := range width {
+		t.In[i] = col(module, laneName(p2S, i))
+	}
+	for i := range nOut {
+		t.In[width+i] = col(module, laneName(p2R, i))
+	}
+	return t
 }
 
-func (c p2Chip) setup(*cols) {}
-
-// trace fills the permutations recorded by the sponge and Merkle traces, then
-// the AIR's round columns.
-func (c p2Chip) trace(cs *cols, r *Run) error {
-	if len(r.p2) > c.rows() {
-		return fmt.Errorf("%d permutations recorded, at most %d", len(r.p2), c.rows())
-	}
-	for len(r.p2) < c.rows() {
-		r.p2 = append(r.p2, [width]koalabear.Element{})
-	}
-	cs.declareLanes(p2S, width)
-	cs.declareLanes(p2R, width)
-	perm := newPerm()
-	for row, in := range r.p2 {
-		out := in
-		if err := perm.Permutation(out[:]); err != nil {
-			return err
-		}
-		for i := range width {
-			cs.setElem(laneName(p2S, i), row, in[i])
-			cs.setElem(laneName(p2R, i), row, out[i])
-		}
-	}
-	// The AIR fills its columns from a trace: run it on these columns and
-	// take its own back.
+// fillP2 fills the AIR's round columns of a core from its traced inputs and
+// outputs. The AIR fills its columns from a trace: run it on these columns and
+// take its own back. Rows whose inputs and outputs are all zero are padding:
+// the AIR makes them the genuine instance P(0).
+func fillP2(cs *cols, module string) error {
 	tmp := trace.New()
-	cs.store(tmp, p2Mod)
-	if err := (poseidon2AIR{}).Fill(tmp, p2Mod, p2Ins(), p2Outs()); err != nil {
+	cs.store(tmp, module)
+	if err := (poseidon2AIR{}).Fill(tmp, module, p2Ins(module), p2Outs(module)); err != nil {
 		return err
 	}
 	for name, v := range tmp.Base {
-		cs.vals[strings.TrimPrefix(name, p2Mod+".")] = v
+		cs.vals[strings.TrimPrefix(name, module+".")] = v
 	}
 	return nil
-}
-
-// p2Table returns the P2 core's lookup target (inputs, then the first nOut
-// outputs).
-func p2Table(nOut int) board.Table {
-	t := board.NewTable(p2Mod, width+nOut)
-	for i := range width {
-		t.In[i] = col(p2Mod, laneName(p2S, i))
-	}
-	for i := range nOut {
-		t.In[width+i] = col(p2Mod, laneName(p2R, i))
-	}
-	return t
 }
 
 func newPerm() *poseidon2.Permutation { return hash.Poseidon2SpongePermutation() }

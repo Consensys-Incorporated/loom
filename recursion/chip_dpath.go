@@ -191,7 +191,7 @@ func (m *Machine) execDPath(idx int, r *Run) error {
 	}
 	for _, row := range rows {
 		if row.hashed {
-			r.p2 = append(r.p2, row.p2Inputs)
+			r.p2m = append(r.p2m, row.p2Inputs)
 		}
 	}
 	if r.dpathRows == nil {
@@ -302,7 +302,7 @@ func (c dpathChip) define(b *board.Builder, bus *Bus) error {
 		src.In[2*digest+i] = op[i].Add(bit.Mul(cur[i].Sub(op[i])))
 		src.In[width+i] = out[i]
 	}
-	return bus.Lookup(board.CTable{Table: src, Sel: started}, board.CTable{Table: p2Table(digest)})
+	return bus.Lookup(board.CTable{Table: src, Sel: started}, board.CTable{Table: p2Table(p2mMod, digest)})
 }
 
 func (c dpathChip) setup(cs *cols) {

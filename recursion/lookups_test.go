@@ -18,10 +18,10 @@ import (
 	"testing"
 )
 
-// TestP2LookupsShareTargets: the sponge looks its permutations up into the
-// P2 core's full outputs, the Merkle and dynamic-path chips their
-// compressions into its digests: two targets, so two multiplicity columns,
-// the Merkle and dynamic-path chips sharing theirs.
+// TestP2LookupsShareTargets: the sponge and the Merkle paths carry their
+// permutations on their own cores, so neither looks anything up. Only the
+// dynamic-path chip does, into the Merkle core: one target, one multiplicity
+// column, whatever else the machine holds.
 func TestP2LookupsShareTargets(t *testing.T) {
 	b := dpathCircuit(dpathTree(t, []int{5, 3, 3, 2}, 0))
 	d := func() int { return b.InputDigest() }
@@ -39,7 +39,7 @@ func TestP2LookupsShareTargets(t *testing.T) {
 			}
 		}
 	}
-	if mults != 2 {
-		t.Fatalf("%d multiplicity columns, want 2", mults)
+	if mults != 1 {
+		t.Fatalf("%d multiplicity columns, want 1", mults)
 	}
 }

@@ -120,15 +120,15 @@ func TestOpeningsRejects(t *testing.T) {
 		// a proof value: the leaf no longer hashes to the root
 		"witness value": func(tr trace.Trace) { tr.Base["witness.v3"][2].SetUint64(5) },
 		// a sponge lane that differs from the cell it reads
-		"sponge lane": func(tr trace.Trace) { tr.Base["sponge.x1"][0].SetUint64(6) },
+		"sponge lane": func(tr trace.Trace) { tr.Base["p2s.x1"][0].SetUint64(6) },
 		// the chained state
-		"sponge output": func(tr trace.Trace) { tr.Base["sponge.out20"][0].SetUint64(7) },
+		"sponge output": func(tr trace.Trace) { tr.Base["p2s.r20"][0].SetUint64(7) },
 		// a direction bit, flipped on a real level
-		"merkle bit": func(tr trace.Trace) { flip(&tr.Base["merkle.b"][1]) },
+		"merkle bit": func(tr trace.Trace) { flip(&tr.Base["p2m.b"][1]) },
 		// the index recomposition
-		"merkle index": func(tr trace.Trace) { tr.Base["merkle.idx"][2].SetUint64(1000) },
+		"merkle index": func(tr trace.Trace) { tr.Base["p2m.idx"][2].SetUint64(1000) },
 		// a sibling that differs from the proof
-		"merkle sibling": func(tr trace.Trace) { tr.Base["merkle.s4"][3].SetUint64(8) },
+		"merkle sibling": func(tr trace.Trace) { tr.Base["p2m.s_4"][3].SetUint64(8) },
 	}
 	for name, tamper := range cases {
 		t.Run(name, func(t *testing.T) {

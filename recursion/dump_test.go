@@ -28,7 +28,7 @@ func TestDumpTrace(t *testing.T) {
 	if err := prove(t, p, r); err != nil {
 		t.Fatal(err)
 	}
-	for _, mod := range []string{witnessMod, spongeMod, merkleMod, p2Mod} {
+	for _, mod := range []string{witnessMod, p2sMod, p2mMod} {
 		sub := trace.New()
 		for _, tr := range []trace.Trace{p.Setup, r.Trace} {
 			for name, v := range tr.Base {

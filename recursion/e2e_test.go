@@ -353,7 +353,7 @@ func TestTwoLevels(t *testing.T) {
 	}
 	t.Logf("level 2: setup, proved and verified in %v", time.Since(t0).Round(time.Millisecond))
 	var rows []byte
-	for _, name := range []string{e6Mod, windowMod, spongeMod, merkleMod, p2Mod} {
+	for _, name := range []string{e6Mod, windowMod, p2sMod, p2mMod} {
 		rows = fmt.Appendf(rows, " %s=%d", name, p2.Loom.Modules[name].N)
 	}
 	t.Logf("level 2 rows:%s; leaf %d elements/query", rows, LeafCostOf(p2.Loom).Elements)
