@@ -61,6 +61,19 @@ type Bus struct {
 	accesses []access           // the memory
 	entries  []access           // the tables
 	lookups  *arguments.Lookups // the lookups (into the P2 core), grouped by target
+	// maxDegree bounds the degree of a module's logup constraints, see
+	// LimitDegree.
+	maxDegree map[string]int
+}
+
+// LimitDegree batches the bus accesses of module into logup columns of degree
+// at most deg (by default board.MaxLogupDegree), so that they do not raise the
+// module's degree above its own constraints'.
+func (b *Bus) LimitDegree(module string, deg int) {
+	if b.maxDegree == nil {
+		b.maxDegree = map[string]int{}
+	}
+	b.maxDegree[module] = deg
 }
 
 // Lookup adds the lookup {row(source) | source.Sel ≠ 0} ⊂ {row(target) |
@@ -109,11 +122,11 @@ func negate(e expr.Expr) expr.Expr {
 // totals must sum to zero, for each bus on its own. The lookups are built by
 // arguments.Lookups, on their own bus.
 func (b *Bus) Build(builder *board.Builder) error {
-	if err := buildBus(builder, "bus", b.accesses); err != nil {
+	if err := buildBus(builder, "bus", b.accesses, b.maxDegree); err != nil {
 		return fmt.Errorf("memory bus: %w", err)
 	}
 	if len(b.entries) > 0 {
-		if err := buildBus(builder, "tables", b.entries); err != nil {
+		if err := buildBus(builder, "tables", b.entries, b.maxDegree); err != nil {
 			return fmt.Errorf("tables bus: %w", err)
 		}
 	}
@@ -125,7 +138,7 @@ func (b *Bus) Build(builder *board.Builder) error {
 	return nil
 }
 
-func buildBus(builder *board.Builder, name string, accesses []access) error {
+func buildBus(builder *board.Builder, name string, accesses []access, maxDegree map[string]int) error {
 	alpha := board.Coin(board.RoundFold)
 	gamma := board.Coin(board.RoundLogDerivative)
 	var terms []board.LogupTerm
@@ -134,7 +147,7 @@ func buildBus(builder *board.Builder, name string, accesses []access) error {
 		builder.StageLeaves(board.RoundFold, a.mult)
 		terms = append(terms, board.LogupTerm{Module: a.module, E: expr.Fold(alpha, a.tuple).Sub(gamma), M: a.mult})
 	}
-	totals, err := arguments.AddLogupColumns(builder, fmt.Sprintf("%s_%s_", constants.LOGUP, name), terms)
+	totals, err := arguments.AddLogupColumnsWithMaxDegree(builder, fmt.Sprintf("%s_%s_", constants.LOGUP, name), terms, maxDegree)
 	if err != nil {
 		return err
 	}

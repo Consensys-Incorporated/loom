@@ -34,8 +34,7 @@ const (
 const (
 	witnessMod = "witness"
 	constMod   = "const"
-	spongeMod  = "sponge"
-	merkleMod  = "merkle"
+	p2Mod      = "p2" // the P2 core, carrying the sponge and the Merkle paths
 	dpathMod   = "dpath"
 	selectMod  = "select"
 	windowMod  = "window"
@@ -45,7 +44,6 @@ const (
 	foldMod    = "fold"
 	tableMod   = "table"
 	lookupMod  = "lookup"
-	p2Mod      = "p2"
 	sumMod     = "sum"
 )
 
@@ -181,7 +179,7 @@ func (m *Machine) Compile() (*Program, error) {
 	p := &Program{m: m}
 
 	// Every module exists before any chip is defined: a chip may look up into
-	// another one (the sponge and Merkle chips into the P2 core).
+	// another one (the dynamic-path chip into the P2 core).
 	var used []chip
 	for _, c := range m.chips() {
 		if c.rows() == 0 {
@@ -212,8 +210,8 @@ func (m *Machine) Compile() (*Program, error) {
 // chip is one module of the machine: define adds its AIR and bus accesses,
 // setup fills its setup columns (from the program), trace its witness columns
 // (from an execution). Chips are traced in the order of Machine.chips, so a
-// chip may use what an earlier one recorded in the Run (the P2 core, the
-// permutations of the sponge and Merkle chips).
+// chip may use what the execution recorded in the Run (the dynamic paths'
+// compressions, for the P2 core).
 type chip interface {
 	name() string
 	rows() int
@@ -223,8 +221,8 @@ type chip interface {
 }
 
 func (m *Machine) chips() []chip {
-	return []chip{witnessChip{m}, constChip{m}, spongeChip{m}, merkleChip{m}, dpathChip{m}, selectChip{m},
-		windowChip{m}, bitsChip{m}, e6Chip{m}, sumChip{m}, deepChip{m}, foldChip{m}, tableChip{m}, lookupChip{m}, p2Chip{m}}
+	return []chip{witnessChip{m}, constChip{m}, p2Chip{m}, dpathChip{m}, selectChip{m},
+		windowChip{m}, bitsChip{m}, e6Chip{m}, sumChip{m}, deepChip{m}, foldChip{m}, tableChip{m}, lookupChip{m}}
 }
 
 type chipHeight struct {
@@ -249,7 +247,10 @@ func (p *Program) NumInputs() int { return len(p.m.inputs) }
 type Run struct {
 	Trace  trace.Trace // the witness columns (loom merges the setup ones)
 	values []Cell
-	p2     [][width]koalabear.Element // the permutation inputs, in P2 row order
+	// p2 holds the dynamic paths' compression inputs, in the order of the
+	// rows the P2 core traces for them, after the sponges' and the Merkle
+	// paths' own.
+	p2 [][width]koalabear.Element
 
 	// tableReads[t][i] counts the reads of entry i of table t by dynamic
 	// paths (Lookup's are counted from the lookups); dpathRows[i] are the

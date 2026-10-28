@@ -189,6 +189,16 @@ func addLogups(builder *board.Builder, S, T []board.Column, numS, numT []expr.Ex
 // column names are "<module>.<prefix><random>". The caller balances the totals
 // on a bus.
 func AddLogupColumns(builder *board.Builder, prefix string, terms []board.LogupTerm) ([]string, error) {
+	return AddLogupColumnsWithMaxDegree(builder, prefix, terms, nil)
+}
+
+// AddLogupColumnsWithMaxDegree is AddLogupColumns, batching the terms of a
+// module of maxDegree within maxDegree[module] rather than
+// board.MaxLogupDegree. A module whose own constraints have a low degree keeps
+// it, at the price of more logup columns: its quotient, hence the domain its
+// constraints are evaluated on, follows its highest degree. A single term is a
+// column of its own whatever its degree.
+func AddLogupColumnsWithMaxDegree(builder *board.Builder, prefix string, terms []board.LogupTerm, maxDegree map[string]int) ([]string, error) {
 	var order []string
 	byModule := map[string][]board.LogupTerm{}
 	for _, t := range terms {
@@ -200,9 +210,13 @@ func AddLogupColumns(builder *board.Builder, prefix string, terms []board.LogupT
 	var totals []string
 	for _, module := range order {
 		terms := byModule[module]
+		limit := board.MaxLogupDegree
+		if d, ok := maxDegree[module]; ok {
+			limit = d
+		}
 		for len(terms) > 0 {
 			n := 1
-			for n < min(MaxLogupBatch, len(terms)) && board.LogupConstraintDegree(terms[:n+1]) <= board.MaxLogupDegree {
+			for n < min(MaxLogupBatch, len(terms)) && board.LogupConstraintDegree(terms[:n+1]) <= limit {
 				n++
 			}
 			base, err := constants.RandomString(10)

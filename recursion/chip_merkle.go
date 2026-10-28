@@ -17,35 +17,37 @@ import (
 	"fmt"
 
 	"github.com/consensys/gnark-crypto/field/koalabear"
+	"github.com/consensys/gnark-crypto/field/koalabear/poseidon2"
 	"github.com/consensys/loom/board"
 	"github.com/consensys/loom/expr"
 )
 
-// Setup columns of the merkle chip.
+// The Merkle path's columns on the P2 core (see p2Chip), prefixed so they do
+// not meet the sponge's. Setup:
 const (
-	merkleFirst    = "first"
-	merkleLast     = "last"
-	merkleActive   = "active"
-	merkleInj      = "inj"
-	merkleLvl0     = "lvl0"
-	merkleLeafAddr = "leaf_addr"
-	merkleIdxAddr  = "idx_addr"
-	merkleSibAddr  = "sib_addr"
-	merkleRootAddr = "root_addr"
-	merkleG        = "g"
-	merkleXbAddr   = "xb_addr"
-	merkleXbMult   = "xb_mult"
+	merkleActive   = "mk_active"
+	merkleFirst    = "mk_first"
+	merkleLast     = "mk_last"
+	merkleInj      = "mk_inj"
+	merkleLvl0     = "mk_lvl0"
+	merkleLeafAddr = "mk_leaf_addr"
+	merkleIdxAddr  = "mk_idx_addr"
+	merkleSibAddr  = "mk_sib_addr"
+	merkleRootAddr = "mk_root_addr"
+	merkleG        = "mk_g"
+	merkleXbAddr   = "mk_xb_addr"
+	merkleXbMult   = "mk_xb_mult"
 )
 
-// Witness columns of the merkle chip.
+// and witness.
 const (
-	merkleB   = "b"
-	merkleIdx = "idx"
-	merkleX   = "x"
-	merkleB0  = "b0"
-	merkleCur = "cur" // lanes
-	merkleS   = "s"   // lanes
-	merkleOut = "out" // lanes
+	merkleB   = "mk_b"   // the direction bit
+	merkleIdx = "mk_idx" // the index left to consume
+	merkleX   = "mk_x"   // the x⁻¹ accumulator
+	merkleB0  = "mk_b0"  // the index's low bit
+	merkleF   = "mk_f"   // the accumulator's factor, 1 + b·(g − 1)
+	merkleCur = "mk_cur" // lanes: the running hash entering the row
+	merkleSib = "mk_sib" // lanes: the sibling, or the injection leaf
 )
 
 type pathInst struct {
@@ -162,90 +164,91 @@ func (m *Machine) execPath(p pathInst, r *Run) {
 	r.values[p.xb] = xb
 }
 
-// merkleChip: one row per step of a Merkle path (see pathSteps): a level,
-// leaf level first, or an injection.
-//
-// Columns: cur0..7 (the running hash entering the row), s0..7 (the sibling,
-// or the injection leaf), b (the direction bit), idx (the index left to
-// consume), out0..7, x (the x⁻¹ accumulator), b0 (the index's low bit).
-// Setup: first, last, active, inj (an injection row), lvl0 (the first level
-// row), leaf_addr, idx_addr, sib_addr, root_addr, g (the accumulator constant
-// of the level, 1 on injection rows), xb_addr and xb_mult (the cell [x⁻¹, b0],
-// written on the last row).
-//
-// Constraints:
-//
-//	b·(b − 1) = 0,  inj·b = 0
-//	idx = b + (2 − inj)·idx[+1]  on every row but the last of a path: a level
-//	                             consumes a bit, an injection none
-//	idx = b                      on the last row (the index is below 2^depth)
-//	                             and on padding rows
-//	cur = out[−1]                on every row but the first of a path
-//	x = 1 + b·(g − 1)            on the first row
-//	x = x[−1]·(1 + b·(g − 1))    on the others
-//	b0 = b on the first level row, b0 = b0[−1] on the following rows
-//
-// and out = compress(b ? (s, cur) : (cur, s)), looked up in the P2 core. The
-// first row reads the leaf digest and the index (lane 0 of its cell); the last
-// row reads the root with its own output.
-type merkleChip struct{ m *Machine }
-
-func (c merkleChip) name() string { return merkleMod }
-
-func (c merkleChip) rows() int {
+// pathStepRows is the number of rows the Merkle paths take on the core.
+func (m *Machine) pathStepRows() int {
 	n := 0
-	for _, p := range c.m.paths {
+	for _, p := range m.paths {
 		n += len(p.steps)
 	}
 	return n
 }
 
-func (c merkleChip) define(b *board.Builder, bus *Bus) error {
-	mm := b.Modules[merkleMod]
-	first, last, active := setupCol(merkleMod, merkleFirst), setupCol(merkleMod, merkleLast), setupCol(merkleMod, merkleActive)
-	inj, lvl0 := setupCol(merkleMod, merkleInj), setupCol(merkleMod, merkleLvl0)
-	bit, idx := col(merkleMod, merkleB), col(merkleMod, merkleIdx)
-	mm.AssertZero(bit.Mul(bit.Sub(one())))
-	mm.AssertZero(inj.Mul(bit))
-	// (active − last) is 1 on every path row but the last, 0 elsewhere, so the
-	// recurrence never reads across a path end or the wrap-around.
-	mm.AssertZero(idx.Sub(bit).Sub(active.Sub(last).Mul(constE(2).Sub(inj)).Mul(colShift(merkleMod, merkleIdx, 1))))
-	for i := range digest {
-		cur, prev := col(merkleMod, laneName(merkleCur, i)), colShift(merkleMod, laneName(merkleOut, i), -1)
-		mm.AssertZero(one().Sub(first).Mul(cur.Sub(prev)))
+// merkleInput is the permutation input the Merkle path asks for on lane l:
+// the node compression of the running hash and the sibling, ordered by the
+// direction bit.
+//
+//	s0 = nodeTag,  s1..7 = 0
+//	s_{8+i}  = cur_i + b·(sib_i − cur_i)
+//	s_{16+i} = sib_i + b·(cur_i − sib_i)
+func merkleInput(l int) expr.Expr {
+	if l == 0 {
+		return constE(nodeTag)
 	}
-	// x⁻¹ = Π_lvl (b_lvl ? g_lvl : 1), with g_lvl = gInv^(2^(depth−1−lvl)).
-	x, b0 := col(merkleMod, merkleX), col(merkleMod, merkleB0)
-	factor := one().Add(bit.Mul(setupCol(merkleMod, merkleG).Sub(one())))
-	notFirst := active.Sub(first)
-	mm.AssertZero(first.Mul(x.Sub(factor)))
-	mm.AssertZero(notFirst.Mul(x.Sub(colShift(merkleMod, merkleX, -1).Mul(factor))))
-	mm.AssertZero(lvl0.Mul(b0.Sub(bit)))
-	mm.AssertZero(notFirst.Mul(one().Sub(lvl0)).Mul(b0.Sub(colShift(merkleMod, merkleB0, -1))))
-
-	bus.Read(merkleMod, setupCol(merkleMod, merkleLeafAddr), cellCols(merkleMod, merkleCur, 0), first)
-	bus.Read(merkleMod, setupCol(merkleMod, merkleIdxAddr), cellOf(idx), first)
-	bus.Read(merkleMod, setupCol(merkleMod, merkleSibAddr), cellCols(merkleMod, merkleS, 0), active)
-	bus.Read(merkleMod, setupCol(merkleMod, merkleRootAddr), cellCols(merkleMod, merkleOut, 0), last)
-	bus.Write(merkleMod, setupCol(merkleMod, merkleXbAddr), cellOf(x, b0), setupCol(merkleMod, merkleXbMult))
-
-	src := board.NewTable(merkleMod, width+digest)
-	src.In[0] = constE(nodeTag)
-	for i := 1; i < digest; i++ {
-		src.In[i] = expr.Const(koalabear.Element{})
+	if l < digest {
+		return zero()
 	}
-	for i := range digest {
-		cur, sib := col(merkleMod, laneName(merkleCur, i)), col(merkleMod, laneName(merkleS, i))
-		src.In[digest+i] = cur.Add(bit.Mul(sib.Sub(cur)))
-		src.In[2*digest+i] = sib.Add(bit.Mul(cur.Sub(sib)))
-		src.In[width+i] = col(merkleMod, laneName(merkleOut, i))
+	i := l % digest
+	bit := col(p2Mod, merkleB)
+	cur, sib := col(p2Mod, laneName(merkleCur, i)), col(p2Mod, laneName(merkleSib, i))
+	if l < 2*digest {
+		return cur.Add(bit.Mul(sib.Sub(cur)))
 	}
-	return bus.Lookup(board.CTable{Table: src, Sel: active}, board.CTable{Table: p2Table(digest)})
+	return sib.Add(bit.Mul(cur.Sub(sib)))
 }
 
-func (c merkleChip) setup(cs *cols) {
+// merkleDefine adds the path's constraints and bus accesses. Each is gated by
+// a setup selector that is zero outside the Merkle rows, so the rows above
+// (the sponge's), below (the dynamic paths') and the padding rows are left
+// alone.
+//
+//	b·(b − 1) = 0,  inj·b = 0
+//	idx = b + (2 − inj)·idx[+1]  on every Merkle row but the last of a path:
+//	                             a level consumes a bit, an injection none
+//	idx = b                      on the last row (the index is below 2^depth)
+//	                             and on every non-Merkle row
+//	cur = r[−1]                  on every Merkle row but the first of a path
+//	f = 1 + b·(g − 1)            on every row (1 outside the Merkle rows)
+//	x = f                        on the first row
+//	x = x[−1]·f                  on the others (f keeps it at degree 3)
+//	b0 = b on the first level row, b0 = b0[−1] on the following rows
+//
+// The first row reads the leaf digest and the index (lane 0 of its cell); the
+// last row reads the root with the permutation's first digest lanes.
+func merkleDefine(mm *board.Module, bus *Bus) {
+	first, last, active := setupCol(p2Mod, merkleFirst), setupCol(p2Mod, merkleLast), setupCol(p2Mod, merkleActive)
+	inj, lvl0 := setupCol(p2Mod, merkleInj), setupCol(p2Mod, merkleLvl0)
+	bit, idx := col(p2Mod, merkleB), col(p2Mod, merkleIdx)
+	mm.AssertZero(bit.Mul(bit.Sub(one())))
+	mm.AssertZero(inj.Mul(bit))
+	// (active − last) is 1 on every Merkle row but the last of a path, 0
+	// elsewhere, so the recurrence never reads across a path end, into another
+	// chip's rows or across the wrap-around.
+	mm.AssertZero(idx.Sub(bit).Sub(active.Sub(last).Mul(constE(2).Sub(inj)).Mul(colShift(p2Mod, merkleIdx, 1))))
+	notFirst := active.Sub(first)
+	for i := range digest {
+		cur, prev := col(p2Mod, laneName(merkleCur, i)), colShift(p2Mod, laneName(p2R, i), -1)
+		mm.AssertZero(notFirst.Mul(cur.Sub(prev)))
+	}
+	// x⁻¹ = Π_lvl (b_lvl ? g_lvl : 1), with g_lvl = gInv^(2^(depth−1−lvl)).
+	x, b0 := col(p2Mod, merkleX), col(p2Mod, merkleB0)
+	factor := col(p2Mod, merkleF)
+	mm.AssertZero(factor.Sub(one().Add(bit.Mul(setupCol(p2Mod, merkleG).Sub(one())))))
+	mm.AssertZero(first.Mul(x.Sub(factor)))
+	mm.AssertZero(notFirst.Mul(x.Sub(colShift(p2Mod, merkleX, -1).Mul(factor))))
+	mm.AssertZero(lvl0.Mul(b0.Sub(bit)))
+	mm.AssertZero(notFirst.Mul(one().Sub(lvl0)).Mul(b0.Sub(colShift(p2Mod, merkleB0, -1))))
+
+	bus.Read(p2Mod, setupCol(p2Mod, merkleLeafAddr), cellCols(p2Mod, merkleCur, 0), first)
+	bus.Read(p2Mod, setupCol(p2Mod, merkleIdxAddr), cellOf(idx), first)
+	bus.Read(p2Mod, setupCol(p2Mod, merkleSibAddr), cellCols(p2Mod, merkleSib, 0), active)
+	bus.Read(p2Mod, setupCol(p2Mod, merkleRootAddr), cellCols(p2Mod, p2R, 0), last)
+	bus.Write(p2Mod, setupCol(p2Mod, merkleXbAddr), cellOf(x, b0), setupCol(p2Mod, merkleXbMult))
+}
+
+// merkleSetup fills the paths' setup columns, from row off.
+func (c p2Chip) merkleSetup(cs *cols, off int) {
 	cs.declare(merkleFirst, merkleLast, merkleActive, merkleInj, merkleLvl0, merkleLeafAddr, merkleIdxAddr, merkleSibAddr, merkleRootAddr, merkleG, merkleXbAddr, merkleXbMult)
-	row := 0
+	row := off
 	for _, p := range c.m.paths {
 		for k, st := range p.steps {
 			cs.set(merkleActive, row, 1)
@@ -280,15 +283,16 @@ func (c merkleChip) setup(cs *cols) {
 	}
 }
 
-// trace fills the steps, and records the compressions for the P2 core.
-func (c merkleChip) trace(cs *cols, r *Run) error {
-	cs.declare(merkleB, merkleIdx, merkleX, merkleB0)
+// merkleTrace fills the paths' steps and their compressions from row off, and
+// returns the first row after them.
+func (c p2Chip) merkleTrace(cs *cols, r *Run, perm *poseidon2.Permutation, off int) (int, error) {
+	cs.declare(merkleB, merkleIdx, merkleX, merkleB0, merkleF)
+	for row := range cs.n {
+		cs.set(merkleF, row, 1) // b = 0 outside the Merkle rows and on their b = 0 rows
+	}
 	cs.declareLanes(merkleCur, digest)
-	cs.declareLanes(merkleS, digest)
-	cs.declareLanes(merkleOut, digest)
-	perm := newPerm()
-	row := 0
-	var prevOut Cell
+	cs.declareLanes(merkleSib, digest)
+	row := off
 	for _, p := range c.m.paths {
 		cur := r.values[p.leaf]
 		index := r.values[p.index][0].Uint64()
@@ -310,6 +314,7 @@ func (c merkleChip) trace(cs *cols, r *Run) error {
 					g = p.gens[st.lvl]
 				}
 				x.Mul(&x, &g)
+				cs.setElem(merkleF, row, g)
 			}
 			cs.setElem(merkleX, row, x)
 			var in [width]koalabear.Element
@@ -320,17 +325,14 @@ func (c merkleChip) trace(cs *cols, r *Run) error {
 			}
 			copy(in[digest:], left[:digest])
 			copy(in[2*digest:], right[:digest])
-			r.p2 = append(r.p2, in)
-			out := in
-			if err := perm.Permutation(out[:]); err != nil {
-				return err
+			out, err := setPermRow(cs, perm, row, in)
+			if err != nil {
+				return 0, err
 			}
 			for i := range digest {
 				cs.setElem(laneName(merkleCur, i), row, cur[i])
-				cs.setElem(laneName(merkleS, i), row, sib[i])
-				cs.setElem(laneName(merkleOut, i), row, out[i])
+				cs.setElem(laneName(merkleSib, i), row, sib[i])
 			}
-			copy(prevOut[:], out[:digest])
 			copy(cur[:], out[:digest])
 			if !st.inj {
 				index >>= 1
@@ -338,12 +340,5 @@ func (c merkleChip) trace(cs *cols, r *Run) error {
 			row++
 		}
 	}
-	// Padding rows keep cur = out[−1] (their outputs stay zero).
-	for ; row < cs.n; row++ {
-		for i := range digest {
-			cs.setElem(laneName(merkleCur, i), row, prevOut[i])
-		}
-		prevOut = Cell{}
-	}
-	return nil
+	return row, nil
 }

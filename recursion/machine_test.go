@@ -115,24 +115,36 @@ func logBreakdown(t *testing.T, p *Program) {
 	t.Logf("\n%sleaf elements/query %d, leaf perms/query %d", sb, leaf.Elements, leaf.Perms)
 }
 
+// mkRow returns the row of the k-th Merkle step on the P2 core, which the
+// sponges' blocks precede.
+func mkRow(setup trace.Trace, k int) int {
+	active := setup.Base["p2."+merkleActive]
+	for row, v := range active {
+		if v.IsOne() {
+			return row + k
+		}
+	}
+	panic("no Merkle row on the P2 core")
+}
+
 func TestOpeningsRejects(t *testing.T) {
-	cases := map[string]func(tr trace.Trace){
+	cases := map[string]func(setup, tr trace.Trace){
 		// a proof value: the leaf no longer hashes to the root
-		"witness value": func(tr trace.Trace) { tr.Base["witness.v3"][2].SetUint64(5) },
+		"witness value": func(_, tr trace.Trace) { tr.Base["witness.v3"][2].SetUint64(5) },
 		// a sponge lane that differs from the cell it reads
-		"sponge lane": func(tr trace.Trace) { tr.Base["sponge.x1"][0].SetUint64(6) },
+		"sponge lane": func(_, tr trace.Trace) { tr.Base["p2.sp_x1"][0].SetUint64(6) },
 		// the chained state
-		"sponge output": func(tr trace.Trace) { tr.Base["sponge.out20"][0].SetUint64(7) },
+		"sponge output": func(_, tr trace.Trace) { tr.Base["p2.r20"][0].SetUint64(7) },
 		// a direction bit, flipped on a real level
-		"merkle bit": func(tr trace.Trace) { flip(&tr.Base["merkle.b"][1]) },
+		"merkle bit": func(s, tr trace.Trace) { flip(&tr.Base["p2.mk_b"][mkRow(s, 1)]) },
 		// the index recomposition
-		"merkle index": func(tr trace.Trace) { tr.Base["merkle.idx"][2].SetUint64(1000) },
+		"merkle index": func(s, tr trace.Trace) { tr.Base["p2.mk_idx"][mkRow(s, 2)].SetUint64(1000) },
 		// a sibling that differs from the proof
-		"merkle sibling": func(tr trace.Trace) { tr.Base["merkle.s4"][3].SetUint64(8) },
+		"merkle sibling": func(s, tr trace.Trace) { tr.Base["p2.mk_sib4"][mkRow(s, 3)].SetUint64(8) },
 	}
 	for name, tamper := range cases {
 		t.Run(name, func(t *testing.T) {
-			err := compileAndProve(t, openingsMachine(t, smallCfg), func(_, w trace.Trace) { tamper(w) })
+			err := compileAndProve(t, openingsMachine(t, smallCfg), tamper)
 			if err == nil {
 				t.Fatal("tampered trace accepted")
 			}

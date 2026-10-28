@@ -251,7 +251,7 @@ func TestMerkleX(t *testing.T) {
 		m, paths := merkleXMachine(t, gInv)
 		// the paths added by MerklePathX start after the first ones
 		row := len(paths)*len(paths[0].siblings) + 1
-		if err := compileAndProve(t, m, witnessOnly(func(tr trace.Trace) { tr.Base["merkle.x"][row].SetUint64(5) })); err == nil {
+		if err := compileAndProve(t, m, witnessOnly(func(tr trace.Trace) { tr.Base["p2.mk_x"][row].SetUint64(5) })); err == nil {
 			t.Fatal("tampered accumulator accepted")
 		}
 	})

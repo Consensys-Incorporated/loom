@@ -23,37 +23,55 @@ import (
 	"github.com/consensys/loom/trace"
 )
 
-// poseidon2AIR is the AIR of the P2 core: one
-// permutation per row, laid out as Plonky3's poseidon2-air with S-box degree 3
-// and no S-box registers. Its columns are
+// poseidon2AIR is the AIR of a P2 core: one permutation per row, laid out as
+// Plonky3's poseidon2-air with S-box degree 3 and no S-box registers. Its
+// columns are
 //
-//	inputs                 24
-//	post of full rounds    24 × (full rounds − 1)   (the last one is the outputs)
+//	inputs                 w
+//	post of full rounds    w × (full rounds − 1)   (the last one is the outputs)
 //	partial S-box outputs  1 × partial rounds
-//	outputs                24
+//	outputs                w
 //
-// i.e. 189 columns, and every constraint has degree 3. Between committed
+// i.e. w·(R_F + 1) + R_P columns — 189 at loom's width 24, 6 full and 21
+// partial rounds — and every constraint has degree 3. Between committed
 // columns the state is tracked as linear forms, so the linear layers cost no
 // columns.
-type poseidon2AIR struct{}
-
-// p2Matrices returns the external and internal matrices as dense 24×24
-// matrices, obtained by applying gnark-crypto's addition chains to unit vectors.
-var p2Matrices = func() (me, mi [P2Width][P2Width]koalabear.Element) {
-	for j := 0; j < P2Width; j++ {
-		var unit [P2Width]koalabear.Element
-		unit[j].SetOne()
-		e, i := unit, unit
-		matExternal(e[:])
-		matInternal(i[:])
-		for r := 0; r < P2Width; r++ {
-			me[r][j], mi[r][j] = e[r], i[r]
-		}
-	}
-	return me, mi
+//
+// A full round costs w columns and a partial round one, so the width and R_F
+// are what the column count is made of; see TestP2WidthCost, which prices a
+// narrower core.
+type poseidon2AIR struct {
+	w, rf, rp int
+	me, mi    [][]koalabear.Element // the external and internal matrices
 }
 
-var p2ME, p2MI = p2Matrices()
+// newP2AIR returns the AIR of the width-w permutation with rf full and rp
+// partial rounds.
+func newP2AIR(w, rf, rp int) poseidon2AIR {
+	return poseidon2AIR{w: w, rf: rf, rp: rp, me: p2Matrix(w, matExternal), mi: p2Matrix(w, matInternal)}
+}
+
+// loomP2AIR is the AIR of loom's own permutation, the one the sponge and the
+// Merkle node hasher use.
+func loomP2AIR() poseidon2AIR { return newP2AIR(P2Width, P2FullRounds, P2PartialRounds) }
+
+// p2Matrix returns a linear layer as a dense w×w matrix, obtained by applying
+// gnark-crypto's addition chains to unit vectors.
+func p2Matrix(w int, apply func([]koalabear.Element)) [][]koalabear.Element {
+	m := make([][]koalabear.Element, w)
+	for r := range m {
+		m[r] = make([]koalabear.Element, w)
+	}
+	for j := 0; j < w; j++ {
+		unit := make([]koalabear.Element, w)
+		unit[j].SetOne()
+		apply(unit)
+		for r := 0; r < w; r++ {
+			m[r][j] = unit[r]
+		}
+	}
+	return m
+}
 
 // matExternal applies circ(2·M4, M4, …, M4) in place (gnark-crypto's
 // matMulExternalInPlace).
@@ -89,15 +107,15 @@ func matInternal(s []koalabear.Element) {
 	for i := range s {
 		sum.Add(&sum, &s[i])
 	}
-	for i, d := range p2Diag24() {
+	for i, d := range p2Diag(len(s)) {
 		var t koalabear.Element
 		t.Mul(&s[i], &d)
 		s[i].Add(&sum, &t)
 	}
 }
 
-func mulMat(m *[P2Width][P2Width]koalabear.Element, x []koalabear.Element) []koalabear.Element {
-	res := make([]koalabear.Element, P2Width)
+func mulMat(m [][]koalabear.Element, x []koalabear.Element) []koalabear.Element {
+	res := make([]koalabear.Element, len(m))
 	for r := range res {
 		for j := range x {
 			var t koalabear.Element
@@ -108,20 +126,22 @@ func mulMat(m *[P2Width][P2Width]koalabear.Element, x []koalabear.Element) []koa
 	return res
 }
 
-func isFullRound(r int) bool {
-	return r < p2HalfFullRounds || r >= p2HalfFullRounds+P2PartialRounds
+func (a poseidon2AIR) halfFull() int { return a.rf / 2 }
+
+func (a poseidon2AIR) isFullRound(r int) bool {
+	return r < a.halfFull() || r >= a.halfFull()+a.rp
 }
 
 // p2Columns names the AIR's internal columns: post[r][i] for every full
 // round but the last, and sbox[r] for partial rounds.
-func p2Columns(module string) (post map[int][]string, sbox map[int]string) {
+func (a poseidon2AIR) p2Columns(module string) (post map[int][]string, sbox map[int]string) {
 	post, sbox = map[int][]string{}, map[int]string{}
-	last := P2FullRounds + P2PartialRounds - 1
+	last := a.rf + a.rp - 1
 	for r := 0; r <= last; r++ {
 		switch {
 		case r == last:
-		case isFullRound(r):
-			post[r] = make([]string, P2Width)
+		case a.isFullRound(r):
+			post[r] = make([]string, a.w)
 			for i := range post[r] {
 				post[r][i] = fmt.Sprintf("%s.p2_post%d_%d", module, r, i)
 			}
@@ -143,7 +163,7 @@ func linCol(name string) linForm {
 }
 
 // combine returns Σ_j m[j]·xs[j].
-func combine(m [P2Width]koalabear.Element, xs []linForm) linForm {
+func combine(m []koalabear.Element, xs []linForm) linForm {
 	res := linForm{terms: map[string]koalabear.Element{}}
 	for j, x := range xs {
 		for v, c := range x.terms {
@@ -178,43 +198,43 @@ func cube(l linForm, k koalabear.Element) expr.Expr {
 }
 
 // Define adds the constraints of Poseidon2 on every row of the module.
-func (poseidon2AIR) Define(b *board.Builder, module string, inputs, outputs []string) error {
-	if len(inputs) != P2Width || len(outputs) != P2Width {
-		return fmt.Errorf("poseidon2 AIR: want %d inputs and outputs, got %d and %d", P2Width, len(inputs), len(outputs))
+func (a poseidon2AIR) Define(b *board.Builder, module string, inputs, outputs []string) error {
+	if len(inputs) != a.w || len(outputs) != a.w {
+		return fmt.Errorf("poseidon2 AIR: want %d inputs and outputs, got %d and %d", a.w, len(inputs), len(outputs))
 	}
 	m, ok := b.Modules[module]
 	if !ok {
 		return fmt.Errorf("poseidon2 AIR: module %q not found", module)
 	}
-	params := poseidon2.NewParameters(P2Width, P2FullRounds, P2PartialRounds)
-	post, sbox := p2Columns(module)
+	params := poseidon2.NewParameters(a.w, a.rf, a.rp)
+	post, sbox := a.p2Columns(module)
 
 	// state = M_E · inputs, as linear forms
-	state := make([]linForm, P2Width)
-	in := make([]linForm, P2Width)
+	state := make([]linForm, a.w)
+	in := make([]linForm, a.w)
 	for i := range in {
 		in[i] = linCol(inputs[i])
 	}
 	for i := range state {
-		state[i] = combine(p2ME[i], in)
+		state[i] = combine(a.me[i], in)
 	}
 
-	last := P2FullRounds + P2PartialRounds - 1
+	last := a.rf + a.rp - 1
 	for r := 0; r <= last; r++ {
 		rk := params.RoundKeys[r]
-		if isFullRound(r) {
+		if a.isFullRound(r) {
 			// target_i = Σ_j M_E[i][j]·(state_j + rk_j)³
 			next := post[r]
 			if r == last {
 				next = outputs
 			}
-			for i := 0; i < P2Width; i++ {
+			for i := 0; i < a.w; i++ {
 				rhs := expr.Expr(expr.Const(koalabear.Element{}))
-				for j := 0; j < P2Width; j++ {
-					if p2ME[i][j].IsZero() {
+				for j := 0; j < a.w; j++ {
+					if a.me[i][j].IsZero() {
 						continue
 					}
-					rhs = rhs.Add(expr.Const(p2ME[i][j]).Mul(cube(state[j], rk[j])))
+					rhs = rhs.Add(expr.Const(a.me[i][j]).Mul(cube(state[j], rk[j])))
 				}
 				m.AssertZero(expr.Col(next[i]).Sub(rhs))
 			}
@@ -226,9 +246,9 @@ func (poseidon2AIR) Define(b *board.Builder, module string, inputs, outputs []st
 		// sbox_r = (state_0 + rk_0)³, then state = M_I · state
 		m.AssertZero(expr.Col(sbox[r]).Sub(cube(state[0], rk[0])))
 		state[0] = linCol(sbox[r])
-		nextState := make([]linForm, P2Width)
+		nextState := make([]linForm, a.w)
 		for i := range nextState {
-			nextState[i] = combine(p2MI[i], state)
+			nextState[i] = combine(a.mi[i], state)
 		}
 		state = nextState
 	}
@@ -239,9 +259,9 @@ func (poseidon2AIR) Define(b *board.Builder, module string, inputs, outputs []st
 // row. Rows whose inputs and outputs are all zero are padding rows: they
 // become the genuine instance P(0). On other rows, the traced outputs must
 // match.
-func (poseidon2AIR) Fill(t trace.Trace, module string, inputs, outputs []string) error {
-	params := poseidon2.NewParameters(P2Width, P2FullRounds, P2PartialRounds)
-	post, sbox := p2Columns(module)
+func (a poseidon2AIR) Fill(t trace.Trace, module string, inputs, outputs []string) error {
+	params := poseidon2.NewParameters(a.w, a.rf, a.rp)
+	post, sbox := a.p2Columns(module)
 	n := len(t.Base[inputs[0]])
 	cols := map[string][]koalabear.Element{}
 	col := func(name string) []koalabear.Element {
@@ -253,25 +273,25 @@ func (poseidon2AIR) Fill(t trace.Trace, module string, inputs, outputs []string)
 		return c
 	}
 
-	last := P2FullRounds + P2PartialRounds - 1
+	last := a.rf + a.rp - 1
 	for row := 0; row < n; row++ {
-		x := make([]koalabear.Element, P2Width)
+		x := make([]koalabear.Element, a.w)
 		padding := true
 		for i := range x {
 			x[i] = t.Base[inputs[i]][row]
 			padding = padding && x[i].IsZero() && t.Base[outputs[i]][row].IsZero()
 		}
-		state := mulMat(&p2ME, x)
+		state := mulMat(a.me, x)
 		for r := 0; r <= last; r++ {
 			rk := params.RoundKeys[r]
-			if isFullRound(r) {
+			if a.isFullRound(r) {
 				for j := range state {
 					state[j].Add(&state[j], &rk[j])
 					var c koalabear.Element
 					c.Square(&state[j]).Mul(&c, &state[j])
 					state[j] = c
 				}
-				state = mulMat(&p2ME, state)
+				state = mulMat(a.me, state)
 				if r < last {
 					for i := range state {
 						col(post[r][i])[row] = state[i]
@@ -284,7 +304,7 @@ func (poseidon2AIR) Fill(t trace.Trace, module string, inputs, outputs []string)
 			c.Square(&state[0]).Mul(&c, &state[0])
 			state[0] = c
 			col(sbox[r])[row] = c
-			state = mulMat(&p2MI, state)
+			state = mulMat(a.mi, state)
 		}
 		for i := range state {
 			traced := t.Base[outputs[i]][row]
