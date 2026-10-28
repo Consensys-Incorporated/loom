@@ -33,6 +33,7 @@ const (
 // Module names of the chips.
 const (
 	witnessMod = "witness"
+	streamMod  = "stream"
 	constMod   = "const"
 	p2Mod      = "p2" // the P2 core, carrying the sponge and the Merkle paths
 	dpathMod   = "dpath"
@@ -221,7 +222,7 @@ type chip interface {
 }
 
 func (m *Machine) chips() []chip {
-	return []chip{witnessChip{m}, constChip{m}, p2Chip{m}, dpathChip{m}, selectChip{m},
+	return []chip{witnessChip{m}, streamChip{m}, constChip{m}, p2Chip{m}, dpathChip{m}, selectChip{m},
 		windowChip{m}, bitsChip{m}, e6Chip{m}, sumChip{m}, deepChip{m}, foldChip{m}, tableChip{m}, lookupChip{m}}
 }
 
