@@ -101,7 +101,7 @@ func (c p2Chip) rows() int {
 }
 
 func (c p2Chip) define(b *board.Builder, bus *Bus) error {
-	if err := (poseidon2AIR{}).Define(b, p2Mod, p2Ins(), p2Outs()); err != nil {
+	if err := loomP2AIR().Define(b, p2Mod, p2Ins(), p2Outs()); err != nil {
 		return err
 	}
 	mm := b.Modules[p2Mod]
@@ -168,7 +168,7 @@ func setPermRow(cs *cols, perm *poseidon2.Permutation, row int, in [width]koalab
 func fillP2(cs *cols) error {
 	tmp := trace.New()
 	cs.store(tmp, p2Mod)
-	if err := (poseidon2AIR{}).Fill(tmp, p2Mod, p2Ins(), p2Outs()); err != nil {
+	if err := loomP2AIR().Fill(tmp, p2Mod, p2Ins(), p2Outs()); err != nil {
 		return err
 	}
 	for name, v := range tmp.Base {

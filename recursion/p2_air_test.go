@@ -29,7 +29,7 @@ func proveP2AIR(t *testing.T, tamper func(tr trace.Trace)) error {
 	m := board.NewModule(module)
 	m.N = n
 	b.AddModule(m)
-	if err := (poseidon2AIR{}).Define(&b, module, inputs, outputs); err != nil {
+	if err := loomP2AIR().Define(&b, module, inputs, outputs); err != nil {
 		t.Fatal(err)
 	}
 	pg, err := board.Compile(&b)
@@ -62,7 +62,7 @@ func proveP2AIR(t *testing.T, tamper func(tr trace.Trace)) error {
 		tr.SetBase(inputs[i], in[i])
 		tr.SetBase(outputs[i], out[i])
 	}
-	if err := (poseidon2AIR{}).Fill(tr, module, inputs, outputs); err != nil {
+	if err := loomP2AIR().Fill(tr, module, inputs, outputs); err != nil {
 		t.Fatal(err)
 	}
 	if tamper != nil {

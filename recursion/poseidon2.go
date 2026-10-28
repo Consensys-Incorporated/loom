@@ -14,6 +14,8 @@
 package recursion
 
 import (
+	"fmt"
+
 	"github.com/consensys/gnark-crypto/field/koalabear"
 	"github.com/consensys/loom/internal/fri"
 	"github.com/consensys/loom/internal/hash"
@@ -39,10 +41,25 @@ const (
 // AIR needs them as constraint coefficients. TestPoseidon2AIR proves
 // the AIR against gnark-crypto's permutation, so a drift would fail it.
 
-// p2Diag24 is the diagonal of the width-24 internal matrix, M = 1·1ᵀ + diag,
-// as used by gnark-crypto's matMulInternalInPlace.
-func p2Diag24() []koalabear.Element {
-	var d [P2Width]koalabear.Element
+// p2Diag is the diagonal of the width-w internal matrix, M = 1·1ᵀ + diag, as
+// used by gnark-crypto's matMulInternalInPlace, for the widths it supports.
+// The first nine entries are shared; the tail is a run of signed inverse
+// powers of two whose exponents differ per width.
+func p2Diag(w int) []koalabear.Element {
+	var pos, neg []int
+	switch w {
+	case 16:
+		// [..., 1/2^8, 1/8, 1/2^24, -1/2^8, -1/8, -1/16, -1/2^24]
+		pos, neg = []int{8, 3, 24}, []int{8, 3, 4, 24}
+	case 24:
+		pos, neg = []int{8, 2, 3, 4, 5, 6, 24}, []int{8, 3, 4, 5, 6, 7, 9, 24}
+	default:
+		panic(fmt.Sprintf("p2Diag: unsupported width %d", w))
+	}
+	if 9+len(pos)+len(neg) != w {
+		panic(fmt.Sprintf("p2Diag: %d entries for width %d", 9+len(pos)+len(neg), w))
+	}
+	d := make([]koalabear.Element, w)
 	pow2Inv := func(n int) koalabear.Element {
 		var r koalabear.Element
 		r.SetUint64(1 << n)
@@ -62,12 +79,12 @@ func p2Diag24() []koalabear.Element {
 	d[6].Neg(&d[6])
 	set(7, -3)
 	set(8, -4)
-	for i, n := range []int{8, 2, 3, 4, 5, 6, 24} {
+	for i, n := range pos {
 		d[9+i] = pow2Inv(n)
 	}
-	for i, n := range []int{8, 3, 4, 5, 6, 7, 9, 24} {
-		d[16+i] = pow2Inv(n)
-		d[16+i].Neg(&d[16+i])
+	for i, n := range neg {
+		d[9+len(pos)+i] = pow2Inv(n)
+		d[9+len(pos)+i].Neg(&d[9+len(pos)+i])
 	}
-	return d[:]
+	return d
 }
