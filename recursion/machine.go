@@ -34,8 +34,7 @@ const (
 const (
 	witnessMod = "witness"
 	constMod   = "const"
-	p2sMod     = "p2s" // the P2 core carrying the sponge
-	p2mMod     = "p2m" // the P2 core carrying the Merkle paths
+	p2Mod      = "p2" // the P2 core, carrying the sponge and the Merkle paths
 	dpathMod   = "dpath"
 	selectMod  = "select"
 	windowMod  = "window"
@@ -180,7 +179,7 @@ func (m *Machine) Compile() (*Program, error) {
 	p := &Program{m: m}
 
 	// Every module exists before any chip is defined: a chip may look up into
-	// another one (the dynamic-path chip into the Merkle core).
+	// another one (the dynamic-path chip into the P2 core).
 	var used []chip
 	for _, c := range m.chips() {
 		if c.rows() == 0 {
@@ -212,7 +211,7 @@ func (m *Machine) Compile() (*Program, error) {
 // setup fills its setup columns (from the program), trace its witness columns
 // (from an execution). Chips are traced in the order of Machine.chips, so a
 // chip may use what the execution recorded in the Run (the dynamic paths'
-// compressions, for the Merkle core).
+// compressions, for the P2 core).
 type chip interface {
 	name() string
 	rows() int
@@ -222,7 +221,7 @@ type chip interface {
 }
 
 func (m *Machine) chips() []chip {
-	return []chip{witnessChip{m}, constChip{m}, p2SpongeChip{m}, p2MerkleChip{m}, dpathChip{m}, selectChip{m},
+	return []chip{witnessChip{m}, constChip{m}, p2Chip{m}, dpathChip{m}, selectChip{m},
 		windowChip{m}, bitsChip{m}, e6Chip{m}, sumChip{m}, deepChip{m}, foldChip{m}, tableChip{m}, lookupChip{m}}
 }
 
@@ -248,9 +247,10 @@ func (p *Program) NumInputs() int { return len(p.m.inputs) }
 type Run struct {
 	Trace  trace.Trace // the witness columns (loom merges the setup ones)
 	values []Cell
-	// p2m holds the dynamic paths' compression inputs, in the order of the
-	// rows the Merkle core traces for them, after the Merkle paths' own.
-	p2m [][width]koalabear.Element
+	// p2 holds the dynamic paths' compression inputs, in the order of the
+	// rows the P2 core traces for them, after the sponges' and the Merkle
+	// paths' own.
+	p2 [][width]koalabear.Element
 
 	// tableReads[t][i] counts the reads of entry i of table t by dynamic
 	// paths (Lookup's are counted from the lookups); dpathRows[i] are the

@@ -22,8 +22,8 @@ func TestOpeningsWidthIsFixed(t *testing.T) {
 			}
 		}
 		leaf[i] = LeafCostOf(p.Loom)
-		t.Logf("rows: p2s %d, p2m %d, witness %d; leaf elements/query %d, leaf perms/query %d",
-			p.Loom.Modules[p2sMod].N, p.Loom.Modules[p2mMod].N,
+		t.Logf("rows: p2 %d, witness %d; leaf elements/query %d, leaf perms/query %d",
+			p.Loom.Modules[p2Mod].N,
 			p.Loom.Modules[witnessMod].N, leaf[i].Elements, leaf[i].Perms)
 	}
 	// The leaf permutations can differ by a few: leaves are hashed per (tree,

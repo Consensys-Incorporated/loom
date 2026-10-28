@@ -17,26 +17,27 @@ import (
 	"fmt"
 
 	"github.com/consensys/gnark-crypto/field/koalabear"
-	"github.com/consensys/loom/board"
+	"github.com/consensys/gnark-crypto/field/koalabear/poseidon2"
 	"github.com/consensys/loom/expr"
 )
 
-// Setup columns of the sponge core.
+// The sponge's columns on the P2 core (see p2Chip), prefixed so they do not
+// meet the Merkle path's. Setup:
 const (
-	spongeFirst   = "first"
-	spongeLast    = "last"
-	spongeActive  = "active"
-	spongeKeepCap = "keep_cap"
-	spongeAddrA   = "addr_a"
-	spongeAddrB   = "addr_b"
-	spongeOutAddr = "out_addr"
-	spongeOutMult = "out_mult"
-	spongeData    = "data" // lanes
-	spongeKeep    = "keep" // lanes
+	spongeActive  = "sp_active"
+	spongeFirst   = "sp_first"
+	spongeLast    = "sp_last"
+	spongeKeepCap = "sp_keep_cap"
+	spongeAddrA   = "sp_addr_a"
+	spongeAddrB   = "sp_addr_b"
+	spongeOutAddr = "sp_out_addr"
+	spongeOutMult = "sp_out_mult"
+	spongeData    = "sp_data" // lanes
+	spongeKeep    = "sp_keep" // lanes
 )
 
-// Witness columns of the sponge core, next to the P2 core's s and r lanes.
-const spongeX = "x" // lanes
+// and witness: the block, read from two cells.
+const spongeX = "sp_x" // lanes
 
 type spongeInst struct {
 	data   []int // data cells, 2 per block
@@ -85,64 +86,35 @@ func spongeDigest(r *Run, s spongeInst) (Cell, error) {
 	return d, nil
 }
 
-// p2SpongeChip: the sponge P2 core, one row per 16-element block of a sponge.
-// It carries poseidon2AIR and the sponge's chaining on the same module, so the
-// permutation's input and output are committed once rather than once in each
-// of two modules tied by a lookup.
-//
-// Columns: x0..15 (the block, read from two cells), s0..23 and r0..23 (the
-// permutation, with the AIR's round columns). Setup: first, last, active,
-// data_j (lane j is input), keep_j = (1 − data_j)·(1 − first), keep_cap =
-// 1 − first, addr_a, addr_b (the two data cells), out_addr and out_mult (the
-// digest, written on the last row).
-//
-// Beside the AIR, one constraint per lane feeds the permutation:
-//
-//	s_j = data_j·x_j + keep_j·r_j[−1]   on the rate lanes
-//	s_j = keep_cap·r_j[−1]              on the capacity
-//
-// so the state chains from row to row, and a trailing partial block keeps the
-// previous state on its unused lanes, as loom's overwrite-mode sponge does. On
-// a padding row every setup lane is zero, so s = 0 and the row is the genuine
-// instance P(0); a sponge's first row has keep = keep_cap = 0, so no chain
-// crosses a sponge boundary or the module's wrap-around.
-type p2SpongeChip struct{ m *Machine }
-
-func (c p2SpongeChip) name() string { return p2sMod }
-
-func (c p2SpongeChip) rows() int {
+// spongeBlocks is the number of rows the sponges take on the core.
+func (m *Machine) spongeBlocks() int {
 	n := 0
-	for _, s := range c.m.sponges {
+	for _, s := range m.sponges {
 		n += len(s.data) / 2
 	}
 	return n
 }
 
-func (c p2SpongeChip) define(b *board.Builder, bus *Bus) error {
-	if err := (poseidon2AIR{}).Define(b, p2sMod, p2Ins(p2sMod), p2Outs(p2sMod)); err != nil {
-		return err
+// spongeInput is the permutation input the sponge asks for on lane l:
+//
+//	data_l·x_l + keep_l·r_l[−1]   on the rate lanes
+//	keep_cap·r_l[−1]              on the capacity
+//
+// so the state chains from row to row, and a trailing partial block keeps the
+// previous state on its unused lanes, as loom's overwrite-mode sponge does. A
+// sponge's first row has keep = keep_cap = 0, so no chain crosses a sponge
+// boundary, the Merkle rows below or the module's wrap-around.
+func spongeInput(l int) expr.Expr {
+	prev := colShift(p2Mod, laneName(p2R, l), -1)
+	if l >= rate {
+		return setupCol(p2Mod, spongeKeepCap).Mul(prev)
 	}
-	mm := b.Modules[p2sMod]
-	for l := range width {
-		prev := colShift(p2sMod, laneName(p2R, l), -1)
-		var in expr.Expr
-		if l < rate {
-			in = setupCol(p2sMod, laneName(spongeData, l)).Mul(col(p2sMod, laneName(spongeX, l))).
-				Add(setupCol(p2sMod, laneName(spongeKeep, l)).Mul(prev))
-		} else {
-			in = setupCol(p2sMod, spongeKeepCap).Mul(prev)
-		}
-		mm.AssertZero(col(p2sMod, laneName(p2S, l)).Sub(in))
-	}
-
-	active := setupCol(p2sMod, spongeActive)
-	bus.Read(p2sMod, setupCol(p2sMod, spongeAddrA), cellCols(p2sMod, spongeX, 0), active)
-	bus.Read(p2sMod, setupCol(p2sMod, spongeAddrB), cellCols(p2sMod, spongeX, CellWidth), active)
-	bus.Write(p2sMod, setupCol(p2sMod, spongeOutAddr), cellCols(p2sMod, p2R, 0), setupCol(p2sMod, spongeOutMult))
-	return nil
+	return setupCol(p2Mod, laneName(spongeData, l)).Mul(col(p2Mod, laneName(spongeX, l))).
+		Add(setupCol(p2Mod, laneName(spongeKeep, l)).Mul(prev))
 }
 
-func (c p2SpongeChip) setup(cs *cols) {
+// spongeSetup fills the sponges' setup columns, on the core's first rows.
+func (c p2Chip) spongeSetup(cs *cols) {
 	cs.declare(spongeFirst, spongeLast, spongeActive, spongeKeepCap, spongeAddrA, spongeAddrB, spongeOutAddr, spongeOutMult)
 	for j := range rate {
 		cs.declare(laneName(spongeData, j), laneName(spongeKeep, j))
@@ -176,13 +148,10 @@ func (c p2SpongeChip) setup(cs *cols) {
 	}
 }
 
-// trace fills the blocks and the chained permutations, then the AIR's round
-// columns.
-func (c p2SpongeChip) trace(cs *cols, r *Run) error {
+// spongeTrace fills the blocks and their chained permutations from row 0, and
+// returns the number of rows it used.
+func (c p2Chip) spongeTrace(cs *cols, r *Run, perm *poseidon2.Permutation) (int, error) {
 	cs.declareLanes(spongeX, rate)
-	cs.declareLanes(p2S, width)
-	cs.declareLanes(p2R, width)
-	perm := newPerm()
 	row := 0
 	for _, s := range c.m.sponges {
 		var state [width]koalabear.Element
@@ -202,7 +171,7 @@ func (c p2SpongeChip) trace(cs *cols, r *Run) error {
 				cs.setElem(laneName(p2S, l), row, state[l])
 			}
 			if err := perm.Permutation(state[:]); err != nil {
-				return err
+				return 0, err
 			}
 			for l := range width {
 				cs.setElem(laneName(p2R, l), row, state[l])
@@ -210,5 +179,5 @@ func (c p2SpongeChip) trace(cs *cols, r *Run) error {
 			row++
 		}
 	}
-	return fillP2(cs, p2sMod)
+	return row, nil
 }

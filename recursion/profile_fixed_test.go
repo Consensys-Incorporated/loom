@@ -58,9 +58,22 @@ func costOf(t *testing.T, p *Program, label string) {
 // change to the hashing chips isolates the change, where the verifier profile
 // also moves because its inner proof moved.
 func TestProfileFixedCost(t *testing.T) {
-	p, err := openingsMachine(t, smallCfg).Compile()
-	if err != nil {
-		t.Fatal(err)
+	// A config big enough that the core's padding does not dominate: deep
+	// Merkle paths and many queries, so sponge blocks and path steps are of
+	// the same order as in a real verifier.
+	bigCfg := FixtureConfig{
+		Batches:    []BatchConfig{{{LogN: 14, NumBase: 40, NumExt: 4, Shifts: []int{0, 1}}}},
+		NumQueries: 24,
+		Seed:       3,
 	}
-	costOf(t, p, "openings machine (smallCfg)")
+	for _, c := range []struct {
+		label string
+		cfg   FixtureConfig
+	}{{"smallCfg", smallCfg}, {"bigCfg", bigCfg}} {
+		p, err := openingsMachine(t, c.cfg).Compile()
+		if err != nil {
+			t.Fatal(err)
+		}
+		costOf(t, p, "openings machine ("+c.label+")")
+	}
 }
