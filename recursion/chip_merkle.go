@@ -45,6 +45,7 @@ const (
 	merkleIdx = "mk_idx" // the index left to consume
 	merkleX   = "mk_x"   // the x⁻¹ accumulator
 	merkleB0  = "mk_b0"  // the index's low bit
+	merkleF   = "mk_f"   // the accumulator's factor, 1 + b·(g − 1)
 	merkleCur = "mk_cur" // lanes: the running hash entering the row
 	merkleSib = "mk_sib" // lanes: the sibling, or the injection leaf
 )
@@ -206,8 +207,9 @@ func merkleInput(l int) expr.Expr {
 //	idx = b                      on the last row (the index is below 2^depth)
 //	                             and on every non-Merkle row
 //	cur = r[−1]                  on every Merkle row but the first of a path
-//	x = 1 + b·(g − 1)            on the first row
-//	x = x[−1]·(1 + b·(g − 1))    on the others
+//	f = 1 + b·(g − 1)            on every row (1 outside the Merkle rows)
+//	x = f                        on the first row
+//	x = x[−1]·f                  on the others (f keeps it at degree 3)
 //	b0 = b on the first level row, b0 = b0[−1] on the following rows
 //
 // The first row reads the leaf digest and the index (lane 0 of its cell); the
@@ -229,7 +231,8 @@ func merkleDefine(mm *board.Module, bus *Bus) {
 	}
 	// x⁻¹ = Π_lvl (b_lvl ? g_lvl : 1), with g_lvl = gInv^(2^(depth−1−lvl)).
 	x, b0 := col(p2Mod, merkleX), col(p2Mod, merkleB0)
-	factor := one().Add(bit.Mul(setupCol(p2Mod, merkleG).Sub(one())))
+	factor := col(p2Mod, merkleF)
+	mm.AssertZero(factor.Sub(one().Add(bit.Mul(setupCol(p2Mod, merkleG).Sub(one())))))
 	mm.AssertZero(first.Mul(x.Sub(factor)))
 	mm.AssertZero(notFirst.Mul(x.Sub(colShift(p2Mod, merkleX, -1).Mul(factor))))
 	mm.AssertZero(lvl0.Mul(b0.Sub(bit)))
@@ -283,7 +286,10 @@ func (c p2Chip) merkleSetup(cs *cols, off int) {
 // merkleTrace fills the paths' steps and their compressions from row off, and
 // returns the first row after them.
 func (c p2Chip) merkleTrace(cs *cols, r *Run, perm *poseidon2.Permutation, off int) (int, error) {
-	cs.declare(merkleB, merkleIdx, merkleX, merkleB0)
+	cs.declare(merkleB, merkleIdx, merkleX, merkleB0, merkleF)
+	for row := range cs.n {
+		cs.set(merkleF, row, 1) // b = 0 outside the Merkle rows and on their b = 0 rows
+	}
 	cs.declareLanes(merkleCur, digest)
 	cs.declareLanes(merkleSib, digest)
 	row := off
@@ -308,6 +314,7 @@ func (c p2Chip) merkleTrace(cs *cols, r *Run, perm *poseidon2.Permutation, off i
 					g = p.gens[st.lvl]
 				}
 				x.Mul(&x, &g)
+				cs.setElem(merkleF, row, g)
 			}
 			cs.setElem(merkleX, row, x)
 			var in [width]koalabear.Element

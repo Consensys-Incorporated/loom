@@ -85,7 +85,17 @@ func p2Table(nOut int) board.Table {
 //
 // so s is free on the rows of neither — which is where the dynamic paths'
 // compressions are traced — and zero on padding rows.
+//
+// The core keeps poseidon2AIR's degree, p2Degree: every control constraint has
+// degree at most 3, and the bus batches the core's accesses within it (see
+// Bus.LimitDegree). The core is the largest module, and its quotient, hence
+// the domain its 189-column AIR is evaluated on, follows its highest degree:
+// degree 5 would double that domain, for no saving in committed cells.
 type p2Chip struct{ m *Machine }
+
+// p2Degree is the degree of poseidon2AIR's constraints (S-box degree 3), and of
+// every constraint on the P2 core.
+const p2Degree = 3
 
 func (c p2Chip) name() string { return p2Mod }
 
@@ -105,6 +115,7 @@ func (c p2Chip) define(b *board.Builder, bus *Bus) error {
 		return err
 	}
 	mm := b.Modules[p2Mod]
+	bus.LimitDegree(p2Mod, p2Degree)
 	spActive, mkActive := setupCol(p2Mod, spongeActive), setupCol(p2Mod, merkleActive)
 	for l := range width {
 		s := col(p2Mod, laneName(p2S, l))
