@@ -41,7 +41,8 @@ const (
 	windowMod  = "window"
 	bitsMod    = "bits"
 	e6Mod      = "e6"
-	deepMod    = "deep"
+	deepMod    = "deep"  // the DEEP Horner's base rows
+	deepxMod   = "deepx" // and its Ext rows, see deepChip
 	foldMod    = "fold"
 	tableMod   = "table"
 	lookupMod  = "lookup"
@@ -223,7 +224,7 @@ type chip interface {
 
 func (m *Machine) chips() []chip {
 	return []chip{witnessChip{m}, streamChip{m}, constChip{m}, p2Chip{m}, dpathChip{m}, selectChip{m},
-		windowChip{m}, bitsChip{m}, e6Chip{m}, sumChip{m}, deepChip{m}, foldChip{m}, tableChip{m}, lookupChip{m}}
+		windowChip{m}, bitsChip{m}, e6Chip{m}, sumChip{m}, deepChip{m: m, module: deepMod, lanes: CellWidth}, deepChip{m: m, module: deepxMod, lanes: 1, ext: true}, foldChip{m}, tableChip{m}, lookupChip{m}}
 }
 
 type chipHeight struct {
