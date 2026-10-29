@@ -97,8 +97,9 @@ func (s *riscvSystem) padForDynamic() {
 	s.cfg = vm.DEFAULT_TRACE_CONFIG.WithPadding(gocorset.PaddingAtLeast(1 << minLog))
 }
 
-// prove proves, with loom, the interpreter running guest elf (one shard).
-func (s *riscvSystem) prove(t *testing.T, elf []byte) innerProof {
+// prove proves, with loom, the interpreter running guest elf (one shard), with
+// the given prover options (e.g. prover.WithNumFriQueries).
+func (s *riscvSystem) prove(t *testing.T, elf []byte, opts ...loom.ProverOption) innerProof {
 	t.Helper()
 	inputs, err := predecoding.PrepareInputs(elf, nil)
 	if err != nil {
@@ -136,7 +137,7 @@ func (s *riscvSystem) prove(t *testing.T, elf []byte) innerProof {
 		t.Fatal(err)
 	}
 	st := loom.Statement{Program: pg, VerificationKey: vk, PublicInputs: pi}
-	prf, err := loom.Prove(st, loom.Witness{Trace: tr, ProvingKey: pk})
+	prf, err := loom.Prove(st, loom.Witness{Trace: tr, ProvingKey: pk}, opts...)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,11 +187,27 @@ func TestRiscvTwoProofsVerifier(t *testing.T) {
 	}
 	sys := newRiscvSystem(t, false)
 	sys.padForDynamic()
+	t0 := time.Now()
+	ips := sys.proveTwoGuests(t)
+	t.Logf("inner proofs in %v", time.Since(t0).Round(time.Millisecond))
+	p, in := buildTwoProofsVerifier(t, sys, ips)
+	runVerifierCircuit(t, p, in)
+}
+
+// proveTwoGuests proves the instruction-coverage guest and a Fibonacci(200)
+// loop, whose module sizes differ, with the given prover options.
+func (s *riscvSystem) proveTwoGuests(t *testing.T, opts ...loom.ProverOption) []innerProof {
+	t.Helper()
 	allInOne, _ := minimalelf.AllInOneElfProgram()
 	fib, _ := minimalelf.FibonacciELF(200)
-	t0 := time.Now()
-	ips := []innerProof{sys.prove(t, allInOne), sys.prove(t, fib)}
-	t.Logf("inner proofs in %v", time.Since(t0).Round(time.Millisecond))
+	return []innerProof{s.prove(t, allInOne, opts...), s.prove(t, fib, opts...)}
+}
+
+// buildTwoProofsVerifier builds, in one circuit, the size-oblivious verifiers
+// of two proofs of sys's program (see TestRiscvTwoProofsVerifier), and returns
+// the compiled circuit with its inputs.
+func buildTwoProofsVerifier(t *testing.T, sys *riscvSystem, ips []innerProof) (*Program, []Cell) {
+	t.Helper()
 	if !slices.Equal(ips[0].vk.Roots, ips[1].vk.Roots) {
 		t.Fatal("the two proofs have different verification keys")
 	}
@@ -203,7 +220,7 @@ func TestRiscvTwoProofsVerifier(t *testing.T) {
 	dynamic := sys.dynamicModules()
 	t.Logf("%d modules, %d dynamic, %d of different sizes in the two proofs", len(ips[0].program.Modules), len(dynamic), differ)
 
-	t0 = time.Now()
+	t0 := time.Now()
 	m := &Machine{}
 	var vs []*Verifier
 	for _, ip := range ips {
@@ -230,13 +247,42 @@ func TestRiscvTwoProofsVerifier(t *testing.T) {
 		}
 		in = append(in, vin...)
 	}
-	runVerifierCircuit(t, p, in)
+	return p, in
 }
 
 // runVerifierCircuit executes a verifier circuit on its inputs, logs its rows
 // per chip, checks that every module fits in one shard (N ≤
 // 2^MaxLogModuleSize), and proves the execution.
 func runVerifierCircuit(t *testing.T, p *Program, in []Cell) {
+	t.Helper()
+	r, chips := executeVerifierCircuit(t, p, in)
+	total := 0
+	for _, c := range chips {
+		total += c.n
+		t.Logf("  %-8s %9d rows, N = 2^%d", c.module, c.rows, log2Int(c.n))
+		if c.n > 1<<MaxLogModuleSize {
+			t.Errorf("module %s: N = %d exceeds 2^%d", c.module, c.n, MaxLogModuleSize)
+		}
+	}
+	t.Logf("verifier: %d modules, %d padded rows", len(chips), total)
+
+	t0 := time.Now()
+	if err := prove(t, p, r); err != nil {
+		t.Fatalf("verifier execution rejected: %v", err)
+	}
+	t.Logf("verifier execution: setup+prove+verify in %v", time.Since(t0).Round(time.Millisecond))
+}
+
+// chipRows is the size of one chip of an executed verifier circuit: its rows,
+// and N, the size of its loom module (the rows padded to a power of two).
+type chipRows struct {
+	module  string
+	rows, n int
+}
+
+// executeVerifierCircuit executes a verifier circuit on its inputs, and returns
+// the run with the rows of every chip that has some, by decreasing rows.
+func executeVerifierCircuit(t *testing.T, p *Program, in []Cell) (*Run, []chipRows) {
 	t.Helper()
 	t0 := time.Now()
 	r, err := p.Execute(in)
@@ -249,24 +295,12 @@ func runVerifierCircuit(t *testing.T, p *Program, in []Cell) {
 	for _, c := range p.m.chips() {
 		rows[c.name()] = c.rows()
 	}
-	heights := slices.Clone(p.heights)
-	sort.Slice(heights, func(i, j int) bool { return rows[heights[i].module] > rows[heights[j].module] })
-	total := 0
-	for _, h := range heights {
-		n := p.Loom.Modules[h.module].N
-		total += n
-		t.Logf("  %-8s %9d rows, N = 2^%d", h.module, rows[h.module], log2Int(n))
-		if n > 1<<MaxLogModuleSize {
-			t.Errorf("module %s: N = %d exceeds 2^%d", h.module, n, MaxLogModuleSize)
-		}
+	chips := make([]chipRows, len(p.heights))
+	for i, h := range p.heights {
+		chips[i] = chipRows{module: h.module, rows: rows[h.module], n: p.Loom.Modules[h.module].N}
 	}
-	t.Logf("verifier: %d modules, %d padded rows", len(heights), total)
-
-	t0 = time.Now()
-	if err := prove(t, p, r); err != nil {
-		t.Fatalf("verifier execution rejected: %v", err)
-	}
-	t.Logf("verifier execution: setup+prove+verify in %v", time.Since(t0).Round(time.Millisecond))
+	sort.SliceStable(chips, func(i, j int) bool { return chips[i].rows > chips[j].rows })
+	return r, chips
 }
 
 func log2Int(n int) int {
