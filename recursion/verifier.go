@@ -856,7 +856,10 @@ func (v *Verifier) buildOpenings() {
 				rp := v.Openings[k][t][g]
 				nb, ne := rp.Lo.NBase, len(rp.Lo.Ext)
 				// The leaf: tag, widths, lo base, hi base, lo ext, hi ext.
-				items := m.Elements([]koalabear.Element{hash.NewElement(fri.LeafDomainTag), hash.NewElement(uint64(2 * nb)), hash.NewElement(uint64(2 * ne))})
+				// The tag and the widths are constants: they go in the
+				// stream's prefix, which costs no cell and no window row.
+				prefix := []koalabear.Element{hash.NewElement(fri.LeafDomainTag), hash.NewElement(uint64(2 * nb)), hash.NewElement(uint64(2 * ne))}
+				var items []Item
 				for _, r := range []Row{rp.Lo, rp.Hi} {
 					for c, cell := range r.Base {
 						items = append(items, Item{cell, min(CellWidth, nb-c*CellWidth)})
@@ -869,7 +872,7 @@ func (v *Verifier) buildOpenings() {
 				for i, it := range items {
 					addrs[i], kinds[i] = it.Addr, it.Kind
 				}
-				stream, n := m.Pack(addrs, kinds)
+				stream, n := m.PackPrefixed(prefix, addrs, kinds)
 				leaves[g] = m.Sponge(stream, n)
 			}
 			if v.dynamicTree(t) {
@@ -1425,13 +1428,13 @@ func (v *Verifier) classShifts(module string, shifts []int) []int {
 // and 2 extension values, then p and q.
 func (v *Verifier) leafE6Pair(p, q int) int {
 	m := v.M
-	items := m.Elements([]koalabear.Element{hash.NewElement(fri.LeafDomainTag), hash.NewElement(0), hash.NewElement(2)})
-	items = append(items, E6(p), E6(q))
+	prefix := []koalabear.Element{hash.NewElement(fri.LeafDomainTag), hash.NewElement(0), hash.NewElement(2)}
+	items := []Item{E6(p), E6(q)}
 	addrs, kinds := make([]int, len(items)), make([]int, len(items))
 	for i, it := range items {
 		addrs[i], kinds[i] = it.Addr, it.Kind
 	}
-	stream, n := m.Pack(addrs, kinds)
+	stream, n := m.PackPrefixed(prefix, addrs, kinds)
 	return m.Sponge(stream, n)
 }
 

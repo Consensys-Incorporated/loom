@@ -224,7 +224,7 @@ type chip interface {
 
 func (m *Machine) chips() []chip {
 	return []chip{witnessChip{m}, streamChip{m}, constChip{m}, p2Chip{m}, dpathChip{m}, selectChip{m},
-		windowChip{m}, bitsChip{m}, e6Chip{m}, sumChip{m}, deepChip{m: m, module: deepMod, lanes: CellWidth}, deepChip{m: m, module: deepxMod, lanes: 1, ext: true}, foldChip{m}, tableChip{m}, lookupChip{m}}
+		windowChip{m}, bitsChip{m}, e6Chip{m}, sumChip{m}, deepChip{m: m, module: deepMod, lanes: CellWidth}, deepChip{m: m, module: deepxMod, lanes: deepExtLanes, ext: true}, foldChip{m}, tableChip{m}, lookupChip{m}}
 }
 
 type chipHeight struct {

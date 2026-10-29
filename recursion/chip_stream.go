@@ -15,6 +15,13 @@ package recursion
 
 import "github.com/consensys/loom/board"
 
+// Setup columns of the stream chip's constant prefix: the selector of a
+// stream's first cell and the constants it must carry.
+const (
+	streamPfx   = "pfx"
+	streamConst = "c" // lanes
+)
+
 // streamChip: one row per cell of a Pack stream (see Machine.Pack), the
 // repacking of a leaf's items into whole cells that Sponge absorbs. The
 // windows check every item against its place in the stream, so the chip only
@@ -43,15 +50,48 @@ func (c streamChip) name() string { return streamMod }
 func (c streamChip) rows() int { return len(c.m.hints) }
 
 func (c streamChip) define(b *board.Builder, bus *Bus) error {
+	// A stream's constant prefix (see PackPrefixed) lives in setup: on the
+	// first cell of such a stream the chip pins the leading lanes to it, so
+	// those elements cost no cell, no bus read and no window row. Degree 2,
+	// the module's own.
+	if n := c.m.packPrefix(); n > 0 {
+		pfx := setupCol(streamMod, streamPfx)
+		v := cellCols(streamMod, witnessV, 0)
+		for k := range n {
+			mm := b.Modules[streamMod]
+			mm.AssertZero(pfx.Mul(v[k].Sub(setupCol(streamMod, laneName(streamConst, k)))))
+		}
+	}
 	bus.Write(streamMod, setupCol(streamMod, witnessAddr), cellCols(streamMod, witnessV, 0), setupCol(streamMod, witnessMult))
 	return nil
 }
 
 func (c streamChip) setup(cs *cols) {
 	cs.declare(witnessAddr, witnessMult)
+	n := c.m.packPrefix()
+	if n > 0 {
+		cs.declare(streamPfx)
+		cs.declareLanes(streamConst, n)
+	}
 	for row, tc := range c.m.hints {
 		cs.set(witnessAddr, row, uint64(tc.addr))
 		cs.set(witnessMult, row, uint64(c.m.reads[tc.addr]))
+	}
+	// The prefixes, on the row of each stream's first cell. hints are
+	// allocated in Pack order, so a stream's cells are contiguous and the
+	// first one is at the running offset.
+	if n == 0 {
+		return
+	}
+	row := 0
+	for _, pk := range c.m.packs {
+		for k, x := range pk.prefix {
+			cs.setElem(laneName(streamConst, k), row, x)
+		}
+		if len(pk.prefix) > 0 {
+			cs.set(streamPfx, row, 1)
+		}
+		row += len(pk.stream)
 	}
 }
 

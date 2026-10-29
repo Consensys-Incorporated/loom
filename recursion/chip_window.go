@@ -41,8 +41,9 @@ const (
 )
 
 type packInst struct {
+	prefix       []koalabear.Element // constant elements at the head of the stream
 	items, kinds []int
-	stream       []int // the stream cells, written by the witness chip
+	stream       []int // the stream cells, written by the stream chip
 }
 
 type windowInst struct {
@@ -59,10 +60,21 @@ type windowInst struct {
 // E6 cell, not KindScalar): its window reads it with zero lanes beyond the
 // item's kind, which are not hashed, so proving fails otherwise.
 func (m *Machine) Pack(items, kinds []int) ([]int, int) {
+	return m.PackPrefixed(nil, items, kinds)
+}
+
+// PackPrefixed is Pack with a run of constant elements at the head of the
+// stream. A constant needs no cell and no window row: the stream chip holds
+// it in setup and constrains the stream's first cell to it, so a leaf's tag
+// and widths cost nothing per leaf. The prefix must fit one cell.
+func (m *Machine) PackPrefixed(prefix []koalabear.Element, items, kinds []int) ([]int, int) {
 	if len(items) != len(kinds) {
 		panic(fmt.Sprintf("Pack: %d items, %d kinds", len(items), len(kinds)))
 	}
-	length := 0
+	if len(prefix) > CellWidth {
+		panic(fmt.Sprintf("Pack: a prefix of %d elements", len(prefix)))
+	}
+	length := len(prefix)
 	for _, k := range kinds {
 		checkKind(k)
 		length += k
@@ -71,9 +83,9 @@ func (m *Machine) Pack(items, kinds []int) ([]int, int) {
 	for i := range stream {
 		stream[i] = m.hint(KindDigest)
 	}
-	m.packs = append(m.packs, packInst{items: items, kinds: kinds, stream: stream})
+	m.packs = append(m.packs, packInst{prefix: prefix, items: items, kinds: kinds, stream: stream})
 	m.record(instrPack, len(m.packs)-1)
-	g := 0
+	g := len(prefix)
 	for i, it := range items {
 		m.window(stream, g, kinds[i], m.rd(it))
 		g += kinds[i]
@@ -81,8 +93,18 @@ func (m *Machine) Pack(items, kinds []int) ([]int, int) {
 	return stream, length
 }
 
+// packPrefix is the longest constant prefix of any stream, 0 if none: the
+// number of lanes the stream chip pins.
+func (m *Machine) packPrefix() int {
+	n := 0
+	for _, p := range m.packs {
+		n = max(n, len(p.prefix))
+	}
+	return n
+}
+
 func (m *Machine) execPack(p packInst, r *Run) {
-	var xs []koalabear.Element
+	xs := append([]koalabear.Element(nil), p.prefix...)
 	for i, it := range p.items {
 		xs = append(xs, r.values[it][:p.kinds[i]]...)
 	}
