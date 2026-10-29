@@ -97,8 +97,20 @@ func TestDeepChip(t *testing.T) {
 		},
 		// α
 		"alpha": bump("deep.al4", 3),
-		// a padding lane taken into account (act set in the setup)
-		"padding lane": func(s, _ trace.Trace) { s.Base["deep.act6"][3].SetOne() },
+		// a padding lane taken into account (act set in the setup), on a row
+		// that is neither padding nor a segment's first, so h entering it is
+		// not zero and the extra step h ← h·α shows
+		"padding lane": func(s, _ trace.Trace) {
+			for row := range s.Base["deep."+deepActive] {
+				if s.Base["deep."+deepActive][row].IsOne() &&
+					s.Base["deep."+deepFirst][row].IsZero() &&
+					s.Base["deep.act6"][row].IsZero() {
+					s.Base["deep.act6"][row].SetOne()
+					return
+				}
+			}
+			panic("no active mid-segment row with an inactive lane 6")
+		},
 		// an unselected lane added (sel set in the setup)
 		"selection": func(s, _ trace.Trace) {
 			for j := range CellWidth {
@@ -127,16 +139,32 @@ func TestDeepRowMasks(t *testing.T) {
 	m := deepMachine()
 	ext, partial := 0, false
 	for _, in := range m.deeps {
-		for _, r := range in.rows {
-			if r.Ext {
-				ext++
-			}
-			if !r.Ext && bits.OnesCount8(r.Act) < CellWidth {
-				partial = true
+		for _, sg := range in.segs {
+			for _, r := range sg.rows {
+				if r.Ext {
+					ext++
+				}
+				if !r.Ext && bits.OnesCount8(r.Act) < CellWidth {
+					partial = true
+				}
 			}
 		}
 	}
 	if ext == 0 || !partial {
 		t.Fatalf("rows: %d Ext, partial %v", ext, partial)
+	}
+}
+
+// TestDeepChipDegree checks that both deep instances keep their constraints'
+// degree, deepDegree: the bus batches their accesses within it.
+func TestDeepChipDegree(t *testing.T) {
+	p, err := deepMachine().Compile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mod := range []string{deepMod, deepxMod} {
+		if got := p.Loom.Modules[mod].VanishingRelation.Degree(); got != deepDegree {
+			t.Fatalf("%s of degree %d, want %d", mod, got, deepDegree)
+		}
 	}
 }
