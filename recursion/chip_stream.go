@@ -25,8 +25,11 @@ import "github.com/consensys/loom/board"
 // module, not per circuit: on the two-proof RISC-V verifier at 128 FRI
 // queries they are 46% of that module's rows, and moving them keeps both
 // modules under 2^MaxLogModuleSize at four proofs, where the single module
-// was 17% over. The split costs no rows and no columns — the stream cells are
-// committed and bussed exactly as before, on a module of their own.
+// was 17% over. The stream cells are committed and bussed exactly as before,
+// on a module of their own. The split costs that module's overhead: its own
+// setup, logup and quotient columns (+9 committed columns on that verifier)
+// and one more tree group per query. Its padded rows can differ from the
+// single module's, as two modules are each padded to a power of two.
 //
 // Every stream cell is a full KindDigest cell, so unlike the witness chip
 // this one has no lanes to zero and no AIR beyond the bus.
