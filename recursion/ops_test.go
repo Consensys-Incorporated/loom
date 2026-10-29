@@ -208,7 +208,7 @@ func TestWindowChip(t *testing.T) {
 		// the digest crosses from the first cell into the second
 		"crossing lane": func(tr trace.Trace) { tr.Base["window.q0"][2].SetUint64(5) },
 		// a stream cell, which the prover writes: the window no longer matches
-		"stream cell": func(tr trace.Trace) { tr.Base["witness.v2"][len(tr.Base["witness.v2"])-4].SetUint64(5) },
+		"stream cell": func(tr trace.Trace) { tr.Base["stream.v2"][0].SetUint64(5) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := compileAndProve(t, packMachine(), witnessOnly(tamper)); err == nil {
