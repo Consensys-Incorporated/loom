@@ -25,7 +25,6 @@ import (
 const (
 	deepActive = "active"
 	deepFirst  = "first"
-	deepExt    = "ext"
 	deepAct    = "act" // lanes
 	deepSel    = "sel" // lanes
 	deepAddrX  = "addr_x"
@@ -159,7 +158,7 @@ func (m *Machine) execDeep(in deepInst, r *Run) {
 //	h_j = h_{j+1} + act_j·(h_{j+1}·α + t_j − h_{j+1}),   j = lanes−1 … 0,
 //
 // with h_lanes = hin, t_j = sel_j·x_j on the first lane for j ≥ 1, and t_0 =
-// sel_0·x_0 on the first lane plus ext·sel_0·x_k on lane k ≥ 1 (x as an E6
+// sel_0·x_0 on the first lane plus, on the Ext instance, sel_0·x_k on lane k ≥ 1 (x as an E6
 // value on an Ext row).
 //
 // There are two instances, on two modules. A base row steps through up to
@@ -179,9 +178,12 @@ func (m *Machine) execDeep(in deepInst, r *Run) {
 //	hin = 0                     on a chain's first row, and on padding
 //
 // Columns: x0..7 (the cell read), al0..5 (α), hin0..5, h<j>_0..5 for j <
-// lanes. Setup: active, first, cont, ext, act_j, sel_j, addr_x, addr_al,
+// lanes. Setup: active, first, cont, act_j, sel_j, addr_x, addr_al,
 // addr_in, and addr_o, m_o (h_0 written on a segment's last row). Padding rows
 // are first rows with no active lane and no cont, so their h is 0.
+// deepDegree is the degree of the deep chip's constraints, on both instances.
+const deepDegree = 3
+
 type deepChip struct {
 	m      *Machine
 	module string
@@ -211,7 +213,12 @@ func (c deepChip) hCols(j, s int) []expr.Expr { return e6Cols(c.module, deepHPre
 func (c deepChip) define(b *board.Builder, bus *Bus) error {
 	mm := b.Modules[c.module]
 	active, first := setupCol(c.module, deepActive), setupCol(c.module, deepFirst)
-	cont, isExt := setupCol(c.module, deepCont), setupCol(c.module, deepExt)
+	cont := setupCol(c.module, deepCont)
+	// The chip's constraints have degree 3, and the bus batches its accesses
+	// within it (see Bus.LimitDegree): degree 5 would double the domain its
+	// quotient is evaluated on, and its quotient chunks are a large part of
+	// the narrow Ext instance's columns.
+	bus.LimitDegree(c.module, deepDegree)
 	al := e6Cols(c.module, deepAl, 0)
 	x := make([]expr.Expr, CellWidth)
 	for k := range x {
@@ -232,9 +239,10 @@ func (c deepChip) define(b *board.Builder, bus *Bus) error {
 		act, sel := setupCol(c.module, laneName(deepAct, j)), setupCol(c.module, laneName(deepSel, j))
 		step := e6MulExprs(prev, al)
 		step[0] = step[0].Add(sel.Mul(x[j]))
-		if j == 0 {
+		if j == 0 && c.ext {
+			// an Ext row adds its E6 value, the base lanes stop at lane 0
 			for k := 1; k < 6; k++ {
-				step[k] = step[k].Add(isExt.Mul(sel).Mul(x[k]))
+				step[k] = step[k].Add(sel.Mul(x[k]))
 			}
 		}
 		h := c.hCols(j, 0)
@@ -250,7 +258,7 @@ func (c deepChip) define(b *board.Builder, bus *Bus) error {
 }
 
 func (c deepChip) setup(cs *cols) {
-	cs.declare(deepActive, deepFirst, deepCont, deepExt, deepAddrX, deepAddrAl, deepAddrIn, deepAddrO, deepMO)
+	cs.declare(deepActive, deepFirst, deepCont, deepAddrX, deepAddrAl, deepAddrIn, deepAddrO, deepMO)
 	cs.declareLanes(deepAct, c.lanes)
 	cs.declareLanes(deepSel, c.lanes)
 	row := 0
@@ -267,9 +275,6 @@ func (c deepChip) setup(cs *cols) {
 						cs.set(deepCont, row, 1)
 						cs.set(deepAddrIn, row, uint64(sg.in))
 					}
-				}
-				if r.Ext {
-					cs.set(deepExt, row, 1)
 				}
 				for j := range c.lanes {
 					cs.set(laneName(deepAct, j), row, uint64(r.Act>>j&1))

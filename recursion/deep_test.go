@@ -154,3 +154,17 @@ func TestDeepRowMasks(t *testing.T) {
 		t.Fatalf("rows: %d Ext, partial %v", ext, partial)
 	}
 }
+
+// TestDeepChipDegree checks that both deep instances keep their constraints'
+// degree, deepDegree: the bus batches their accesses within it.
+func TestDeepChipDegree(t *testing.T) {
+	p, err := deepMachine().Compile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, mod := range []string{deepMod, deepxMod} {
+		if got := p.Loom.Modules[mod].VanishingRelation.Degree(); got != deepDegree {
+			t.Fatalf("%s of degree %d, want %d", mod, got, deepDegree)
+		}
+	}
+}
