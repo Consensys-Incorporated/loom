@@ -19,7 +19,6 @@ import (
 	"github.com/consensys/gnark-crypto/field/koalabear"
 	"github.com/consensys/loom/board"
 	"github.com/consensys/loom/expr"
-	"github.com/consensys/loom/internal/constants"
 )
 
 // PermutationCrossModules we use the lookup in this case, so that each module has its own logup
@@ -51,10 +50,7 @@ func PermutationWithinModule(builder *board.Builder, module string, A, B []expr.
 	for i, b := range B {
 		BminusGamma[i] = b.Sub(gamma)
 	}
-	_gp, err := constants.RandomString(10)
-	if err != nil {
-		return err
-	}
+	_gp := builder.FreshName("gp_")
 	Amul := AminusGamma[0]
 	Bmul := BminusGamma[0]
 	for i := 1; i < len(AminusGamma); i++ {

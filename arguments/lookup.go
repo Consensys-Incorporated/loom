@@ -134,11 +134,7 @@ func CLookupTuple(builder *board.Builder, S, T board.Table, selS, selT expr.Expr
 // together with its multiplicity columns, counted on the raw tuples. It returns
 // the multiplicity base name. selS and selT may be nil (all selectors 1).
 func stageLookup(builder *board.Builder, selS, selT []expr.Expr, S, T []board.Table) (string, error) {
-	mult, err := constants.RandomString(10)
-	if err != nil {
-		return "", err
-	}
-	mult = fmt.Sprintf("Mult_%s", mult)
+	mult := builder.FreshName("Mult_")
 
 	for _, tables := range [][]board.Table{S, T} {
 		for _, t := range tables {
@@ -219,11 +215,7 @@ func AddLogupColumnsWithMaxDegree(builder *board.Builder, prefix string, terms [
 			for n < min(MaxLogupBatch, len(terms)) && board.LogupConstraintDegree(terms[:n+1]) <= limit {
 				n++
 			}
-			base, err := constants.RandomString(10)
-			if err != nil {
-				return nil, err
-			}
-			name := constants.LogupChunkName(fmt.Sprintf("%s.%s%s", module, prefix, base), 0)
+			name := constants.LogupChunkName(builder.FreshName(fmt.Sprintf("%s.%s", module, prefix)), 0)
 			total, err := builder.AddCyclicLogupStep(board.RoundRunningSums, module, terms[:n], name)
 			if err != nil {
 				return nil, fmt.Errorf("module %s: %w", module, err)

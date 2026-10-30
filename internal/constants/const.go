@@ -15,9 +15,7 @@
 package constants
 
 import (
-	"crypto/rand"
 	"fmt"
-	"math/big"
 	"strconv"
 	"strings"
 )
@@ -41,23 +39,6 @@ const MODULE_SIZES_DOMAIN_TAG uint64 = 0x53495a45 // "SIZE"
 const SUFFIX_SHIFT_SPLIT = "_"
 const SUFFIX_SHIFT = "shift"
 const LOGUP = "logup"
-const SIZE_RANDOM_STRING = 10 // size of the names randomly created for the intermediate columns issued with prover actions
-
-const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-
-func RandomString(n int) (string, error) {
-	result := make([]byte, n)
-
-	for i := range result {
-		num, err := rand.Int(rand.Reader, big.NewInt(int64(len(letters))))
-		if err != nil {
-			return "", err
-		}
-		result[i] = letters[num.Int64()]
-	}
-
-	return string(result), nil
-}
 
 func RangeModuleName(bound uint64) string {
 	return fmt.Sprintf("%s_%d", RANGE_MODULE, bound)

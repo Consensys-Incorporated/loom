@@ -15,6 +15,8 @@ package recursion
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 
 	"github.com/consensys/gnark-crypto/field/koalabear"
@@ -145,7 +147,10 @@ func (v *Verifier) buildSizes(dynamic map[string]bool) error {
 	sort.Strings(names)
 
 	v.sizes = map[string]moduleSize{}
-	for name, mod := range v.program.Modules {
+	// in name order: a fixed module's size allocates a constant, and the
+	// circuit's layout must not depend on the map's iteration order
+	for _, name := range slices.Sorted(maps.Keys(v.program.Modules)) {
+		mod := v.program.Modules[name]
 		if mod.N > 1<<MaxLogModuleSize {
 			return fmt.Errorf("NewVerifier: module %q has size %d, above 2^%d", name, mod.N, MaxLogModuleSize)
 		}

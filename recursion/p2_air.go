@@ -15,6 +15,8 @@ package recursion
 
 import (
 	"fmt"
+	"maps"
+	"slices"
 
 	"github.com/consensys/gnark-crypto/field/koalabear"
 	"github.com/consensys/gnark-crypto/field/koalabear/poseidon2"
@@ -179,10 +181,13 @@ func combine(m []koalabear.Element, xs []linForm) linForm {
 	return res
 }
 
-// expr renders the form as a fresh expression tree.
+// expr renders the form as a fresh expression tree, its terms in column-name
+// order: the tree, and so the compiled program, must not depend on the map's
+// iteration order.
 func (l linForm) expr() expr.Expr {
 	res := expr.Expr(expr.Const(l.c))
-	for v, c := range l.terms {
+	for _, v := range slices.Sorted(maps.Keys(l.terms)) {
+		c := l.terms[v]
 		if c.IsZero() {
 			continue
 		}

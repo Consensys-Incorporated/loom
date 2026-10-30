@@ -54,6 +54,18 @@ type Builder struct {
 	LogupBus   []LogupBus
 	ProductBus []ProductBus
 	rounds     []builderRound
+	names      int // the names FreshName has given
+}
+
+// FreshName returns a column name unique within the builder: prefix followed
+// by a counter. The arguments name the columns they create with it, so that
+// building the same program twice, with the same calls in the same order,
+// gives the same names, hence the same compiled program and the same
+// verification key (see Describe). prefix must end with a separator such as
+// "_", so that a name cannot be read as another prefix and another counter.
+func (b *Builder) FreshName(prefix string) string {
+	b.names++
+	return fmt.Sprintf("%s%d", prefix, b.names)
 }
 
 func NewBuilder() Builder {

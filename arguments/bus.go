@@ -19,7 +19,6 @@ import (
 	"github.com/consensys/gnark-crypto/field/koalabear"
 	"github.com/consensys/loom/board"
 	"github.com/consensys/loom/expr"
-	"github.com/consensys/loom/internal/constants"
 )
 
 // Bus argues that the messages sent and received balance: every tuple is sent
@@ -127,11 +126,7 @@ func addRunningRatios(builder *board.Builder, num, den []busFactor) ([]string, e
 			if len(cn) == 0 && len(cd) == 0 {
 				return nil, fmt.Errorf("module %s: a bus factor alone exceeds degree %d", module, board.MaxLogupDegree)
 			}
-			base, err := constants.RandomString(10)
-			if err != nil {
-				return nil, err
-			}
-			end, err := builder.AddRunningRatioStep(board.RoundRunningSums, module, cn, cd, fmt.Sprintf("%s.busratio_%s", module, base))
+			end, err := builder.AddRunningRatioStep(board.RoundRunningSums, module, cn, cd, builder.FreshName(fmt.Sprintf("%s.busratio_", module)))
 			if err != nil {
 				return nil, fmt.Errorf("module %s: %w", module, err)
 			}
