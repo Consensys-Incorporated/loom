@@ -13,7 +13,11 @@
 
 package recursion
 
-import "github.com/consensys/loom/board"
+import (
+	"fmt"
+
+	"github.com/consensys/loom/board"
+)
 
 // Setup columns of the stream chip's constant prefix: the selector of a
 // stream's first cell and the constants it must carry.
@@ -84,7 +88,10 @@ func (c streamChip) setup(cs *cols) {
 		return
 	}
 	row := 0
-	for _, pk := range c.m.packs {
+	for i, pk := range c.m.packs {
+		if row >= len(c.m.hints) || c.m.hints[row].addr != pk.stream[0] {
+			panic(fmt.Sprintf("stream chip: pack %d's first cell is not at row %d: the hints are not the Pack streams, in order", i, row))
+		}
 		for k, x := range pk.prefix {
 			cs.setElem(laneName(streamConst, k), row, x)
 		}

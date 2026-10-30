@@ -215,6 +215,16 @@ func (c deepChip) cells() int {
 	return 1
 }
 
+// cellLanes is the number of lanes of each cell the chip commits: all of them
+// for a base row, the six of an E6 value for an Ext row, whose cells read with
+// zero lanes 6 and 7 (every E6 cell has them zero).
+func (c deepChip) cellLanes() int {
+	if c.ext {
+		return 6
+	}
+	return CellWidth
+}
+
 // extGroups is the number of physical rows n Ext rows take, c.lanes of them
 // per row.
 func (c deepChip) extGroups(n int) int { return (n + c.lanes - 1) / c.lanes }
@@ -263,7 +273,8 @@ func (c deepChip) define(b *board.Builder, bus *Bus) error {
 	// the narrow Ext instance's columns.
 	bus.LimitDegree(c.module, deepDegree)
 	al := e6Cols(c.module, deepAl, 0)
-	x := make([]expr.Expr, c.cells()*CellWidth)
+	w := c.cellLanes()
+	x := make([]expr.Expr, c.cells()*w)
 	for k := range x {
 		x[k] = col(c.module, laneName(deepX, k))
 	}
@@ -284,7 +295,7 @@ func (c deepChip) define(b *board.Builder, bus *Bus) error {
 		if c.ext {
 			// step j adds the E6 value of its own cell
 			for k := range 6 {
-				step[k] = step[k].Add(sel.Mul(x[j*CellWidth+k]))
+				step[k] = step[k].Add(sel.Mul(x[j*w+k]))
 			}
 		} else {
 			step[0] = step[0].Add(sel.Mul(x[j]))
@@ -296,7 +307,7 @@ func (c deepChip) define(b *board.Builder, bus *Bus) error {
 		prev = h
 	}
 	for i := range c.cells() {
-		xs := x[i*CellWidth : (i+1)*CellWidth]
+		xs := x[i*w : (i+1)*w]
 		bus.Read(c.module, setupCol(c.module, laneName(deepAddrX, i)), cellOf(xs...), c.cellActive(i))
 	}
 	bus.Read(c.module, setupCol(c.module, deepAddrAl), cellOf(al...), active)
@@ -361,7 +372,7 @@ func (c deepChip) setup(cs *cols) {
 }
 
 func (c deepChip) trace(cs *cols, r *Run) error {
-	cs.declareLanes(deepX, c.cells()*CellWidth)
+	cs.declareLanes(deepX, c.cells()*c.cellLanes())
 	cs.declareLanes(deepAl, 6)
 	cs.declareLanes(deepHIn, 6)
 	for j := range c.lanes {
@@ -393,8 +404,8 @@ func (c deepChip) trace(cs *cols, r *Run) error {
 					for k := 0; k < per && i+k < len(sg.rows); k++ {
 						dr, j := sg.rows[i+k], c.lanes-1-k
 						x := r.values[dr.Cell]
-						for l := range CellWidth {
-							cs.setElem(laneName(deepX, j*CellWidth+l), row, x[l])
+						for l := range c.cellLanes() {
+							cs.setElem(laneName(deepX, j*c.cellLanes()+l), row, x[l])
 						}
 						var t ext.E6
 						if dr.Sel&1 == 1 {

@@ -355,3 +355,18 @@ func TestChipWidths(t *testing.T) {
 	}
 	logBreakdown(t, p)
 }
+
+// TestPackPrefixLengths checks that every prefixed stream has the same prefix
+// length: the stream chip pins that many lanes on each one's first cell.
+func TestPackPrefixLengths(t *testing.T) {
+	m := &Machine{}
+	a, b := m.Const(ScalarCell(koalabear.NewElement(1))), m.Const(ScalarCell(koalabear.NewElement(2)))
+	m.PackPrefixed([]koalabear.Element{koalabear.NewElement(7), koalabear.NewElement(8)}, []int{a}, []int{KindScalar})
+	m.Pack([]int{b}, []int{KindScalar}) // no prefix: allowed
+	defer func() {
+		if recover() == nil {
+			t.Fatal("a prefix of another length was accepted")
+		}
+	}()
+	m.PackPrefixed([]koalabear.Element{koalabear.NewElement(9)}, []int{b}, []int{KindScalar})
+}

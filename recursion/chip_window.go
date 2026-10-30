@@ -74,6 +74,12 @@ func (m *Machine) PackPrefixed(prefix []koalabear.Element, items, kinds []int) (
 	if len(prefix) > CellWidth {
 		panic(fmt.Sprintf("Pack: a prefix of %d elements", len(prefix)))
 	}
+	// The stream chip pins packPrefix() lanes on every prefixed stream's first
+	// cell, so all the non-empty prefixes must have that length: a shorter one
+	// would have its first item's lanes pinned to zero.
+	if n := m.packPrefix(); len(prefix) > 0 && n > 0 && len(prefix) != n {
+		panic(fmt.Sprintf("PackPrefixed: a prefix of %d elements, the others have %d", len(prefix), n))
+	}
 	length := len(prefix)
 	for _, k := range kinds {
 		checkKind(k)
